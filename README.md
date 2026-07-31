@@ -1,37 +1,63 @@
 # code-review
 
-An agentic code-review/gating pipeline: detect the intent behind a change, review it for
-correctness and risk, check test sufficiency, and open a PR with evidence - with a human approval gate
-whenever an agent isn't confident enough to act alone.
+An agentic code-review and gating pipeline for your own changes. It reads a diff, works out
+what the change was meant to do, reviews it for correctness and risk, checks the tests are
+good enough to catch a regression, and opens a PR with that evidence attached — stopping to
+ask a human whenever an agent isn't confident enough to act alone.
 
-This is not a port. It borrows the design lessons from studying that Go tool (see
-[`docs/ROADMAP.md`](docs/ROADMAP.md)) but is being built step by step, in Python, so the
-control flow is fully understood at every stage rather than inherited as a black box.
+**Status:** early. The package scaffold, CLI entry point, and tooling exist; the pipeline
+logic does not. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the build order,
+[`docs/GLOSSARY.md`](docs/GLOSSARY.md) for what the terminology means, and
+[`AGENTS.md`](AGENTS.md) for the milestone currently in progress.
 
-**Status:** scaffold only. No pipeline logic exists yet — see `docs/ROADMAP.md` for the
-milestone plan and `AGENTS.md` for the current milestone.
+## What it aims to do
 
-## Quick start
+Five things, in this order:
+
+1. **Intent** — establish what the change was supposed to achieve, from an explicit
+   `--intent` description (inferring it from context comes later).
+2. **Review** — a structured pass over the full diff for correctness and alignment with
+   that intent, producing findings rather than prose.
+3. **Risk** — a required risk level and rationale on the same schema as the review, so a
+   review can't come back without one.
+4. **Test sufficiency** — decide whether existing tests would catch a regression here,
+   and if not, say what's missing.
+5. **PR** — open a pull request whose body carries the intent, the risk verdict, and what
+   the pipeline actually checked.
+
+Two properties hold throughout: the step order is fixed in code so nothing can ship
+unreviewed, and anything unclassified defaults to asking a human instead of acting.
+
+## Install and run
+
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
 uv run code-review --help
-uv run pytest
 ```
 
-Or via the Makefile: `make sync`, `make check` (format + lint + test), `make run`.
+## Development
 
-## Repo layout
+```bash
+make sync     # uv sync
+make check    # ruff format + ruff check + mypy + pytest
+make test     # pytest only
+```
+
+Run `make check` before pushing — CI runs the same sequence.
+
+## Layout
 
 ```
 src/code_review/
   cli.py         Typer entry point
-  config.py      trusted-vs-descriptive config split (not built yet)
+  config.py      trusted-vs-descriptive config split
   agent/         Agent abstraction — shells out to a coding-agent CLI (starting with `claude`)
-  pipeline/      Step protocol + executor (fixed step order, fix/approval loop)
+  pipeline/      Step protocol, findings model, and the executor
   steps/         intent, review, test_sufficiency, pr
-  scm/           GitHub (`gh` CLI) wrapper
+  scm/           GitHub wrapper (via the `gh` CLI)
+tests/           mirrors src/code_review/ package-for-package
 ```
 
-See `AGENTS.md` for the harness/contributor conventions and `docs/ROADMAP.md` for the
-build order and the design lessons this project is carrying over.
+Contributor and agent conventions live in [`AGENTS.md`](AGENTS.md).

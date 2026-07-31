@@ -14,6 +14,13 @@ decisions here may diverge where Python idioms or this user's preferences differ
 `docs/ROADMAP.md` for the full build order and the design lessons this project carries
 over from studying a prior Go implementation.
 
+**Read `docs/GLOSSARY.md` before writing code, issues, or docs here.** It is the domain
+vocabulary: what an Agent, a backend, a step, a finding, a park, and a deterministic
+fallback are, plus the four words this repo overloads (`agent`, `fallback`, `review`,
+`gate`). Use those terms as defined rather than coining synonyms, and when a term's
+meaning changes, edit the glossary in the same commit. It owns what words mean;
+`docs/ROADMAP.md` owns why the design is that way.
+
 ## Repo layout map
 
 - `src/code_review/cli.py` — Typer entry point (`code-review` command).
@@ -25,7 +32,6 @@ over from studying a prior Go implementation.
 - `src/code_review/steps/` — the actual pipeline steps: intent, review, test_sufficiency, pr.
 - `src/code_review/scm/` — SCM host wrapper (GitHub via the `gh` CLI).
 - `tests/` — mirrors `src/code_review/` package-for-package.
-- `docs/ROADMAP.md` — build order, module sketch, and carried-over design lessons.
 
 ## Local verification sequence
 
@@ -62,9 +68,34 @@ this list accurate as the invariants actually get implemented.
 
 ## Current milestone
 
-Milestone 0 (scaffold) complete. Milestone 1 (agent adapter) not started. Keep this line
-current — it's exactly the kind of fact this file's living-document policy expects to be
-edited on every session that moves the project forward.
+Milestone 0 (scaffold) complete. Milestone 1 (agent adapter) in progress - tracked as
+GitHub issue #2 (the spec) and its sub-issues #3, #4, #6. Start with #3: it has no
+blockers and the other two are blocked by it. Keep this line current - it's exactly the
+kind of fact this file's living-document policy expects to be edited on every session that
+moves the project forward.
+
+## Issue tracking
+
+Work is tracked as GitHub issues, one parent per milestone with the tasks as sub-issues,
+and `blocked by` relationships for real ordering constraints. Requires `gh` >= 2.94.0 for
+the `--parent` / `--blocked-by` flags.
+
+**How issues get written**: a milestone parent is a spec in PRD form, written with
+`/to-specs` - problem statement, solution, user stories, implementation decisions, testing
+decisions, out of scope. Its sub-issues are broken out with `/to-tickets` and are
+**vertical tracer bullets**: each cuts a narrow but complete path through every layer and
+is demoable on its own. Never slice a milestone by layer (protocol, then parser, then
+adapter) - that shape leaves nothing verifiable until the last piece lands, which is why
+the original milestone-1 breakdown was rewritten.
+
+Sub-issues carry the `ready-for-agent` label and follow one template: **Parent**, **What to
+build** (end-to-end behaviour, not a layer-by-layer list), **Acceptance criteria** as a
+checklist, **Blocked by**. Keep file paths and code snippets out of issue bodies; they go
+stale faster than the issue closes.
+
+**One owner per fact**: `docs/ROADMAP.md` owns the design and rationale (durable); issues
+own status and sequencing (mutable). Issue bodies link to the roadmap rather than
+restating it - don't duplicate, or the two will drift.
 
 ## Living document policy
 
