@@ -9,11 +9,17 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      # Check out the repository code so the workflow can run against this commit.
+      - uses: actions/checkout@v7
+      # Install uv and enable its cache so dependency setup is fast and repeatable.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
+      # Sync the project environment from the lockfile and pyproject metadata.
       - run: uv sync
+      # Run the linter to catch style and static-analysis issues.
       - run: uv run ruff check .
+      # Run type checking across the source tree.
       - run: uv run mypy src
+      # Execute the test suite.
       - run: uv run pytest
