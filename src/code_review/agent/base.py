@@ -1,7 +1,61 @@
-"""Agent protocol, RunOpts, and Result — Milestone 1 (see docs/ROADMAP.md).
+"""Backend-agnostic contract for one Agent call."""
 
-Planned shape: an `Agent` Protocol/ABC with `run(opts: RunOpts) -> Result` and `close()`.
-`RunOpts` carries prompt/cwd/json-schema/session; `Result` carries output/text/usage with
-`Optional[...]` fields meaning "not reported," never a fabricated zero. Every pipeline
-step is written only against this abstraction, never against a specific backend.
-"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Generic, Protocol, TypeVar
+
+from pydantic import BaseModel
+
+OutputT = TypeVar("OutputT", bound=BaseModel)
+
+
+@dataclass(frozen=True, slots=True)
+class RunOpts(Generic[OutputT]):
+    """Everything a backend needs to perform one isolated Agent call."""
+
+    prompt: str  # sent over stdin, never argv, to avoid per-argument size limits
+    cwd: Path  # working directory the backend subprocess runs in
+    # pydantic model the answer must validate against
+    output_schema: type[OutputT]
+    # subprocess test seam; swap for a fake CLI in tests
+    executable: str | Path = "claude"
+    model: str = "sonnet"  # backend model alias/name for this call
+    # replaces the backend's default system prompt when set
+    system_prompt: str | None = None
+    # adds instructions, keeps the default; prefer this
+    append_system_prompt: str | None = None
+    # fail-closed: empty means no tools are approved
+    tools_allowlist: tuple[str, ...] = ()
+    permission_mode: str = "auto"  # only takes effect when tools_allowlist is non-empty
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """Usage values reported by a backend; ``None`` always means unknown."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_cost_usd: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Result(Generic[OutputT]):
+    """A schema-validated answer together with the backend's original response."""
+
+    output: OutputT
+    text: str
+    usage: Usage | None = None
+
+
+class Agent(Protocol):
+    """One call in, one result out, plus teardown."""
+
+    async def run(self, opts: RunOpts[OutputT]) -> Result[OutputT]:
+        """Run one prompt and validate its answer against ``opts.output_schema``."""
+        ...
+
+    async def close(self) -> None:
+        """Release resources owned by this Agent."""
+        ...
