@@ -1,8 +1,7 @@
 # code-review
 
-A personal, from-scratch Python rebuild of a [no-mistakes](../no-mistakes)-style agentic
-code-review/gating pipeline: detect the intent behind a change, review it for correctness
-and risk, check test sufficiency, and open a PR with evidence — with a human approval gate
+An agentic code-review/gating pipeline: detect the intent behind a change, review it for
+correctness and risk, check test sufficiency, and open a PR with evidence - with a human approval gate
 whenever an agent isn't confident enough to act alone.
 
 This is not a port. It borrows the design lessons from studying that Go tool (see
