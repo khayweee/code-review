@@ -91,6 +91,12 @@ def test_missing_usage_remains_unknown(tmp_path: Path) -> None:
     assert usage is None
 
 
+def test_zero_usage_is_distinguished_from_missing_usage(tmp_path: Path) -> None:
+    _, _, usage = run_fake("zero usage", tmp_path)
+
+    assert usage == Usage(input_tokens=0, output_tokens=0, total_cost_usd=0.0)
+
+
 def test_large_prompt_is_sent_over_stdin(tmp_path: Path) -> None:
     prompt = "x" * 200_000
 

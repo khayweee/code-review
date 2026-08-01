@@ -44,7 +44,10 @@ def build_response(prompt: str) -> dict[str, object]:
             "dangerously_skip_permissions": "--dangerously-skip-permissions" in sys.argv,
         }
     }
-    if prompt != "omit usage":
+    if prompt == "zero usage":
+        response["usage"] = {"input_tokens": 0, "output_tokens": 0}
+        response["total_cost_usd"] = 0.0
+    elif prompt != "omit usage":
         response["usage"] = {"input_tokens": 12, "output_tokens": 4}
         response["total_cost_usd"] = 0.25
     return response
