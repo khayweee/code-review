@@ -1,4 +1,16 @@
-"""Subprocess adapter for non-interactive Claude CLI calls."""
+"""Subprocess adapter for non-interactive Claude CLI calls.
+
+- Runs each Agent call in a fresh, non-interactive ``claude -p`` process.
+- Sends the prompt over stdin and reads a structured JSON envelope back from stdout.
+- Builds CLI args from ``RunOpts``: model, system prompt (replace or append), schema, and
+  a tools allowlist or the default permission-skipping mode.
+- Spawns the child in its own process group (session leader) so its PID doubles as the
+  whole group's PGID, then hands teardown to ``process_group.terminate_process_group``
+  (shared, backend-agnostic) so no descendant survives a call on any exit path.
+- Raises one of four distinct errors (``ProcessStartError``, ``ProcessExitError``,
+  ``NoStructuredOutputError``, ``OutputValidationError``) so callers can tell which stage
+  failed.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +19,7 @@ import json
 
 from code_review.agent.base import OutputT, Result, RunOpts, Usage
 from code_review.agent.errors import NoStructuredOutputError, ProcessExitError, ProcessStartError
+from code_review.agent.process_group import terminate_process_group
 from code_review.agent.schema import JsonValue, extract_json, validate_output
 
 
@@ -52,7 +65,15 @@ class ClaudeCLI:
         except OSError as exc:
             raise ProcessStartError(str(opts.executable), exc) from exc
 
-        stdout, stderr = await process.communicate(opts.prompt.encode("utf-8"))
+        try:
+            stdout, stderr = await process.communicate(opts.prompt.encode("utf-8"))
+        finally:
+            # Runs on every exit path - success, non-zero exit, a parse/validation
+            # failure raised further down, and cancellation of this coroutine - so no
+            # descendant the subprocess started is still running afterward. The process
+            # group persists as long as any member is alive, regardless of whether the
+            # direct child (the group leader) has already exited.
+            await terminate_process_group(process)
         text = stdout.decode("utf-8")
 
         returncode = process.returncode
