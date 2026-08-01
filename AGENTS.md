@@ -29,7 +29,8 @@ meaning changes, edit the glossary in the same commit. It owns what words mean;
   (starting with `claude`), one call in / one result out.
 - `src/code_review/pipeline/` — `Step` protocol, `StepContext`/`StepOutcome`, and the
   executor (fixed step order; fix/approval loop added later).
-- `src/code_review/steps/` — the actual pipeline steps: intent, review, test_sufficiency, pr.
+- `src/code_review/steps/` — the actual pipeline steps: intent, rebase, review,
+  test_sufficiency, pr.
 - `src/code_review/scm/` — SCM host wrapper (GitHub via the `gh` CLI).
 - `tests/` — mirrors `src/code_review/` package-for-package.
 
@@ -74,11 +75,22 @@ done - sub-issues #3 (round trip) and #4 (chatty-output tolerance) are merged to
 `feature/6-process-cleanup` but not yet merged despite the issue being closed - reconcile
 that (merge or reopen) before treating #2 as closeable.
 
-Milestone 2 (linear step runner, parent issue #12) is complete: #13 (Step/StepContext/
-StepOutcome round trip) and #14 (fixed multi-step order via `run_steps`) are both
-implemented. Scope was deliberately narrower than the full orchestration core in
+Milestone 2 (linear step runner, parent issue #12) is closed: #13 (Step/StepContext/
+StepOutcome round trip) and #14 (fixed multi-step order via `run_steps`) are both merged.
+Scope was deliberately narrower than the full orchestration core in
 `no-mistakes/learning/02-orchestration-core-and-state-machine.md`: the auto-fix/approval
-state machine is Milestone 6 and head continuity is Milestone 8, both out of scope for #12.
+state machine is Milestone 7 and head continuity is Milestone 9, both out of scope for #12.
+
+Milestone 3 (`src/code_review/steps/intent.py`, explicit-only intent) is specced as #17,
+sliced into #18 (sanitize-and-wrap: `Intent` shape, secret redaction, adversarial-delimiter
+stripping - no blockers) and #19 (wire `--intent` into `StepContext`/`IntentStep` -
+blocked by #18). Start with #18.
+
+Milestone 4 (`src/code_review/steps/rebase.py`, sync onto latest default branch before
+Review) was missing from the roadmap entirely until this was caught by comparing against
+`no-mistakes`'s fixed step order (`internal/pipeline/steps/common.go`) - see
+`docs/ROADMAP.md` milestone 4. Not yet specced as an issue; do that when Milestone 3 closes
+and this becomes the next milestone up.
 
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.
