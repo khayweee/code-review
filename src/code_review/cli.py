@@ -10,15 +10,69 @@ threaded through the same immutable `StepContext` every step receives. Wiring
 `run_steps`/`StepContext` construction into this command is out of scope for #19 (see
 issue #17's Out of Scope list) -- `review` still raises `NotImplementedError` after intent
 validation.
+
+Milestone 12 (issues #31-#33) adds `update` and `uninstall` alongside `review`, so the
+full install lifecycle is discoverable via `code-review --help` once installed (see
+`scripts/install.sh` for first-time install). Both shell out to `uv tool
+upgrade`/`uv tool uninstall` for this package -- no dependency resolution, virtual
+environment management, or binary replacement is reimplemented here; `uv` already owns
+all of that.
 """
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
+
 import typer
 
+from code_review.install_state import state_dir
 from code_review.steps.intent import Intent
 
 app = typer.Typer(help="Agentic code-review/gating pipeline.")
+
+PACKAGE_NAME = "code-review"
+
+_UV_NOT_FOUND_MESSAGE = (
+    "error: 'uv' is not installed or not on PATH.\n"
+    "code-review is managed via uv -- install it first, then retry:\n"
+    "  https://docs.astral.sh/uv/getting-started/installation/"
+)
+
+# Matches uv's own "+ code-review==<version> (from <source>[@<git-rev>])" line, printed
+# for both a fresh reinstall and a real version bump -- the same shape either way.
+_UPGRADE_LINE = re.compile(
+    rf"^\s*\+\s*{re.escape(PACKAGE_NAME)}==(?P<version>\S+)"
+    rf"(?:\s*\(from .*?@(?P<rev>[0-9a-f]{{7,40}})\))?",
+    re.MULTILINE,
+)
+
+
+def _require_uv() -> str:
+    uv = shutil.which("uv")
+    if uv is None:
+        typer.echo(_UV_NOT_FOUND_MESSAGE, err=True)
+        raise typer.Exit(code=1)
+    return uv
+
+
+def _describe_upgrade(stderr: str) -> str:
+    """Turn `uv tool upgrade`'s stderr into a clear, specific one-line report."""
+    if "Nothing to upgrade" in stderr:
+        return f"{PACKAGE_NAME} is already up to date."
+
+    match = _UPGRADE_LINE.search(stderr)
+    if match is None:
+        # `uv` reported success but not in the shape this parses -- still don't claim
+        # nothing happened, since the command's own exit code says it succeeded.
+        return f"{PACKAGE_NAME} was upgraded."
+
+    version = match.group("version")
+    rev = match.group("rev")
+    if rev:
+        return f"{PACKAGE_NAME} upgraded to {version} ({rev[:12]})."
+    return f"{PACKAGE_NAME} upgraded to {version}."
 
 
 @app.command()
@@ -40,6 +94,44 @@ def review(
     raise NotImplementedError(
         "review pipeline not implemented yet — see docs/ROADMAP.md milestones 1-7"
     )
+
+
+@app.command()
+def update() -> None:
+    """Upgrade the installed code-review tool to the latest version via `uv tool upgrade`."""
+    uv = _require_uv()
+
+    result = subprocess.run(
+        [uv, "tool", "upgrade", PACKAGE_NAME],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        typer.echo(f"code-review update failed: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=result.returncode)
+
+    typer.echo(_describe_upgrade(result.stderr))
+
+
+@app.command()
+def uninstall() -> None:
+    """Remove the code-review tool and this project's own state directory."""
+    uv = _require_uv()
+
+    result = subprocess.run(
+        [uv, "tool", "uninstall", PACKAGE_NAME],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        typer.echo(f"code-review uninstall failed: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=result.returncode)
+
+    directory = state_dir()
+    if directory.exists():
+        shutil.rmtree(directory)
+
+    typer.echo(f"{PACKAGE_NAME} has been uninstalled, including its state directory.")
 
 
 if __name__ == "__main__":
