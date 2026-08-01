@@ -18,7 +18,10 @@ on the milestones before it.
 2. **Linear step runner** (`src/code_review/pipeline/step.py`, `executor.py`). A
    `list[Step]`, a `for step in steps: step.run(ctx)` loop. No auto-fix, no approval gates
    yet — just prove one prompt → one schema-validated response → one recorded outcome, on
-   a real diff.
+   a real diff. Outcomes live in memory for the run's duration; no database and no
+   resume-after-crash machinery. This is not an oversight — see
+   [`GATE-MODEL.md`](GATE-MODEL.md) for why the Go tool's SQLite-backed run-state machine
+   exists to serve its daemon, and is cut here along with that daemon.
 3. **Intent, explicit-only** (`src/code_review/steps/intent.py`). Require `--intent` on
    the CLI; skip transcript inference for now. Write the sanitize-and-wrap function once,
    reuse it everywhere the intent text gets embedded in a prompt.
