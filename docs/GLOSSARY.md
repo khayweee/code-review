@@ -18,9 +18,10 @@ code-review review <branch> --intent "..."
         |
         v
    Executor  ---- runs Steps in a fixed, hard-coded order ---->  Intent
-        |                                                        Review
-        | each Step needs an answer                              Test sufficiency
-        v                                                        PR
+        |                                                        Rebase
+        | each Step needs an answer                              Review
+        v                                                        Test sufficiency
+                                                                  PR
       Agent          <- the abstraction: one call in, one result out
         |
         v
@@ -79,8 +80,16 @@ the top of it.
 
 **Step**
 : One unit of pipeline work with a fixed interface: it receives a context describing the
-run, does its job (usually one agent call), and returns an outcome. The four steps are
-intent, review, test sufficiency, and PR.
+run, does its job (usually one agent call), and returns an outcome. The five steps are
+intent, rebase, review, test sufficiency, and PR.
+
+**Rebase step**
+: Syncs the branch onto the latest default branch before Review runs, so later steps never
+answer against a stale diff. A conflict is a blocking finding, not something the step
+resolves on its own — see **fail-safe default**. Narrower than the Go tool's Rebase step by
+design: the fork-remote tracking and force-push detection it needs exist to serve the
+gate's push-interception model (see **gate** under [overloaded words](#words-this-repo-overloads)
+and [`GATE-MODEL.md`](GATE-MODEL.md)), which this project doesn't build.
 
 **Executor**
 : The loop that runs the steps and owns everything *between* them: ordering, whether to
