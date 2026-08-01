@@ -74,9 +74,9 @@ done - sub-issues #3 (round trip) and #4 (chatty-output tolerance) are merged to
 `feature/6-process-cleanup` but not yet merged despite the issue being closed - reconcile
 that (merge or reopen) before treating #2 as closeable.
 
-Milestone 2 (linear step runner) is specced: parent issue #12, sub-issues #13 (Step/
-StepContext/StepOutcome round trip - no blockers, start here) and #14 (fixed multi-step
-order, blocked by #13). Scope is deliberately narrower than the full orchestration core in
+Milestone 2 (linear step runner, parent issue #12) is complete: #13 (Step/StepContext/
+StepOutcome round trip) and #14 (fixed multi-step order via `run_steps`) are both
+implemented. Scope was deliberately narrower than the full orchestration core in
 `no-mistakes/learning/02-orchestration-core-and-state-machine.md`: the auto-fix/approval
 state machine is Milestone 6 and head continuity is Milestone 8, both out of scope for #12.
 
