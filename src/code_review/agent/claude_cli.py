@@ -29,13 +29,16 @@ class ClaudeCLI:
         if opts.append_system_prompt is not None:
             args += ["--append-system-prompt", opts.append_system_prompt]
         if opts.tools_allowlist:
-            # permission_mode only matters once there's an allowlist for it to gate.
-            args += [
-                "--allowedTools",
-                *opts.tools_allowlist,
-                "--permission-mode",
-                opts.permission_mode,
-            ]
+            # A scoped allowlist without an explicit mode still needs a
+            # permission mode for --allowedTools to take effect.
+            args += ["--allowedTools", *opts.tools_allowlist]
+            args += ["--permission-mode", opts.permission_mode or "auto"]
+        elif opts.permission_mode is not None:
+            args += ["--permission-mode", opts.permission_mode]
+        else:
+            # Mirrors no-mistakes' claudeAgent.buildArgs: default to skipping
+            # permission checks entirely unless the caller pinned a mode.
+            args.append("--dangerously-skip-permissions")
         process = await asyncio.create_subprocess_exec(
             *args,
             cwd=opts.cwd,

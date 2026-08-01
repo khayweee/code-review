@@ -17,12 +17,14 @@ conventions.
   unwrap their own transport envelope, but must not grow a private response parser.
 - Retry (same backend, transient failure) and backend fallback (different backend,
   unavailability) remain separate mechanisms and are both out of scope for this package.
-- `RunOpts.tools_allowlist` defaults to empty, meaning no tools are approved for the
-  `claude` subprocess (`-p` mode never prompts, so an unlisted tool is always denied).
-  When non-empty, `RunOpts.permission_mode` (default `"auto"`) is sent alongside
-  `--allowedTools` so the allowlist actually takes effect; it's a no-op without an
-  allowlist. Keep the empty-allowlist default fail-closed; do not widen it to
-  allow tools implicitly.
+- `RunOpts.permission_mode` defaults to `None`, meaning the caller has not pinned a
+  mode. With no `tools_allowlist` and no pinned mode, the backend appends
+  `--dangerously-skip-permissions`, mirroring no-mistakes' `claudeAgent.buildArgs`
+  opt-out pattern: skip permission checks by default, back off only when the caller
+  asked for something specific. Setting `permission_mode` explicitly opts out of that
+  default. A non-empty `tools_allowlist` instead sends `--allowedTools` plus
+  `--permission-mode` (`permission_mode` or `"auto"`), scoping the call to that list
+  instead of skipping permissions entirely.
 - Prefer `RunOpts.append_system_prompt` for step instructions (e.g. "classify this
   diff's risk"). It layers on top of Claude's default system prompt. `system_prompt`
   discards that default entirely and should only be used when a step needs full control
