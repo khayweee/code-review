@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from code_review.agent.base import OutputT, Result, RunOpts, Usage
+from code_review.agent.errors import NoStructuredOutputError, ProcessExitError, ProcessStartError
 from code_review.agent.schema import JsonValue, extract_json, validate_output
 
 
@@ -39,34 +40,40 @@ class ClaudeCLI:
             # Mirrors no-mistakes' claudeAgent.buildArgs: default to skipping
             # permission checks entirely unless the caller pinned a mode.
             args.append("--dangerously-skip-permissions")
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=opts.cwd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=opts.cwd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise ProcessStartError(str(opts.executable), exc) from exc
+
         stdout, stderr = await process.communicate(opts.prompt.encode("utf-8"))
         text = stdout.decode("utf-8")
 
-        if process.returncode != 0:
-            error_text = stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"Claude CLI exited with status {process.returncode}: {error_text}")
+        returncode = process.returncode
+        assert returncode is not None  # communicate() only returns after the process exits
+        if returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+            raise ProcessExitError(returncode, stderr_text)
 
         response = extract_json(text)
-        output = validate_output(_structured_output(response), opts.output_schema)
+        output = validate_output(_structured_output(response, text), opts.output_schema)
         return Result(output=output, text=text, usage=_usage_from(response))
 
     async def close(self) -> None:
         """The per-call adapter owns no resources between calls."""
 
 
-def _structured_output(response: JsonValue) -> JsonValue:
+def _structured_output(response: JsonValue, text: str) -> JsonValue:
     """Bridge Claude's JSON envelope to the backend-agnostic output schema."""
 
     if not isinstance(response, dict) or "structured_output" not in response:
-        raise ValueError("Claude CLI response did not contain structured_output")
+        raise NoStructuredOutputError(text)
     return response["structured_output"]
 
 
