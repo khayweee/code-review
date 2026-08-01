@@ -61,6 +61,17 @@ on the milestones before it.
 11. **v2 extras**: session reuse across pipeline rounds, transcript-based intent
     inference, multi-backend fallback. Real efficiency/UX improvements, but nothing in
     milestones 1-8 requires them.
+12. **Install, update, uninstall** (`scripts/install.sh`, `src/code_review/install_state.py`,
+    `cli.py`'s `update`/`uninstall` commands). Orthogonal to pipeline progress — doesn't
+    touch `pipeline/`, `steps/`, or `scm/`, so it can land in any order relative to
+    milestones 4-11. Delegates all packaging work to `uv tool install`/`upgrade`/
+    `uninstall` (this project's already-chosen packaging tool) rather than reimplementing
+    venv management or binary replacement the way a Go binary distribution (`no-mistakes`)
+    has to. Deliberately excludes a background daemon/service — `no-mistakes`' daemon
+    exists to serve its sub-second git-push-gate response and to keep slow-cold-start
+    agent backends warm, neither of which applies here yet (see [`GATE-MODEL.md`](GATE-MODEL.md));
+    revisit once a real async trigger exists. Also excludes automated version-bumping —
+    the version stays manually set until this milestone's own release story matures.
 
 ## Module sketch
 
@@ -83,7 +94,10 @@ src/code_review/
   scm/
     github.py           # `gh` CLI wrapper
   config.py             # trusted-vs-descriptive split
-  cli.py                # entry point: `code-review review <branch> --intent "..."`
+  cli.py                # entry point: `review`, `update`, `uninstall`
+  install_state.py       # install-lifecycle state directory (~/.code-review)
+scripts/
+  install.sh             # one-shot install script (`uv tool install` under the hood)
 ```
 
 ## Five goals → what to imitate first

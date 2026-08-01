@@ -32,6 +32,24 @@ unreviewed, and anything unclassified defaults to asking a human instead of acti
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
+**To install `code-review` onto your `PATH`** (no clone required -- the script fetches
+the package directly via `uv tool install`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/khayweee/code-review/main/scripts/install.sh | sh
+```
+
+The script checks that `uv` is callable first and fails with an actionable message if it
+isn't. It's safe to re-run at any time (idempotent reinstall). Once installed:
+
+```bash
+code-review --help
+code-review update      # pull in the latest version
+code-review uninstall   # remove the tool and its state directory
+```
+
+**To work on this repo instead**, clone it and run via `uv`:
+
 ```bash
 uv sync
 uv run code-review --help
@@ -51,13 +69,16 @@ Run `make check` before pushing — CI runs the same sequence.
 
 ```
 src/code_review/
-  cli.py         Typer entry point
-  config.py      trusted-vs-descriptive config split
-  agent/         Agent abstraction — shells out to a coding-agent CLI (starting with `claude`)
-  pipeline/      Step protocol, findings model, and the executor
-  steps/         intent, review, test_sufficiency, pr
-  scm/           GitHub wrapper (via the `gh` CLI)
-tests/           mirrors src/code_review/ package-for-package
+  cli.py           Typer entry point (`review`, `update`, `uninstall`)
+  config.py        trusted-vs-descriptive config split
+  install_state.py install-lifecycle state directory (`~/.code-review`)
+  agent/           Agent abstraction — shells out to a coding-agent CLI (starting with `claude`)
+  pipeline/        Step protocol, findings model, and the executor
+  steps/           intent, review, test_sufficiency, pr
+  scm/             GitHub wrapper (via the `gh` CLI)
+scripts/
+  install.sh       one-shot install script (`uv tool install` under the hood)
+tests/             mirrors src/code_review/ package-for-package
 ```
 
 Contributor and agent conventions live in [`AGENTS.md`](AGENTS.md).

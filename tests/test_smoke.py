@@ -31,17 +31,16 @@ def test_cli_help() -> None:
 
 
 def test_review_command_not_implemented_yet() -> None:
-    # `review` is Typer's single-command collapse: with only one command registered,
-    # the app *is* that command, so the branch positional goes straight after the
-    # program name -- no `review` subcommand token in the invocation (see `--help`'s
-    # "Usage: code-review [OPTIONS] {branch}").
-    result = runner.invoke(app, ["some-branch", "--intent", "test"])
+    # Milestone 12 (issues #31-#33) added `update`/`uninstall` alongside `review`, so
+    # Typer's single-command collapse no longer applies -- `review` must now be named
+    # explicitly as a subcommand (see `--help`'s "Usage: code-review [OPTIONS] COMMAND").
+    result = runner.invoke(app, ["review", "some-branch", "--intent", "test"])
     assert result.exit_code != 0
     assert isinstance(result.exception, NotImplementedError)
 
 
 def test_review_command_rejects_empty_intent_before_constructing_anything() -> None:
-    result = runner.invoke(app, ["some-branch", "--intent", ""])
+    result = runner.invoke(app, ["review", "some-branch", "--intent", ""])
     output = _plain(result.output)
 
     assert result.exit_code == 2  # Typer's BadParameter exit code
@@ -50,7 +49,7 @@ def test_review_command_rejects_empty_intent_before_constructing_anything() -> N
 
 
 def test_review_command_rejects_whitespace_only_intent_before_constructing_anything() -> None:
-    result = runner.invoke(app, ["some-branch", "--intent", "   "])
+    result = runner.invoke(app, ["review", "some-branch", "--intent", "   "])
     output = _plain(result.output)
 
     assert result.exit_code == 2  # Typer's BadParameter exit code

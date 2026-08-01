@@ -94,6 +94,13 @@ Review) was missing from the roadmap entirely until this was caught by comparing
 `docs/ROADMAP.md` milestone 4. Not yet specced as an issue; do that when Milestone 3 closes
 and this becomes the next milestone up.
 
+Milestone 12 (`scripts/install.sh`, `src/code_review/install_state.py`, `cli.py`'s
+`update`/`uninstall` commands - orthogonal to pipeline progress, see `docs/ROADMAP.md`
+milestone 12) is specced as #30, sliced into #31 (install via `uv tool install`), #32
+(update, blocked by #31), and #33 (uninstall, blocked by #31). Implemented on PR #34,
+pending review/merge. Deliberately excludes a background daemon (tracked in #29) and
+automated version-bumping (tracked in #28) as separate future-work issues.
+
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.
 
