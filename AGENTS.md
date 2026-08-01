@@ -100,6 +100,19 @@ stale faster than the issue closes.
 own status and sequencing (mutable). Issue bodies link to the roadmap rather than
 restating it - don't duplicate, or the two will drift.
 
+## Branch and commit naming
+
+Branches follow `<category>/<issue-number>-<short-description>` (e.g.
+`feature/12-agent-retry`, `bugfix/34-timeout-crash`) - lowercase, hyphen-separated, no
+author names. Use the `/create-gh-branch` skill to create one; it covers the full category
+list and how to link the branch to its GitHub issue via `gh issue develop` so merging the
+PR auto-closes the issue (see Issue tracking above).
+
+Commit messages follow Conventional Commits: `<type>(<scope>): <summary>` (e.g.
+`feat(agent): survive chatty agent output`), matching this repo's existing history.
+`<type>` mirrors the branch category (`feature`→`feat`, `bugfix`/`hotfix`→`fix`, `docs`,
+`refactor`, `test`, `chore`).
+
 ## Living document policy
 
 All AGENTS.md files are live: any chat session, user correction, or agent correction
