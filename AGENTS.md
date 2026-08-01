@@ -68,14 +68,20 @@ this list accurate as the invariants actually get implemented.
 
 ## Current milestone
 
-Milestone 0 (scaffold) complete. Milestone 1 (agent adapter) in progress - tracked as
-GitHub issue #2 (the spec) and its sub-issues #3, #4, #6. Issue #3 (the round trip) is
-merged to main; #4 (chatty-output tolerance, distinct error types) is implemented on
-branch `4-survive-chatty-agent-output-and-name-the-failure-modes`, pending PR/merge; #6
+Milestone 0 (scaffold) complete. Milestone 1 (agent adapter, issue #2) is functionally
+done - sub-issues #3 (round trip) and #4 (chatty-output tolerance) are merged to main; #6
 (process-group cleanup on cancellation) is implemented on branch
-`feature/6-process-cleanup`, pending PR/merge. Keep this line current - it's exactly the
-kind of fact this file's living-document policy expects to be edited on every session
-that moves the project forward.
+`feature/6-process-cleanup` but not yet merged despite the issue being closed - reconcile
+that (merge or reopen) before treating #2 as closeable.
+
+Milestone 2 (linear step runner) is specced: parent issue #12, sub-issues #13 (Step/
+StepContext/StepOutcome round trip - no blockers, start here) and #14 (fixed multi-step
+order, blocked by #13). Scope is deliberately narrower than the full orchestration core in
+`no-mistakes/learning/02-orchestration-core-and-state-machine.md`: the auto-fix/approval
+state machine is Milestone 6 and head continuity is Milestone 8, both out of scope for #12.
+
+Keep this line current - it's exactly the kind of fact this file's living-document policy
+expects to be edited on every session that moves the project forward.
 
 ## Issue tracking
 
