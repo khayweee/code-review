@@ -7,10 +7,20 @@ conventions.
   don't replace this with mocks of `asyncio.create_subprocess_exec`.
 - Send prompts through stdin, never argv. Full-diff prompts can exceed the platform's
   per-argument size limit before the subprocess starts.
-- Every subprocess starts a new session so its PID is also its process-group ID.
-  https://github.com/khayweee/code-review/issues/6 (cancellation must leave no surviving
-  processes) will add group-wide cleanup on every exit path; do not regress the spawn
-  invariant while that cleanup is pending.
+- Every subprocess starts a new session so its PID is also its process-group ID. Do not
+  regress this invariant - it's what lets `process_group.terminate_process_group` signal
+  the whole group, not just the direct child.
+- Process-group teardown lives in `process_group.py`, not the adapter, for the same
+  reason structured-output extraction lives in `schema.py`: it's backend-agnostic, so a
+  second backend inherits the same cancellation-safety guarantee instead of growing its
+  own kill logic. https://github.com/khayweee/code-review/issues/6 (cancellation must
+  leave no surviving processes) is implemented there: `terminate_process_group` sends
+  SIGTERM to the process group, polls a bounded deadline, escalates to SIGKILL if the
+  group is still alive, then reaps the direct child. A backend adapter wraps its
+  subprocess-communication call in `try`/`finally` and awaits
+  `terminate_process_group(process)` in the `finally` - on every exit path (success,
+  non-zero exit, a parse/validation failure, or cancellation), not only the
+  cancellation branch.
 - The Claude CLI's `--output-format json` response is an envelope. Only
   `structured_output` is validated as the caller's schema; usage remains backend metadata.
 - Structured-answer extraction and validation stay in `schema.py`. Backend adapters may

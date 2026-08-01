@@ -72,9 +72,10 @@ Milestone 0 (scaffold) complete. Milestone 1 (agent adapter) in progress - track
 GitHub issue #2 (the spec) and its sub-issues #3, #4, #6. Issue #3 (the round trip) is
 merged to main; #4 (chatty-output tolerance, distinct error types) is implemented on
 branch `4-survive-chatty-agent-output-and-name-the-failure-modes`, pending PR/merge; #6
-(process-group cleanup on cancellation) is unblocked and not yet started. Keep this line
-current - it's exactly the kind of fact this file's living-document policy expects to be
-edited on every session that moves the project forward.
+(process-group cleanup on cancellation) is implemented on branch
+`feature/6-process-cleanup`, pending PR/merge. Keep this line current - it's exactly the
+kind of fact this file's living-document policy expects to be edited on every session
+that moves the project forward.
 
 ## Issue tracking
 
