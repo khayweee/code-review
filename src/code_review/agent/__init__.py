@@ -2,5 +2,23 @@
 
 from code_review.agent.base import Agent, Result, RunOpts, Usage
 from code_review.agent.claude_cli import ClaudeCLI
+from code_review.agent.errors import (
+    AgentError,
+    NoStructuredOutputError,
+    OutputValidationError,
+    ProcessExitError,
+    ProcessStartError,
+)
 
-__all__ = ["Agent", "ClaudeCLI", "Result", "RunOpts", "Usage"]
+__all__ = [
+    "Agent",
+    "AgentError",
+    "ClaudeCLI",
+    "NoStructuredOutputError",
+    "OutputValidationError",
+    "ProcessExitError",
+    "ProcessStartError",
+    "Result",
+    "RunOpts",
+    "Usage",
+]

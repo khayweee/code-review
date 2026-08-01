@@ -15,6 +15,18 @@ conventions.
   `structured_output` is validated as the caller's schema; usage remains backend metadata.
 - Structured-answer extraction and validation stay in `schema.py`. Backend adapters may
   unwrap their own transport envelope, but must not grow a private response parser.
+- `extract_json` tries a fixed, documented order and stops at the first strategy that
+  parses: the whole response as JSON, then a fenced code block, then the last balanced
+  `{...}` span in the text. Don't reorder or add a strategy without updating both the
+  order here and the docstring in `schema.py`.
+- Failures are four distinct types in `errors.py`, not one generic exception, because a
+  step author's remedy differs by which stage broke: `ProcessStartError` (the subprocess
+  never started), `ProcessExitError` (it started but exited non-zero, carries the exit
+  status and captured stderr), `NoStructuredOutputError` (no JSON answer was found
+  anywhere, including a Claude envelope missing `structured_output`), and
+  `OutputValidationError` (a structured answer was found but failed the caller's schema).
+  A backend adapter's envelope-unwrap failures should still raise the shared
+  `NoStructuredOutputError` rather than inventing a backend-local error.
 - Retry (same backend, transient failure) and backend fallback (different backend,
   unavailability) remain separate mechanisms and are both out of scope for this package.
 - `RunOpts.permission_mode` defaults to `None`, meaning the caller has not pinned a
