@@ -69,10 +69,11 @@ this list accurate as the invariants actually get implemented.
 ## Current milestone
 
 Milestone 0 (scaffold) complete. Milestone 1 (agent adapter) in progress - tracked as
-GitHub issue #2 (the spec) and its sub-issues #3, #4, #6. Issue #3 is implemented locally;
-#4 and #6 remain blocked until it lands. Keep this line current - it's exactly the kind of
-fact this file's living-document policy expects to be edited on every session that moves
-the project forward.
+GitHub issue #2 (the spec) and its sub-issues #3, #4, #6. Issue #3 (the round trip) is
+merged to main; #4 (chatty-output tolerance, distinct error types) and #6
+(process-group cleanup on cancellation) are both unblocked and not yet started. Keep
+this line current - it's exactly the kind of fact this file's living-document policy
+expects to be edited on every session that moves the project forward.
 
 ## Issue tracking
 

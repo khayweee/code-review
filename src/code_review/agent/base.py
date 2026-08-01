@@ -26,9 +26,12 @@ class RunOpts(Generic[OutputT]):
     system_prompt: str | None = None
     # adds instructions, keeps the default; prefer this
     append_system_prompt: str | None = None
-    # fail-closed: empty means no tools are approved
+    # scopes permissions to this list via --allowedTools; empty means no scoped list
     tools_allowlist: tuple[str, ...] = ()
-    permission_mode: str = "auto"  # only takes effect when tools_allowlist is non-empty
+    # None: no permission mode pinned by the caller, so the backend defaults to
+    # --dangerously-skip-permissions
+    # Set this to opt out of that default.
+    permission_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
