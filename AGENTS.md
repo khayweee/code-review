@@ -83,8 +83,10 @@ state machine is Milestone 7 and head continuity is Milestone 9, both out of sco
 
 Milestone 3 (`src/code_review/steps/intent.py`, explicit-only intent) is specced as #17,
 sliced into #18 (sanitize-and-wrap: `Intent` shape, secret redaction, adversarial-delimiter
-stripping - no blockers) and #19 (wire `--intent` into `StepContext`/`IntentStep` -
-blocked by #18). Start with #18.
+stripping) - merged to main - and #19 (wire `--intent` into `StepContext`/`IntentStep`,
+`cli.py` validation) - implemented on branch `feature/19-wire-explicit-intent`, pending
+review/merge. Once #19 merges, #17 closes and Milestone 4 becomes the next milestone to
+spec (see below).
 
 Milestone 4 (`src/code_review/steps/rebase.py`, sync onto latest default branch before
 Review) was missing from the roadmap entirely until this was caught by comparing against

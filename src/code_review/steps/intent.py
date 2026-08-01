@@ -22,6 +22,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from re import Match, Pattern
 
+from code_review.pipeline.step import StepContext, StepOutcome
+
 # --- Intent ------------------------------------------------------------------------
 
 
@@ -148,3 +150,34 @@ def wrap_intent(text: str, source: str) -> str:
         f"{cleaned}\n"
         f"{_END_MARKER}"
     )
+
+
+# --- IntentStep ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class IntentStep:
+    """The pipeline's first step: proves `ctx.intent` is what the CLI's `--intent` flag
+    supplied, with no agent call involved.
+
+    `Intent` is fully known before the pipeline starts -- it's a CLI flag, not something
+    discovered mid-run -- so `cli.py` constructs it once and `StepContext` carries it for
+    every step. `IntentStep` therefore does no work of its own: it reports `ctx.intent` as
+    its findings and makes no call through `ctx.agent`. It deliberately does NOT call
+    `wrap_intent` here and does NOT hand wrapped text forward through `StepOutcome` --
+    each downstream step calls `wrap_intent` itself, off `ctx.intent`, at its own prompt
+    site, when its own milestone lands.
+    """
+
+    async def run(self, ctx: StepContext) -> StepOutcome:
+        # The type system already makes `ctx.intent` required; this check is defense in
+        # depth for callers that construct a `StepContext` directly (e.g. tests, or a
+        # future caller) and might bypass that typing.
+        if ctx.intent is None:
+            raise ValueError("StepContext.intent is required but was None")
+
+        return StepOutcome(
+            needs_approval=False,
+            auto_fixable=False,
+            findings=ctx.intent,
+        )

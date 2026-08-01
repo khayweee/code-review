@@ -23,10 +23,16 @@ from pydantic import BaseModel
 
 from code_review.agent import Agent, ClaudeCLI, RunOpts
 from code_review.pipeline import Step, StepContext, StepOutcome, run_steps
+from code_review.steps.intent import Intent, IntentStep
 
 FAKE_CLI = Path(__file__).parent / "fakes" / "review_findings.py"
 ORDER_FAKE_CLI_A = Path(__file__).parent / "fakes" / "order_step_a.py"
 ORDER_FAKE_CLI_B = Path(__file__).parent / "fakes" / "order_step_b.py"
+
+# A stand-in Intent for the tests below that don't exercise IntentStep itself -- Milestone
+# 3 makes `intent` a required StepContext field, so every test constructing a StepContext
+# needs one regardless of whether that test's steps read it.
+_STAND_IN_INTENT = Intent(summary="add retry logic", source="explicit", score=1.0)
 
 
 class ReviewFindings(BaseModel):
@@ -116,7 +122,7 @@ def test_step_round_trips_through_executor_against_real_diff(tmp_path: Path) -> 
     assert "+world" in diff  # sanity: the diff we built is the one the step should see
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff)
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
     step: Step = _ReviewStep()
 
     outcomes = asyncio.run(run_steps([step], ctx))
@@ -143,7 +149,7 @@ def test_executor_runs_steps_in_fixed_list_order_against_real_diff(tmp_path: Pat
     repo, diff = _real_repo_with_diff(tmp_path)
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff)
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
     steps: list[Step] = [_OrderStep(ORDER_FAKE_CLI_A), _OrderStep(ORDER_FAKE_CLI_B)]
 
     outcomes = asyncio.run(run_steps(steps, ctx))
@@ -160,3 +166,50 @@ def test_executor_runs_steps_in_fixed_list_order_against_real_diff(tmp_path: Pat
     # Step "b" ran second: step "a"'s marker was already there for it to see.
     assert second.findings.step == "b"
     assert second.findings.saw_other is True
+
+
+@dataclass(frozen=True, slots=True)
+class _IntentReadingStep:
+    """Minimal real `Step` standing in for a later Milestone 3-7 step: reads
+    `ctx.intent.summary` directly off the shared `StepContext`, not through `IntentStep`'s
+    `StepOutcome`, and surfaces it as its own findings -- makes no agent call, since
+    nothing about reading `ctx.intent` needs one."""
+
+    async def run(self, ctx: StepContext) -> StepOutcome:
+        return StepOutcome(
+            needs_approval=False,
+            auto_fixable=False,
+            findings=ctx.intent.summary,
+        )
+
+
+def test_intent_step_runs_first_and_a_later_step_reads_the_same_intent_via_ctx(
+    tmp_path: Path,
+) -> None:
+    """End-to-end proof for issue #19: a StepContext built the way `cli.py` builds it
+    (`Intent(summary=..., source="explicit", score=1.0)` from the `--intent` flag) drives
+    `run_steps([IntentStep(), <later step>], ctx)`, and the later step gets the same
+    intent text off `ctx.intent` -- not through `IntentStep`'s `StepOutcome` -- proving
+    intent is threaded through the shared context, not passed hand-to-hand between
+    steps."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    intent_text = "add retry logic with exponential backoff"
+    intent = Intent(summary=intent_text, source="explicit", score=1.0)
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=intent)
+    steps: list[Step] = [IntentStep(), _IntentReadingStep()]
+
+    outcomes = asyncio.run(run_steps(steps, ctx))
+    asyncio.run(agent.close())
+
+    assert len(outcomes) == 2
+    intent_outcome, later_outcome = outcomes
+
+    assert intent_outcome.needs_approval is False
+    assert intent_outcome.auto_fixable is False
+    assert intent_outcome.findings is intent
+
+    # The later step never saw `intent_outcome` -- it read `ctx.intent.summary` directly.
+    assert later_outcome.findings == intent_text
