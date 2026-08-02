@@ -32,6 +32,7 @@ meaning changes, edit the glossary in the same commit. It owns what words mean;
 - `src/code_review/steps/` — the actual pipeline steps: intent, rebase, review,
   test_sufficiency, pr.
 - `src/code_review/scm/` — SCM host wrapper (GitHub via the `gh` CLI).
+- `src/code_review/tui/` — live pipeline-progress view (Textual), wired into `cli.py review`.
 - `tests/` — mirrors `src/code_review/` package-for-package.
 
 ## Local verification sequence
@@ -107,14 +108,18 @@ automated version-bumping (tracked in #28) as separate future-work issues.
 
 Milestone 13 (`src/code_review/tui/`, a new sibling package to `agent/`/`pipeline/`/
 `steps/`/`scm/`, see `docs/ROADMAP.md` milestone 13) is specced as #38, sliced into #39
-(executor emits a `StepEvent` stream instead of returning `list[StepOutcome]`), #40 (the
-`tui` package itself: live pipeline-progress view, registry-driven backfill of
+(executor emits a `StepEvent` stream instead of returning `list[StepOutcome]`, merged),
+#40 (the `tui` package itself: live pipeline-progress view, registry-driven backfill of
 not-yet-implemented steps, wires `cli.py review` to `run_steps` for real, blocked by #39),
 #41 (relay an agent subprocess's interactive-input prompts through the TUI via a new
 `RunOpts.on_input_needed` seam, blocked by #40), and #42 (read-only findings display,
-blocked by #40 and #27). Not yet implemented. The interactive approve/fix/skip/abort layer
-from the reference screenshot waits on Milestone 7's approval loop, which isn't specced
-yet, and stays documented in `docs/ROADMAP.md` rather than sliced into a ticket until then.
+blocked by #40 and #27). #40 is implemented on branch `feature/40-tui-pipeline-view`
+(`tui/state.py`'s pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s
+`ReviewApp`, `steps/registry.py`'s `STEP_REGISTRY`/`IMPLEMENTED_STEPS`), pending
+review/merge; #41 and #42 remain unimplemented. The interactive approve/fix/skip/abort
+layer from the reference screenshot waits on Milestone 7's approval loop, which isn't
+specced yet, and stays documented in `docs/ROADMAP.md` rather than sliced into a ticket
+until then.
 
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.
@@ -175,11 +180,11 @@ repo-specific skill instead of letting the file keep growing.
 ## Nested AGENTS.md convention
 
 Package-scoped `AGENTS.md` + `CLAUDE.md` pairs live under `src/code_review/<package>/`
-(`agent/`, `pipeline/`, `steps/`, `scm/`). Right now they're stubs — each says "no
-package-specific invariants yet, see root" — because those packages aren't built out yet.
-As a package gains real design decisions, gotchas, or regressions worth pinning, add that
-guidance to its own scoped file rather than growing this root file. The root file stays
-for repo-wide concerns only.
+(`agent/`, `pipeline/`, `steps/`, `scm/`, `tui/`). `scm/` is still a stub — "no
+package-specific invariants yet, see root" — because that package isn't built out yet
+(Milestone 8). As a package gains real design decisions, gotchas, or regressions worth
+pinning, add that guidance to its own scoped file rather than growing this root file. The
+root file stays for repo-wide concerns only.
 
 ## Maintaining this file
 
