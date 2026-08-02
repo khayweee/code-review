@@ -14,7 +14,25 @@ OutputT = TypeVar("OutputT", bound=BaseModel)
 
 @dataclass(frozen=True, slots=True)
 class RunOpts(Generic[OutputT]):
-    """Everything a backend needs to perform one isolated Agent call."""
+    """Everything a backend needs to perform one isolated Agent call.
+
+    Whether `on_input_needed` (see its field comment below) is ever reachable depends on
+    `tools_allowlist` and `permission_mode` together, since both feed `claude_cli.py`'s
+    `_build_args` decision to append `--dangerously-skip-permissions` or route the call
+    through the stdin-relay path instead (see `agent/AGENTS.md`):
+
+    | `tools_allowlist` | `permission_mode` | CLI flag(s)                            | reachable? |
+    |---|---|---|---|
+    | empty (`()`) | `None` | `--dangerously-skip-permissions`                  | No -- fast path |
+    | empty (`()`) | set    | `--permission-mode <value>`                       | Yes |
+    | non-empty    | `None` | `--allowedTools ... --permission-mode auto`       | Yes |
+    | non-empty    | set    | `--allowedTools ... --permission-mode <value>`    | Yes |
+
+    In short: only the pure default (`tools_allowlist` empty and `permission_mode` `None`)
+    skips permissions and stays on the untouched fast path. Setting either one at all opts
+    into the stdin-relay path -- the specific non-default `permission_mode` string doesn't
+    change reachability, only which flag value is passed to the CLI.
+    """
 
     prompt: str  # sent over stdin, never argv, to avoid per-argument size limits
     cwd: Path  # working directory the backend subprocess runs in
