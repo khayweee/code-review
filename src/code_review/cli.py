@@ -6,10 +6,7 @@ app is installed and importable.
 Milestone 3 (issue #19) adds validation and construction of the explicit `Intent` from
 `--intent`: `Intent` is fully known before the pipeline starts (it's a CLI flag, not
 something discovered mid-run), so it is constructed once here, before anything else, and
-threaded through the same immutable `StepContext` every step receives. Wiring
-`run_steps`/`StepContext` construction into this command is out of scope for #19 (see
-issue #17's Out of Scope list) -- `review` still raises `NotImplementedError` after intent
-validation.
+threaded through the same immutable `StepContext` every step receives.
 
 Milestone 12 (issues #31-#33) adds `update` and `uninstall` alongside `review`, so the
 full install lifecycle is discoverable via `code-review --help` once installed (see
@@ -17,18 +14,32 @@ full install lifecycle is discoverable via `code-review --help` once installed (
 upgrade`/`uv tool uninstall` for this package -- no dependency resolution, virtual
 environment management, or binary replacement is reimplemented here; `uv` already owns
 all of that.
+
+Milestone 13's #40 wires `review` up for real: it requires a real TTY on both stdin and
+stdout (the live progress view cannot render into a pipe or redirect), builds `StepContext`
+from a `git diff HEAD...<branch>` against the current checkout, runs the fixed prefix of
+implemented steps (`steps.registry.IMPLEMENTED_STEPS`) through `run_steps`, and renders
+that event stream live via `tui.app.ReviewApp`. See `docs/ROADMAP.md` milestone 13 and
+`tui/AGENTS.md` for the design; this docstring only tracks what's wired where.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import typer
 
+from code_review.agent import ClaudeCLI
 from code_review.install_state import state_dir
+from code_review.pipeline import StepContext, run_steps
 from code_review.steps.intent import Intent
+from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_REGISTRY
+from code_review.tui.app import ReviewApp
 
 app = typer.Typer(help="Agentic code-review/gating pipeline.")
 
@@ -113,6 +124,33 @@ def _describe_upgrade(stderr: str) -> str:
     return f"{PACKAGE_NAME} upgraded to {version}."
 
 
+_NOT_A_TTY_MESSAGE = (
+    "error: 'code-review review' needs an interactive terminal on both stdin and stdout to "
+    "render its live progress view.\n"
+    "Run it directly in a terminal - don't pipe or redirect its input or output, and don't "
+    "run it from a non-interactive script."
+)
+
+
+def _diff_against_head(branch: str) -> str:
+    """Return `git diff HEAD...<branch>`: BRANCH's changes since its merge-base with the
+    current HEAD. Diff-base semantics beyond "against current HEAD" (e.g. against a
+    configured default branch instead) are explicitly out of scope here - Rebase/Review own
+    that once they land (see docs/ROADMAP.md milestones 4-5)."""
+    git = shutil.which("git")
+    if git is None:
+        typer.echo("error: 'git' is not installed or not on PATH.", err=True)
+        raise typer.Exit(code=1)
+
+    result = subprocess.run(
+        [git, "diff", f"HEAD...{branch}"], cwd=Path.cwd(), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        typer.echo(result.stderr.strip(), err=True)
+        raise typer.Exit(code=result.returncode)
+    return result.stdout
+
+
 @app.command()
 def review(
     branch: str = typer.Argument(
@@ -120,20 +158,29 @@ def review(
     ),
     intent: str = typer.Option(..., "--intent", help="What this change is trying to do."),
 ) -> None:
-    """Run the review pipeline against BRANCH (not implemented yet)."""
+    """Run the review pipeline against BRANCH, rendered live in a full-screen terminal UI."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.echo(_NOT_A_TTY_MESSAGE, err=True)
+        raise typer.Exit(code=1)
+
     stripped_intent = intent.strip()
     if not stripped_intent:
         raise typer.BadParameter("must be non-empty and not just whitespace", param_hint="--intent")
 
-    # Proves the flag round-trips into a validated Intent end to end. `run_steps`/
-    # `StepContext` construction is not part of this milestone (see module docstring),
-    # so the constructed Intent isn't used yet -- bind to `_` rather than an unused named
-    # variable so this reads as intentional, not dead code.
-    _ = Intent(summary=stripped_intent, source="explicit", score=1.0)
+    parsed_intent = Intent(summary=stripped_intent, source="explicit", score=1.0)
+    diff = _diff_against_head(branch)
 
-    raise NotImplementedError(
-        "review pipeline not implemented yet — see docs/ROADMAP.md milestones 1-7"
-    )
+    agent = ClaudeCLI()
+    ctx = StepContext(cwd=Path.cwd(), agent=agent, diff=diff, intent=parsed_intent)
+    steps = [cls() for cls in IMPLEMENTED_STEPS]
+
+    tui_app = ReviewApp(STEP_REGISTRY, run_steps(steps, ctx))
+    tui_app.run()
+    asyncio.run(agent.close())
+
+    if tui_app.error is not None:
+        typer.echo(f"code-review review failed: {tui_app.error}", err=True)
+        raise typer.Exit(code=1)
 
 
 @app.command()

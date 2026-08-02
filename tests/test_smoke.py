@@ -1,23 +1,11 @@
 """Scaffold smoke test: the package and CLI are importable and wired up correctly."""
 
-import re
-
 from typer.testing import CliRunner
 
 from code_review import __version__
 from code_review.cli import app
 
 runner = CliRunner()
-
-# Typer/rich colorize and individually style CLI error output (down to splitting a
-# `--flag`'s two hyphens across separate style spans), so substring assertions against
-# `result.output` need the ANSI escape codes stripped first, or a plain-looking substring
-# like "--intent" can silently fail to match even though the visible text is correct.
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _plain(output: str) -> str:
-    return _ANSI_ESCAPE.sub("", output)
 
 
 def test_version_is_set() -> None:
@@ -30,28 +18,23 @@ def test_cli_help() -> None:
     assert "review" in result.stdout
 
 
-def test_review_command_not_implemented_yet() -> None:
+def test_review_command_is_registered_and_reachable() -> None:
     # Milestone 12 (issues #31-#33) added `update`/`uninstall` alongside `review`, so
     # Typer's single-command collapse no longer applies -- `review` must now be named
     # explicitly as a subcommand (see `--help`'s "Usage: code-review [OPTIONS] COMMAND").
+    # Milestone 13 (#40) wires `review` up for real; `CliRunner`'s captured stdio is never a
+    # TTY, so this smoke test only proves the command is reachable and fails fast with a
+    # controlled error rather than an unhandled exception -- see `tests/test_cli_review.py`
+    # for full coverage of the TTY requirement and the wired pipeline run.
     result = runner.invoke(app, ["review", "some-branch", "--intent", "test"])
     assert result.exit_code != 0
-    assert isinstance(result.exception, NotImplementedError)
+    assert isinstance(result.exception, SystemExit)
 
 
-def test_review_command_rejects_empty_intent_before_constructing_anything() -> None:
-    result = runner.invoke(app, ["review", "some-branch", "--intent", ""])
-    output = _plain(result.output)
-
-    assert result.exit_code == 2  # Typer's BadParameter exit code
-    assert "--intent" in output
-    assert "must be non-empty and not just whitespace" in output
-
-
-def test_review_command_rejects_whitespace_only_intent_before_constructing_anything() -> None:
-    result = runner.invoke(app, ["review", "some-branch", "--intent", "   "])
-    output = _plain(result.output)
-
-    assert result.exit_code == 2  # Typer's BadParameter exit code
-    assert "--intent" in output
-    assert "must be non-empty and not just whitespace" in output
+# The old empty/whitespace `--intent` rejection tests that lived here (Milestone 3, issue
+# #19) predate #40's TTY check, which now runs before intent validation -- under
+# `CliRunner` (never a real TTY), any `--intent` value hits the TTY error first, so those
+# assertions no longer exercised what they claimed. See `tests/test_cli_review.py`'s
+# `test_review_tty_check_runs_before_intent_validation` (proves the ordering) and
+# `test_review_rejects_empty_intent_under_a_real_terminal` (a real pty, where the
+# `BadParameter` path is actually reachable) for the tests that replaced them.
