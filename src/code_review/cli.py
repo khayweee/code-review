@@ -146,6 +146,20 @@ def _diff_against_head(branch: str) -> str:
         typer.echo("error: 'git' is not installed or not on PATH.", err=True)
         raise typer.Exit(code=1)
 
+    # Checked separately from the `diff` call below so a bad BRANCH gets a clear,
+    # code-review-specific message instead of `git diff`'s own "ambiguous argument"
+    # phrasing, which talks about revision/path syntax that has nothing to do with this
+    # CLI's own arguments.
+    verify = subprocess.run(
+        [git, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+    )
+    if verify.returncode != 0:
+        typer.echo(f"error: '{branch}' is not a valid branch or ref in this repository.", err=True)
+        raise typer.Exit(code=1)
+
     result = subprocess.run(
         [git, "diff", f"HEAD...{branch}"], cwd=Path.cwd(), capture_output=True, text=True
     )
