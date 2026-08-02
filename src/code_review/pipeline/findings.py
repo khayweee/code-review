@@ -75,6 +75,17 @@ class Finding(BaseModel):
     # change if one is ever added.
     review_scope: Literal["source", "pipeline-owned-delivery", "external-delivery"]
 
+    # Human-readable file/line locator, e.g. "steps/review.py:42", or `None` when a
+    # finding has no specific location to point at. Optional and defaults to `None` so
+    # this field is backward-compatible with every `Finding` already validated by #26/#27's
+    # tests. Consumer: `tui/widgets.py`'s `FindingsBox`/`render_findings` (issue #42), the
+    # only current consumer -- it renders this alongside severity and description when
+    # present, and omits it when `None`. No current producer sets it: `ReviewStep`'s prompt
+    # (`steps/review.py`) does not yet ask the agent to fill it in, so every finding
+    # produced today leaves this at its default. That is a future refinement, not this
+    # field's job.
+    location: str | None = None
+
 
 def action_or_default(action: str | None) -> Action:
     """Resolve `action` to itself if it is one of the three known values, else to the

@@ -23,8 +23,8 @@ from textual.app import App, ComposeResult
 from code_review.pipeline.step import StepEvent
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
-from code_review.tui.state import StepRow, backfill
-from code_review.tui.widgets import PipelineBox
+from code_review.tui.state import StepRow, backfill, latest_findings
+from code_review.tui.widgets import FindingsBox, PipelineBox
 
 # How often a running step's elapsed duration re-renders between events. Short enough to
 # look live to a human, long enough not to burn CPU on a terminal repaint loop.
@@ -42,6 +42,10 @@ class ReviewApp(App[None]):
     `backfill` docstring for why `StepEvent` itself has no "failed" status), the Pipeline
     box renders that step as failed one last time, and the exception is stored on `error`
     for the caller (`cli.py`) to turn into a nonzero exit after `run()` returns.
+
+    Also mounts a Findings box (issue #42), driven by `state.py`'s `latest_findings`, at
+    the same points the Pipeline box re-renders. Unlike the Pipeline box, it is mounted
+    only while there is something to show -- see `_render_findings` below.
     """
 
     def __init__(
@@ -89,6 +93,25 @@ class ReviewApp(App[None]):
 
     def _render(self, *, failed_step: str | None = None) -> None:
         self.query_one(PipelineBox).update_rows(self._rows(failed_step=failed_step))
+        self._render_findings()
+
+    def _render_findings(self) -> None:
+        """Mount, update in place, or remove the Findings box, driven by
+        `latest_findings(self._seen)` (see `state.py`). Unlike `PipelineBox`, which is
+        always composed, `FindingsBox` is mounted dynamically and only while there is
+        something to show -- a step with no findings must show no Findings box at all, not
+        an empty one (issue #42's acceptance criteria), which a permanently-composed box
+        cannot express on its own."""
+
+        output = latest_findings(self._seen)
+        boxes = list(self.query(FindingsBox))
+        if output is None:
+            for box in boxes:
+                box.remove()
+        elif boxes:
+            boxes[0].update_findings(output)
+        else:
+            self.mount(FindingsBox(output))
 
     async def _consume_events(self) -> None:
         try:
