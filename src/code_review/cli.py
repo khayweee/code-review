@@ -74,6 +74,27 @@ def _run_uv_tool_command(
     return result
 
 
+def _complete_branch(ctx: object, args: list[str], incomplete: str) -> list[str]:
+    """List local git branch names for `review BRANCH` shell completion.
+
+    Returns no candidates (not an error) if `git` is missing or the cwd isn't a repo --
+    shell completion must never crash the shell it runs inside.
+    """
+    git = shutil.which("git")
+    if git is None:
+        return []
+
+    result = subprocess.run(
+        [git, "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+
+    return [name for name in result.stdout.splitlines() if name.startswith(incomplete)]
+
+
 def _describe_upgrade(stderr: str) -> str:
     """Turn `uv tool upgrade`'s stderr into a clear, specific one-line report."""
     if "Nothing to upgrade" in stderr:
@@ -94,7 +115,9 @@ def _describe_upgrade(stderr: str) -> str:
 
 @app.command()
 def review(
-    branch: str = typer.Argument(..., help="Branch or ref to review."),
+    branch: str = typer.Argument(
+        ..., help="Branch or ref to review.", autocompletion=_complete_branch
+    ),
     intent: str = typer.Option(..., "--intent", help="What this change is trying to do."),
 ) -> None:
     """Run the review pipeline against BRANCH (not implemented yet)."""

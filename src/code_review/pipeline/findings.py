@@ -1,4 +1,4 @@
-"""Finding / Findings — Milestone 4 (schema), Milestone 6 (fix-loop helpers).
+"""Finding / Findings — Milestone 5 (schema), Milestone 7 (fix-loop helpers).
 
 Planned shape: `Finding.action` in {no-op, auto-fix, ask-user}, defaulting to `ask-user`
 when unset (the fail-safe default — the single most important rule to preserve in any

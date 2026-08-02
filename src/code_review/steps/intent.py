@@ -11,7 +11,7 @@ implementation of this idea had a real bug where dropping provenance demoted an
 authoritative intent to an ignorable hint, letting review auto-fix rewrite an author's
 settled design -- `wrap_intent`'s tests pin against a regression of that shape.
 
-Transcript-based inference (non-"explicit" provenance) is v2 (Milestone 10); nothing in
+Transcript-based inference (non-"explicit" provenance) is v2 (Milestone 11); nothing in
 this module reads a transcript or calls an agent.
 """
 
@@ -29,16 +29,31 @@ from code_review.pipeline.step import StepContext, StepOutcome
 
 @dataclass(frozen=True, slots=True)
 class Intent:
-    """A piece of user- or agent-sourced intent, plus its provenance and confidence.
+    """What a change should achieve, with metadata describing where that claim came from.
 
-    `source` is a plain string, not a closed enum: this milestone only ever produces
-    `"explicit"`, but a future milestone writes agent names (`"claude"`, `"codex"`) here,
-    and the field must accept those without a schema change.
+    Each field documents both its meaning and its consumer. In the explicit-only
+    milestone, `summary` and `source` are the only fields with runtime behavior; `score`
+    and `session_id` preserve the shape needed by future transcript-based inference.
     """
 
+    # The acceptance criteria in human-readable form. Later Review, test-sufficiency,
+    # and PR steps read this from StepContext and embed a sanitized copy in their prompts.
     summary: str
+
+    # Provenance of the summary: currently "explicit" for CLI input; a future inference
+    # step may record a backend name such as "claude" or "codex". `wrap_intent` uses it
+    # to treat explicit input as authoritative and inferred input only as a hint. This is
+    # deliberately an open string so adding a backend does not require a schema change.
     source: str
+
+    # Confidence in the summary, on a 0.0-to-1.0 scale by convention. Explicit CLI input
+    # is registered as 1.0; future transcript inference will assign lower values for
+    # uncertain interpretations. No pipeline decision consumes this field yet.
     score: float
+
+    # Identifier of the agent session from which intent was inferred, allowing future
+    # diagnostics to trace the summary back to its source transcript. Explicit CLI input
+    # has no session and leaves this as None. No pipeline decision consumes it yet.
     session_id: str | None = None
 
 

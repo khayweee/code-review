@@ -10,12 +10,12 @@ Milestone 3, see `src/code_review/steps/intent.py`.
 the command line. `Intent` is fully known before the pipeline starts -- it's a CLI flag,
 not something discovered mid-run -- so `cli.py` constructs it once and every step gets it
 off the same immutable `ctx`, rather than the first step handing it forward through its
-`StepOutcome`. It is not the place fix-loop or approval state lives -- Milestone 6 extends
+`StepOutcome`. It is not the place fix-loop or approval state lives -- Milestone 7 extends
 this type once that loop exists.
 
-`StepOutcome` carries `needs_approval`/`auto_fixable` now so Milestone 6 can act on them
+`StepOutcome` carries `needs_approval`/`auto_fixable` now so Milestone 7 can act on them
 without a breaking schema change, even though nothing branches on them yet. `findings` is
-typed as `object` rather than the not-yet-built Milestone 4 `Finding`/`Findings` schema
+typed as `object` rather than the not-yet-built Milestone 5 `Finding`/`Findings` schema
 (`pipeline/findings.py`) -- a step's own code narrows it back to whatever schema that step
 validated its agent call against.
 """
