@@ -56,16 +56,26 @@ def render_rows(rows: Sequence[StepRow]) -> str:
     return "\n".join(format_row(row) for row in rows)
 
 
-class PipelineBox(Static):
-    """A bordered box listing every registered step and its current status."""
+class _BorderedBox(Static):
+    """Shared base for this app's bordered, auto-height boxes (`PipelineBox`,
+    `FindingsBox`, `StatusBox`). Textual resolves `DEFAULT_CSS` against a widget's whole
+    class hierarchy, not just its leaf class, so defining the shared border/padding rule
+    once here -- keyed to this base class's own name -- reaches every subclass without
+    repeating it per box. Factored out once a third box (`StatusBox`) needed the identical
+    rule; two copies were fine, three would not have been.
+    """
 
     DEFAULT_CSS = """
-    PipelineBox {
+    _BorderedBox {
         border: round $primary;
         padding: 0 1;
         height: auto;
     }
     """
+
+
+class PipelineBox(_BorderedBox):
+    """A bordered box listing every registered step and its current status."""
 
     def __init__(
         self,
@@ -104,20 +114,12 @@ def render_findings(output: ReviewOutput) -> str:
     return "\n".join([*lines, "", summary])
 
 
-class FindingsBox(Static):
+class FindingsBox(_BorderedBox):
     """A bordered box showing the most recently completed step's findings (see
     `state.py`'s `latest_findings`): each finding's severity, description, and location
     when it has one, plus a severity-count summary. Display only -- no key or action here
     lets a user approve, fix, skip, or abort a finding (see docs/GLOSSARY.md's "Action";
     Milestone 7's fix/approval loop is a later ticket)."""
-
-    DEFAULT_CSS = """
-    FindingsBox {
-        border: round $primary;
-        padding: 0 1;
-        height: auto;
-    }
-    """
 
     def __init__(
         self,
@@ -133,3 +135,26 @@ class FindingsBox(Static):
         """Replace the displayed findings with `output`'s, re-rendered."""
 
         self.update(render_findings(output))
+
+
+class StatusBox(_BorderedBox):
+    """A bordered box shown once the pipeline run finishes, successfully or not (see
+    `app.py`'s `_render_status`/`state.py`'s `final_status_message`): a one-line outcome
+    plus the reminder that "e" now closes the app. Mounted dynamically, only once the run
+    is done -- a still-running pipeline shows no Status box at all, mirroring
+    `FindingsBox`'s own dynamic mount pattern (`app.py`'s `_render_findings`)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(message, id=id, classes=classes)
+        self.border_title = "Status"
+
+    def update_status(self, message: str) -> None:
+        """Replace the displayed status message with `message`."""
+
+        self.update(message)
