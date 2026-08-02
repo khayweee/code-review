@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import sys
+from _shared import build_response, print_json, read_prompt
 
-from _shared import build_response, print_json
-
-prompt = sys.stdin.read()
+prompt = read_prompt()
 response = build_response(prompt)
 
 if prompt == "omit structured output":

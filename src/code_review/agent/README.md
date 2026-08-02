@@ -10,12 +10,12 @@ for every call.
 | Subunit | Purpose | Input | Output |
 |---|---|---|---|
 | `Agent` | Protocol used by steps: asynchronous `run` plus `close` for teardown. | `RunOpts[T]` | `Result[T]` |
-| `RunOpts[T]` | Complete description of one isolated call: prompt, checkout, Pydantic output schema, model, prompt overrides, tool permissions, and executable test seam. | Values supplied by a step | Backend call configuration |
+| `RunOpts[T]` | Complete description of one isolated call: prompt, checkout, Pydantic output schema, model, prompt overrides, tool permissions, interactive-input relay, and executable test seam. | Values supplied by a step | Backend call configuration |
 | `Result[T]` | Preserve both the validated answer and backend evidence. | Backend response | Typed `output`, original `text`, and optional `Usage` |
-| `ClaudeCLI` | Translate `RunOpts` into a non-interactive Claude CLI invocation and unwrap its JSON envelope. | `RunOpts[T]`; prompt is sent on stdin | `Result[T]` or an `AgentError` subtype |
+| `ClaudeCLI` | Translate `RunOpts` into a non-interactive Claude CLI invocation and unwrap its JSON envelope; routes calls that pinned `permission_mode`/`tools_allowlist` through a stdin-relay loop instead of the default fast path. | `RunOpts[T]`; prompt is sent on stdin | `Result[T]` or an `AgentError` subtype |
 | `schema.py` | Extract JSON from bare, fenced, or chatty output, then validate it against the requested schema. | Response text and `type[T]` | JSON value and then `T` |
 | `process_group.py` | Terminate the entire subprocess tree on success, failure, or cancellation. | Spawned process/session | Completed bounded cleanup |
-| `errors.py` | Distinguish process-start, process-exit, missing-output, and schema-validation failures. | Failure details | Actionable `AgentError` subtype |
+| `errors.py` | Distinguish process-start, process-exit, missing-output, schema-validation, and stdin-blocked-with-no-relay failures. | Failure details | Actionable `AgentError` subtype |
 | `Usage` | Record backend-reported tokens and cost without inventing missing values. | Optional backend metadata | Values or `None` when unknown |
 
 ## One-call data flow

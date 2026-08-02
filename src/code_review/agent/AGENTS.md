@@ -51,3 +51,24 @@ conventions.
   diff's risk"). It layers on top of Claude's default system prompt. `system_prompt`
   discards that default entirely and should only be used when a step needs full control
   over the model's behavior, not for ordinary task instructions.
+- `RunOpts.on_input_needed` (issue #41) is the interactive-input relay seam: once a caller
+  sets `permission_mode` (or a `tools_allowlist`), `_build_args` no longer appends
+  `--dangerously-skip-permissions`, and `claude_cli.py` routes that call through a second,
+  hand-rolled read/write loop (`_run_with_stdin_relay`) instead of the default
+  `process.communicate()` fast path -- see that function's docstring for the exact
+  read/write loop and why stdin is written but never closed until the subprocess itself
+  signals it's done (EOF on stdout). Every call that leaves `permission_mode` at its
+  default `None` stays on the untouched `communicate()` path, byte-for-byte identical to
+  before this seam existed. A stall with no `on_input_needed` supplied raises
+  `StdinBlockedError` after `_STDIN_IDLE_TIMEOUT_SECONDS` (30s, module-level, shrink via
+  monkeypatch in tests) rather than hanging or fabricating an answer. **Known limitation**:
+  this path is only exercised against the fake CLI test double
+  (`tests/agent/fakes/blocks_on_stdin.py`); its prompt-detection framing (an idle-timeout
+  heuristic on stdout) has not been validated against the real `claude` CLI's actual
+  stdin-blocking behavior.
+- Test fakes that read the whole prompt from stdin (`_shared.py`'s `read_prompt`) must
+  branch on whether `--dangerously-skip-permissions` is in `sys.argv`: present means the
+  parent used `communicate()` and sent EOF, so a blocking `sys.stdin.read()` is correct;
+  absent means the parent is on the stdin-relay path and will never send EOF, so the fake
+  must drain whatever's already arrived instead (`drain_available_stdin`) or it will hang
+  forever waiting for an EOF that never comes.

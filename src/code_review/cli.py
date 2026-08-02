@@ -40,6 +40,7 @@ from code_review.pipeline import StepContext, run_steps
 from code_review.steps.intent import Intent
 from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_REGISTRY
 from code_review.tui.app import ReviewApp
+from code_review.tui.input_relay import InputRelay
 
 app = typer.Typer(help="Agentic code-review/gating pipeline.")
 
@@ -171,10 +172,17 @@ def review(
     diff = _diff_against_head(branch)
 
     agent = ClaudeCLI()
-    ctx = StepContext(cwd=Path.cwd(), agent=agent, diff=diff, intent=parsed_intent)
+    relay = InputRelay()
+    ctx = StepContext(
+        cwd=Path.cwd(),
+        agent=agent,
+        diff=diff,
+        intent=parsed_intent,
+        on_input_needed=relay.request_input,
+    )
     steps = [cls() for cls in IMPLEMENTED_STEPS]
 
-    tui_app = ReviewApp(STEP_REGISTRY, run_steps(steps, ctx))
+    tui_app = ReviewApp(STEP_REGISTRY, run_steps(steps, ctx), input_relay=relay)
     tui_app.run()
     asyncio.run(agent.close())
 

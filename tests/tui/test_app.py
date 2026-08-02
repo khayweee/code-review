@@ -12,8 +12,12 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 
+from textual.widgets import Input, Static
+
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.tui.app import ReviewApp
+from code_review.tui.input_relay import InputRelay
+from code_review.tui.screens import InputPromptScreen
 from code_review.tui.widgets import PipelineBox
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
@@ -137,6 +141,50 @@ def test_review_app_records_the_error_and_marks_the_mid_flight_step_failed() -> 
         assert str(app.error) == "rebase conflict"
 
     asyncio.run(scenario())
+
+
+def test_review_app_relays_a_queued_input_request_through_a_modal() -> None:
+    """Issue #41 end-to-end proof: a concurrent `relay.request_input(...)` call (standing
+    in for a blocked backend subprocess) surfaces as a modal with the right prompt text;
+    typing an answer and pressing enter dismisses it and resolves the original call with
+    that answer."""
+
+    async def hangs_until_cancelled() -> AsyncIterator[StepEvent]:
+        # Unlike `never_yields()` elsewhere in this file, this deliberately never lets
+        # `_consume_events` finish and call `self.exit()` on its own -- the test needs the
+        # app to stay alive for the whole modal round-trip, and calls `app.exit()` itself
+        # once done (matching the pattern other tests in this file already use).
+        await asyncio.Future()
+        yield  # pragma: no cover - unreachable, only makes this an async generator
+
+    async def scenario() -> str:
+        relay = InputRelay()
+        app = ReviewApp(REGISTRY, hangs_until_cancelled(), input_relay=relay)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            request_task = asyncio.ensure_future(relay.request_input("Allow write? (y/n): "))
+            for _ in range(20):
+                if isinstance(app.screen, InputPromptScreen):
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            assert isinstance(app.screen, InputPromptScreen)
+            prompt_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
+            assert "Allow write? (y/n): " in prompt_text
+
+            await pilot.click(Input)
+            await pilot.press(*"yes", "enter")
+            await pilot.pause()
+
+            answer = await request_task
+            app.exit()
+            return answer
+
+    answer = asyncio.run(scenario())
+
+    assert answer == "yes"
 
 
 def test_review_app_final_render_on_failure_shows_the_broken_step_as_failed() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generic, Protocol, TypeVar
@@ -32,6 +33,16 @@ class RunOpts(Generic[OutputT]):
     # --dangerously-skip-permissions
     # Set this to opt out of that default.
     permission_mode: str | None = None
+    # Invoked with the detected prompt text when the backend subprocess appears blocked
+    # waiting on stdin, and expected to return the human's answer to write back. Only
+    # reachable once `permission_mode` opts out of the skip-permissions default above --
+    # the default `--dangerously-skip-permissions` path never blocks on stdin, so this is
+    # never consulted there. `None` (the default for every existing call site) means no
+    # relay is available: the backend fails closed with `StdinBlockedError` instead of
+    # hanging or fabricating an answer. Consumer: `claude_cli.py`'s non-default-permission
+    # read/write loop; supplied by `tui.input_relay.InputRelay.request_input` for
+    # interactive runs (see `cli.py`'s `review` command).
+    on_input_needed: Callable[[str], Awaitable[str]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

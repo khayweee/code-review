@@ -8,6 +8,7 @@ from code_review.agent.errors import (
     OutputValidationError,
     ProcessExitError,
     ProcessStartError,
+    StdinBlockedError,
 )
 
 __all__ = [
@@ -20,5 +21,6 @@ __all__ = [
     "ProcessStartError",
     "Result",
     "RunOpts",
+    "StdinBlockedError",
     "Usage",
 ]
