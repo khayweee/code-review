@@ -73,8 +73,22 @@ proven against a fake CLI subprocess in `tests/agent/test_claude_cli.py` — but
 not been exercised together against a real `claude` CLI process that actually blocks on
 stdin waiting for a permission answer. See `agent/AGENTS.md`'s matching note.
 
+## The Findings box (issue #42)
+
+`FindingsBox` (`widgets.py`) is a second `Static` widget, mirroring `PipelineBox`'s shape
+(`DEFAULT_CSS`, a bordered box, `update_findings`) but with a different mount lifecycle:
+`PipelineBox` is always composed (empty registry entries render as pending placeholders),
+while `FindingsBox` is mounted/removed dynamically by `ReviewApp._render_findings` because
+"no findings" must show no box at all, not an empty one. `state.py`'s `latest_findings`
+picks the most recently *completed* step whose `outcome.findings` is a non-empty
+`ReviewOutput` (imported from `steps.review` -- a data-schema import, not a `ReviewStep`/
+agent-call dependency, and does not create an import cycle since `steps/` never imports
+`tui/`); `IntentStep`'s outcome (`findings` is an `Intent`) is exactly what the `isinstance`
+check there guards against. One box, most-recent-completion-wins -- not an accumulated
+history across steps, matching `PipelineBox`'s own "one box, updated in place" pattern.
+Display only: no key or action here lets a user approve, fix, skip, or abort a finding.
+
 ## Non-goals landed in later issues, not here
 
-- A findings-display box is issue #42 — `PipelineBox` is the only widget so far.
 - The interactive approve/fix/skip/abort layer waits on Milestone 7's approval loop, which
   isn't specced yet.

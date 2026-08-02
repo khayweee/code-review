@@ -1,4 +1,5 @@
-"""Pure unit tests for `backfill`, independent of Textual (see `state.py`'s docstring).
+"""Pure unit tests for `backfill`/`latest_findings`, independent of Textual (see
+`state.py`'s docstring).
 
 No `App`, no `Pilot`, no subprocess -- every `StepEvent` here is hand-built.
 """
@@ -7,8 +8,11 @@ from __future__ import annotations
 
 import pytest
 
+from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
-from code_review.tui.state import StepRow, backfill
+from code_review.steps.intent import Intent
+from code_review.steps.review import ReviewOutput
+from code_review.tui.state import StepRow, backfill, latest_findings
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
 
@@ -129,3 +133,94 @@ def test_backfill_a_completed_step_is_not_recolored_failed_even_if_named() -> No
     rows = backfill(REGISTRY, events, now=5.0, failed_step="IntentStep")
 
     assert rows[0] == StepRow(name="IntentStep", status="completed", duration=0.2)
+
+
+# --- latest_findings ---------------------------------------------------------------------
+
+_FINDING = Finding(severity="warning", description="example finding", review_scope="source")
+
+
+def _review_output(*findings: Finding) -> ReviewOutput:
+    return ReviewOutput(findings=list(findings), risk_level="low", risk_rationale="fine")
+
+
+def test_latest_findings_with_no_events_returns_none() -> None:
+    assert latest_findings([]) is None
+
+
+def test_latest_findings_ignores_a_completed_step_whose_outcome_is_not_a_review_output() -> None:
+    # IntentStep-shaped: `outcome.findings` is an `Intent`, not a `ReviewOutput`.
+    intent_outcome = StepOutcome(
+        needs_approval=False,
+        auto_fixable=False,
+        findings=Intent(summary="add retries", source="explicit", score=1.0),
+    )
+    events = [
+        StepEvent(
+            step_name="IntentStep",
+            status="completed",
+            outcome=intent_outcome,
+            started_at=1.0,
+            duration=0.1,
+        )
+    ]
+
+    assert latest_findings(events) is None
+
+
+def test_latest_findings_ignores_a_completed_step_with_an_empty_findings_list() -> None:
+    outcome = StepOutcome(needs_approval=False, auto_fixable=False, findings=_review_output())
+    events = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=outcome,
+            started_at=1.0,
+            duration=0.1,
+        )
+    ]
+
+    assert latest_findings(events) is None
+
+
+def test_latest_findings_returns_the_review_output_when_findings_are_non_empty() -> None:
+    output = _review_output(_FINDING)
+    outcome = StepOutcome(needs_approval=True, auto_fixable=False, findings=output)
+    events = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=outcome,
+            started_at=1.0,
+            duration=0.1,
+        )
+    ]
+
+    assert latest_findings(events) is output
+
+
+def test_latest_findings_with_two_completed_steps_the_later_one_wins() -> None:
+    earlier = _review_output(
+        Finding(severity="info", description="first pass", review_scope="source")
+    )
+    later = _review_output(
+        Finding(severity="error", description="second pass", review_scope="source")
+    )
+    events = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+            started_at=1.0,
+            duration=0.1,
+        ),
+        StepEvent(
+            step_name="TestSufficiencyStep",
+            status="completed",
+            outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+            started_at=2.0,
+            duration=0.1,
+        ),
+    ]
+
+    assert latest_findings(events) is later

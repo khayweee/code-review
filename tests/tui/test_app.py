@@ -14,11 +14,13 @@ from collections.abc import AsyncIterator
 
 from textual.widgets import Input, Static
 
+from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
+from code_review.steps.review import ReviewOutput
 from code_review.tui.app import ReviewApp
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
-from code_review.tui.widgets import PipelineBox
+from code_review.tui.widgets import FindingsBox, PipelineBox, render_findings
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
 
@@ -185,6 +187,141 @@ def test_review_app_relays_a_queued_input_request_through_a_modal() -> None:
     answer = asyncio.run(scenario())
 
     assert answer == "yes"
+
+
+def _review_output(*findings: Finding) -> ReviewOutput:
+    return ReviewOutput(findings=list(findings), risk_level="low", risk_rationale="fine")
+
+
+async def _review_step_completes_with_findings() -> AsyncIterator[StepEvent]:
+    started = time.monotonic()
+    yield StepEvent(
+        step_name="ReviewStep", status="running", outcome=None, started_at=started, duration=None
+    )
+    await asyncio.sleep(0)
+    output = _review_output(
+        Finding(severity="error", description="removes error handling", review_scope="source")
+    )
+    outcome = StepOutcome(needs_approval=True, auto_fixable=False, findings=output)
+    yield StepEvent(
+        step_name="ReviewStep",
+        status="completed",
+        outcome=outcome,
+        started_at=started,
+        duration=0.01,
+    )
+
+
+async def _review_step_completes_with_no_findings() -> AsyncIterator[StepEvent]:
+    started = time.monotonic()
+    yield StepEvent(
+        step_name="ReviewStep", status="running", outcome=None, started_at=started, duration=None
+    )
+    await asyncio.sleep(0)
+    outcome = StepOutcome(needs_approval=False, auto_fixable=False, findings=_review_output())
+    yield StepEvent(
+        step_name="ReviewStep",
+        status="completed",
+        outcome=outcome,
+        started_at=started,
+        duration=0.01,
+    )
+
+
+async def _two_steps_complete_with_findings() -> AsyncIterator[StepEvent]:
+    started = time.monotonic()
+    earlier = _review_output(
+        Finding(severity="info", description="first pass finding", review_scope="source")
+    )
+    later = _review_output(
+        Finding(severity="error", description="second pass finding", review_scope="source")
+    )
+    yield StepEvent(
+        step_name="ReviewStep",
+        status="completed",
+        outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+        started_at=started,
+        duration=0.01,
+    )
+    await asyncio.sleep(0)
+    yield StepEvent(
+        step_name="TestSufficiencyStep",
+        status="completed",
+        outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+        started_at=started,
+        duration=0.01,
+    )
+
+
+def test_review_app_shows_a_findings_box_once_a_step_completes_with_non_empty_findings() -> None:
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _review_step_completes_with_findings())
+        async with app.run_test() as pilot:
+            for _ in range(20):
+                if not app.is_running:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            expected = _review_output(
+                Finding(
+                    severity="error", description="removes error handling", review_scope="source"
+                )
+            )
+            box = app.query_one(FindingsBox)
+            assert box.content == render_findings(expected)
+            assert box.border_title == "Findings"
+
+    asyncio.run(scenario())
+
+
+def test_review_app_shows_no_findings_box_when_the_only_completed_outcome_has_no_findings() -> None:
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _one_step_completes())
+        async with app.run_test() as pilot:
+            for _ in range(20):
+                if not app.is_running:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            # `_one_step_completes` reports an outcome with `findings=None` -- not a
+            # `ReviewOutput` -- so no Findings box should ever mount.
+            assert list(app.query(FindingsBox)) == []
+
+    asyncio.run(scenario())
+
+
+def test_review_app_shows_no_findings_box_when_the_completed_review_output_is_empty() -> None:
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _review_step_completes_with_no_findings())
+        async with app.run_test() as pilot:
+            for _ in range(20):
+                if not app.is_running:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            assert list(app.query(FindingsBox)) == []
+
+    asyncio.run(scenario())
+
+
+def test_review_app_findings_box_shows_the_later_of_two_completed_findings() -> None:
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _two_steps_complete_with_findings())
+        async with app.run_test() as pilot:
+            for _ in range(20):
+                if not app.is_running:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            box = app.query_one(FindingsBox)
+            assert "second pass finding" in box.content
+            assert "first pass finding" not in box.content
+
+    asyncio.run(scenario())
 
 
 def test_review_app_final_render_on_failure_shows_the_broken_step_as_failed() -> None:
