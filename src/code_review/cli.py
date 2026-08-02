@@ -57,6 +57,23 @@ def _require_uv() -> str:
     return uv
 
 
+def _run_uv_tool_command(
+    args: list[str], *, failure_prefix: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a `uv tool ...` subcommand, echoing a clear message and exiting on failure.
+
+    Shared by `update`/`uninstall`, which differ only in which `uv tool` subcommand they
+    run and how they interpret a successful result.
+    """
+
+    uv = _require_uv()
+    result = subprocess.run([uv, *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        typer.echo(f"{failure_prefix}: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=result.returncode)
+    return result
+
+
 def _describe_upgrade(stderr: str) -> str:
     """Turn `uv tool upgrade`'s stderr into a clear, specific one-line report."""
     if "Nothing to upgrade" in stderr:
@@ -99,16 +116,9 @@ def review(
 @app.command()
 def update() -> None:
     """Upgrade the installed code-review tool to the latest version via `uv tool upgrade`."""
-    uv = _require_uv()
-
-    result = subprocess.run(
-        [uv, "tool", "upgrade", PACKAGE_NAME],
-        capture_output=True,
-        text=True,
+    result = _run_uv_tool_command(
+        ["tool", "upgrade", PACKAGE_NAME], failure_prefix="code-review update failed"
     )
-    if result.returncode != 0:
-        typer.echo(f"code-review update failed: {result.stderr.strip()}", err=True)
-        raise typer.Exit(code=result.returncode)
 
     typer.echo(_describe_upgrade(result.stderr))
 
@@ -116,16 +126,9 @@ def update() -> None:
 @app.command()
 def uninstall() -> None:
     """Remove the code-review tool and this project's own state directory."""
-    uv = _require_uv()
-
-    result = subprocess.run(
-        [uv, "tool", "uninstall", PACKAGE_NAME],
-        capture_output=True,
-        text=True,
+    _run_uv_tool_command(
+        ["tool", "uninstall", PACKAGE_NAME], failure_prefix="code-review uninstall failed"
     )
-    if result.returncode != 0:
-        typer.echo(f"code-review uninstall failed: {result.stderr.strip()}", err=True)
-        raise typer.Exit(code=result.returncode)
 
     directory = state_dir()
     if directory.exists():

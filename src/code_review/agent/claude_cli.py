@@ -27,32 +27,7 @@ class ClaudeCLI:
     """Run each Agent call in a fresh Claude CLI process."""
 
     async def run(self, opts: RunOpts[OutputT]) -> Result[OutputT]:
-        schema_json = json.dumps(opts.output_schema.model_json_schema(), separators=(",", ":"))
-        args = [
-            str(opts.executable),
-            "-p",
-            "--output-format",
-            "json",
-            "--json-schema",
-            schema_json,
-            "--model",
-            opts.model,
-        ]
-        if opts.system_prompt is not None:
-            args += ["--system-prompt", opts.system_prompt]
-        if opts.append_system_prompt is not None:
-            args += ["--append-system-prompt", opts.append_system_prompt]
-        if opts.tools_allowlist:
-            # A scoped allowlist without an explicit mode still needs a
-            # permission mode for --allowedTools to take effect.
-            args += ["--allowedTools", *opts.tools_allowlist]
-            args += ["--permission-mode", opts.permission_mode or "auto"]
-        elif opts.permission_mode is not None:
-            args += ["--permission-mode", opts.permission_mode]
-        else:
-            # Mirrors no-mistakes' claudeAgent.buildArgs: default to skipping
-            # permission checks entirely unless the caller pinned a mode.
-            args.append("--dangerously-skip-permissions")
+        args = _build_args(opts)
         try:
             process = await asyncio.create_subprocess_exec(
                 *args,
@@ -88,6 +63,43 @@ class ClaudeCLI:
 
     async def close(self) -> None:
         """The per-call adapter owns no resources between calls."""
+
+
+def _build_args(opts: RunOpts[OutputT]) -> list[str]:
+    """Translate ``RunOpts`` into the ``claude -p`` argv for this call.
+
+    Pure mapping, no I/O -- kept separate from ``ClaudeCLI.run`` so the flag-mapping
+    policy (which RunOpts fields become which CLI flags) is testable and readable apart
+    from process spawning/teardown.
+    """
+
+    schema_json = json.dumps(opts.output_schema.model_json_schema(), separators=(",", ":"))
+    args = [
+        str(opts.executable),
+        "-p",
+        "--output-format",
+        "json",
+        "--json-schema",
+        schema_json,
+        "--model",
+        opts.model,
+    ]
+    if opts.system_prompt is not None:
+        args += ["--system-prompt", opts.system_prompt]
+    if opts.append_system_prompt is not None:
+        args += ["--append-system-prompt", opts.append_system_prompt]
+    if opts.tools_allowlist:
+        # A scoped allowlist without an explicit mode still needs a
+        # permission mode for --allowedTools to take effect.
+        args += ["--allowedTools", *opts.tools_allowlist]
+        args += ["--permission-mode", opts.permission_mode or "auto"]
+    elif opts.permission_mode is not None:
+        args += ["--permission-mode", opts.permission_mode]
+    else:
+        # Mirrors no-mistakes' claudeAgent.buildArgs: default to skipping
+        # permission checks entirely unless the caller pinned a mode.
+        args.append("--dangerously-skip-permissions")
+    return args
 
 
 def _structured_output(response: JsonValue, text: str) -> JsonValue:
