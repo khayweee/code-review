@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from re import Match, Pattern
 
-from code_review.pipeline.step import StepContext, StepOutcome
+from code_review.pipeline.step import Step, StepContext, StepOutcome
 
 # --- Intent ------------------------------------------------------------------------
 
@@ -171,7 +171,7 @@ def wrap_intent(text: str, source: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class IntentStep:
+class IntentStep(Step):
     """The pipeline's first step: proves `ctx.intent` is what the CLI's `--intent` flag
     supplied, with no agent call involved.
 

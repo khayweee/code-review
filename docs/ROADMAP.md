@@ -72,6 +72,28 @@ on the milestones before it.
     agent backends warm, neither of which applies here yet (see [`GATE-MODEL.md`](GATE-MODEL.md));
     revisit once a real async trigger exists. Also excludes automated version-bumping —
     the version stays manually set until this milestone's own release story matures.
+13. **Interactive terminal UI** (`src/code_review/tui/`, new sibling package to `agent/`,
+    `pipeline/`, `steps/`, `scm/`, with its own `AGENTS.md`/`CLAUDE.md` pair per this repo's
+    harness convention). `no-mistakes` renders its whole pipeline live in a full-screen
+    terminal program it simply calls "the TUI" (`internal/tui/`, Bubble Tea + Lipgloss);
+    imitate the design lesson, not the API — this project has no daemon or IPC socket to
+    attach to (see [`GATE-MODEL.md`](GATE-MODEL.md)), so its TUI is driven in-process,
+    directly by the executor, in the one blocking foreground command this project already
+    runs. Renders every step from a fixed step registry — including steps a later milestone
+    hasn't built yet, shown as pending placeholders — so a new milestone's step appears in
+    the running UI without any TUI code change, matching the no-mistakes pattern of
+    registry-driven backfill rather than one screen per step. Also carries the interactive
+    counterpart of `no-mistakes`' permission prompts: when an agent backend's subprocess is
+    left blocked waiting on stdin (a real possibility any time `RunOpts.permission_mode`
+    opts out of the default `--dangerously-skip-permissions`), the TUI is the surface that
+    relays the prompt to the human and forwards the answer back into the subprocess.
+    Partially orthogonal like milestone 12: the live pipeline-progress view only needs the
+    already-built milestone 2 executor and can be built in parallel with milestones 4-11;
+    the findings display needs milestone 5, and the interactive approve/fix/skip/abort
+    actions from the reference screenshot need milestone 7's approval loop, which isn't
+    specced yet, so that layer stays documented here and isn't sliced into a ticket until
+    milestone 7 exists. Full PRD and ticket breakdown tracked as a GitHub issue (see
+    `AGENTS.md`'s Current milestone line for the live issue numbers).
 
 ## Module sketch
 
@@ -93,6 +115,10 @@ src/code_review/
     pr.py
   scm/
     github.py           # `gh` CLI wrapper
+  tui/
+    app.py               # Textual App, wired into `cli.py review`
+    events.py            # StepEvent types consumed from the executor's event stream
+    widgets.py            # Pipeline box, findings box, input-prompt overlay
   config.py             # trusted-vs-descriptive split
   cli.py                # entry point: `review`, `update`, `uninstall`
   install_state.py       # install-lifecycle state directory (~/.code-review)

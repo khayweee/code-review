@@ -105,6 +105,17 @@ milestone 12) is specced as #30, sliced into #31 (install via `uv tool install`)
 pending review/merge. Deliberately excludes a background daemon (tracked in #29) and
 automated version-bumping (tracked in #28) as separate future-work issues.
 
+Milestone 13 (`src/code_review/tui/`, a new sibling package to `agent/`/`pipeline/`/
+`steps/`/`scm/`, see `docs/ROADMAP.md` milestone 13) is specced as #38, sliced into #39
+(executor emits a `StepEvent` stream instead of returning `list[StepOutcome]`), #40 (the
+`tui` package itself: live pipeline-progress view, registry-driven backfill of
+not-yet-implemented steps, wires `cli.py review` to `run_steps` for real, blocked by #39),
+#41 (relay an agent subprocess's interactive-input prompts through the TUI via a new
+`RunOpts.on_input_needed` seam, blocked by #40), and #42 (read-only findings display,
+blocked by #40 and #27). Not yet implemented. The interactive approve/fix/skip/abort layer
+from the reference screenshot waits on Milestone 7's approval loop, which isn't specced
+yet, and stays documented in `docs/ROADMAP.md` rather than sliced into a ticket until then.
+
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.
 

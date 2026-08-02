@@ -1,15 +1,15 @@
-"""Round-trip and fixed-order tests for the executor (Milestone 2, issues #13 and #14).
+"""Round-trip and fixed-order tests for the executor (Milestone 2, issues #13 and #14;
+extended to the `StepEvent` stream by Milestone 13's #39).
 
 Proves the full path end to end: a real temporary git checkout with a real diff, minimal
 test `Step` implementations that embed that diff in a prompt and call through the real
 Milestone 1 `Agent` abstraction (`ClaudeCLI`) pointed at fake CLI scripts, run through
-`executor.run_steps`, producing `StepOutcome`s this test asserts on.
+`executor.run_steps`, producing a `StepEvent` stream this test collects and asserts on.
 
-No mocking of `Step` or `Agent` anywhere here -- `_ReviewStep` and `_OrderStep` are real,
-structurally-typed `Step` implementations, and `ClaudeCLI` is the real Milestone 1
-backend. See `tests/agent/test_process_group.py` for why this repo goes through the real
-backend rather than a mocked one: a mock can't prove what actually happens when the tool
-runs.
+No mocking of `Step` or `Agent` anywhere here -- `_ReviewStep` and `_OrderStep` are real
+`Step` subclasses, and `ClaudeCLI` is the real Milestone 1 backend. See
+`tests/agent/test_process_group.py` for why this repo goes through the real backend rather
+than a mocked one: a mock can't prove what actually happens when the tool runs.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from code_review.agent import Agent, ClaudeCLI, RunOpts
-from code_review.pipeline import Step, StepContext, StepOutcome, run_steps
+from code_review.pipeline import Step, StepContext, StepEvent, StepOutcome, run_steps
 from code_review.steps.intent import Intent, IntentStep
 
 FAKE_CLI = Path(__file__).parent / "fakes" / "review_findings.py"
@@ -35,6 +35,25 @@ ORDER_FAKE_CLI_B = Path(__file__).parent / "fakes" / "order_step_b.py"
 _STAND_IN_INTENT = Intent(summary="add retry logic", source="explicit", score=1.0)
 
 
+async def _collect(steps: list[Step], ctx: StepContext) -> list[StepEvent]:
+    """Drain `run_steps`'s event stream into a list -- the async-generator equivalent of
+    the `list[StepOutcome]` this test file collected before #39."""
+
+    return [event async for event in run_steps(steps, ctx)]
+
+
+def _completed_outcomes(events: list[StepEvent]) -> list[StepOutcome]:
+    """Pull each step's `StepOutcome` off its "completed" event, in order -- what
+    `run_steps` used to return directly before it became an event stream."""
+
+    outcomes = []
+    for event in events:
+        if event.status == "completed":
+            assert event.outcome is not None
+            outcomes.append(event.outcome)
+    return outcomes
+
+
 class ReviewFindings(BaseModel):
     """A stand-in schema for this slice -- Milestone 4 owns the real `Finding` schema."""
 
@@ -43,7 +62,7 @@ class ReviewFindings(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
-class _ReviewStep:
+class _ReviewStep(Step):
     """Minimal real `Step`: sends `ctx.diff` to the agent, wraps the answer as findings."""
 
     async def run(self, ctx: StepContext) -> StepOutcome:
@@ -71,7 +90,7 @@ class OrderProbe(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
-class _OrderStep:
+class _OrderStep(Step):
     """Minimal real `Step` whose fake CLI leaves a marker in the shared checkout and
     reports whether the other ordering step's marker is already there."""
 
@@ -125,9 +144,10 @@ def test_step_round_trips_through_executor_against_real_diff(tmp_path: Path) -> 
     ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
     step: Step = _ReviewStep()
 
-    outcomes = asyncio.run(run_steps([step], ctx))
+    events = asyncio.run(_collect([step], ctx))
     asyncio.run(agent.close())
 
+    outcomes = _completed_outcomes(events)
     assert len(outcomes) == 1
     outcome = outcomes[0]
     assert isinstance(outcome, StepOutcome)
@@ -152,9 +172,10 @@ def test_executor_runs_steps_in_fixed_list_order_against_real_diff(tmp_path: Pat
     ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
     steps: list[Step] = [_OrderStep(ORDER_FAKE_CLI_A), _OrderStep(ORDER_FAKE_CLI_B)]
 
-    outcomes = asyncio.run(run_steps(steps, ctx))
+    events = asyncio.run(_collect(steps, ctx))
     asyncio.run(agent.close())
 
+    outcomes = _completed_outcomes(events)
     assert len(outcomes) == 2
     first, second = outcomes
     assert isinstance(first.findings, OrderProbe)
@@ -169,7 +190,7 @@ def test_executor_runs_steps_in_fixed_list_order_against_real_diff(tmp_path: Pat
 
 
 @dataclass(frozen=True, slots=True)
-class _IntentReadingStep:
+class _IntentReadingStep(Step):
     """Minimal real `Step` standing in for a later Milestone 3-7 step: reads
     `ctx.intent.summary` directly off the shared `StepContext`, not through `IntentStep`'s
     `StepOutcome`, and surfaces it as its own findings -- makes no agent call, since
@@ -201,9 +222,10 @@ def test_intent_step_runs_first_and_a_later_step_reads_the_same_intent_via_ctx(
     ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=intent)
     steps: list[Step] = [IntentStep(), _IntentReadingStep()]
 
-    outcomes = asyncio.run(run_steps(steps, ctx))
+    events = asyncio.run(_collect(steps, ctx))
     asyncio.run(agent.close())
 
+    outcomes = _completed_outcomes(events)
     assert len(outcomes) == 2
     intent_outcome, later_outcome = outcomes
 
@@ -213,3 +235,46 @@ def test_intent_step_runs_first_and_a_later_step_reads_the_same_intent_via_ctx(
 
     # The later step never saw `intent_outcome` -- it read `ctx.intent.summary` directly.
     assert later_outcome.findings == intent_text
+
+
+def test_run_steps_yields_a_running_and_completed_event_per_step_in_order(
+    tmp_path: Path,
+) -> None:
+    """Issue #39: for N steps, `run_steps` yields exactly 2N events, alternating
+    running/completed one pair per step, each completed event naming the step that
+    preceded it, carrying a non-negative duration, and the right `StepOutcome`."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    steps: list[Step] = [_OrderStep(ORDER_FAKE_CLI_A), _OrderStep(ORDER_FAKE_CLI_B)]
+
+    events = asyncio.run(_collect(steps, ctx))
+    asyncio.run(agent.close())
+
+    assert len(events) == 2 * len(steps)
+    assert [event.status for event in events] == [
+        "running",
+        "completed",
+        "running",
+        "completed",
+    ]
+
+    for running_event, completed_event in zip(events[0::2], events[1::2], strict=True):
+        assert running_event.outcome is None
+        assert running_event.duration is None
+        assert completed_event.step_name == running_event.step_name
+        assert completed_event.started_at == running_event.started_at
+        assert completed_event.outcome is not None
+        assert completed_event.duration is not None
+        assert completed_event.duration >= 0
+
+    assert events[0].step_name == "_OrderStep"
+    first_outcome, second_outcome = events[1].outcome, events[3].outcome
+    assert isinstance(first_outcome, StepOutcome)
+    assert isinstance(second_outcome, StepOutcome)
+    assert isinstance(first_outcome.findings, OrderProbe)
+    assert isinstance(second_outcome.findings, OrderProbe)
+    assert first_outcome.findings.step == "a"
+    assert second_outcome.findings.step == "b"
