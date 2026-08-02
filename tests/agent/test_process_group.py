@@ -56,18 +56,49 @@ async def _poll_until(
 
 
 def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` is still running -- not merely present in the process table.
+
+    ``os.kill(pid, 0)`` alone is not enough: a zombie (state ``Z``) still occupies a
+    process-table slot until *some* ancestor reaps it via ``wait()``, which for an
+    orphaned grandchild is whichever process adopts it (normally init) -- not
+    ``terminate_process_group``, which can only reap its own direct child per POSIX.
+    Treating a zombie as "alive" here would make this assertion depend on the host's
+    init promptly reaping orphans, which is outside what the code under test controls.
+    """
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    return True
+    state = _proc_state(pid)
+    return state not in ("Z", "X")
+
+
+def _proc_state(pid: int) -> str | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return None
+    # Format: "pid (comm) state ...". The comm field may itself contain spaces or
+    # parens, so split on the last ')' rather than whitespace to find the state field.
+    return stat.rsplit(")", 1)[1].split()[0]
 
 
 def _read_grandchild_pid(pid_file: Path) -> int:
     return int(pid_file.read_text().strip())
 
 
-def test_cancelling_run_kills_live_grandchild_of_hung_process(tmp_path: Path) -> None:
+def test_cancelling_run_kills_live_grandchild_of_hung_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # This test doesn't care about the grace/kill deadlines themselves (that's the
+    # escalation test's job) -- only that cleanup eventually happens. Shrinking them
+    # avoids burning the full unpatched 5s+5s budget on every run: `_group_alive`
+    # polls process-group membership via `os.killpg(pgid, 0)`, which stays true for an
+    # unreaped zombie descendant, so the loop below only exits via deadline, not early
+    # detection, on a host where reaping is slow.
+    monkeypatch.setattr(process_group_module, "_TERMINATION_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(process_group_module, "_KILL_TIMEOUT_SECONDS", 0.1)
     pid_file = tmp_path / "grandchild.pid"
 
     async def scenario() -> None:
