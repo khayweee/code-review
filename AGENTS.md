@@ -89,20 +89,21 @@ Milestone 3 (`src/code_review/steps/intent.py`, explicit-only intent) is closed:
 Milestone 4 (`src/code_review/steps/rebase.py`, sync onto latest default branch before
 Review) was missing from the roadmap entirely until this was caught by comparing against
 `no-mistakes`'s fixed step order (`internal/pipeline/steps/common.go`) - see
-`docs/ROADMAP.md` milestone 4. Now specced as #22, sliced into #23 (rebase onto latest
+`docs/ROADMAP.md` milestone 4. Specced as #22, sliced into #23 (rebase onto latest
 default, abort cleanly on conflict) and #24 (block on unpushed local-default commits
-before rebasing, blocked by #23). Not yet implemented.
+before rebasing, blocked by #23). #23 is closed and merged to main (PR #52). #24 is
+implemented on branch `feature/24-unpushed-commits-guard`, not yet merged.
 
 Milestone 5 (`src/code_review/steps/review.py`, single-pass correctness and risk review)
 is specced as #25, sliced into #26 (schema, intent-conformance clause, deterministic
 pipeline-owned-delivery scope filter) and #27 (wire `ReviewStep` into the pipeline,
 blocked by #26). Sequenced after Milestone 4 per the build order, though the two
-milestones' code doesn't share files. #26 is closed and merged to main (PR #48):
-`pipeline/findings.py`'s `Finding`/`action_or_default`/`has_blocking_finding`, and
-`steps/review.py`'s `ReviewOutput`/`intent_conformance_clause`/
-`filter_pipeline_owned_delivery_findings`. #27 (`ReviewStep` itself, still not registered
-in `steps/registry.py` or wired into `cli.py` - that's a later ticket) is implemented on
-branch `feature/27-wire-reviewstep`, pending review/merge (PR #50).
+milestones' code doesn't share files. Both #26 and #27 are closed and merged to main
+(PRs #48 and #50): `pipeline/findings.py`'s `Finding`/`action_or_default`/
+`has_blocking_finding`, `steps/review.py`'s `ReviewOutput`/`intent_conformance_clause`/
+`filter_pipeline_owned_delivery_findings`, and `ReviewStep` itself - still not registered
+in `steps/registry.py`'s `IMPLEMENTED_STEPS` or wired into `cli.py`; that wiring is a
+later ticket, not part of #27's own scope.
 
 Issue #47 (unrelated to Milestone 5 - a bug in Milestone 12's `cli.py` `update` command,
 found incidentally while validating #26: `uv tool upgrade`'s stderr carries ANSI color
@@ -121,18 +122,17 @@ Milestone 13 (`src/code_review/tui/`, a new sibling package to `agent/`/`pipelin
 `tui` package itself: live pipeline-progress view, registry-driven backfill of
 not-yet-implemented steps, wires `cli.py review` to `run_steps` for real), #41 (relay an
 agent subprocess's interactive-input prompts through the TUI via a new
-`RunOpts.on_input_needed` seam), and #42 (read-only findings display). #39, #40, and #41
-are closed and merged to main (PRs #43, #44, #45; #44/#45 landed as `tui/state.py`'s pure
-`backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
+`RunOpts.on_input_needed` seam), and #42 (read-only findings display). All four are
+closed and merged to main (PRs #43, #44, #45, #53): #44/#45 landed as `tui/state.py`'s
+pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
 `steps/registry.py`'s `STEP_REGISTRY`/`IMPLEMENTED_STEPS`,
 `RunOpts.on_input_needed`/`StepContext.on_input_needed`, the stdin-relay seam in
-`agent/claude_cli.py`, and `tui/input_relay.py`'s `InputRelay`). #42 remains unimplemented
-and is blocked by #27, not #40 (that half of its blocker cleared) - #27 is implemented and
-pending merge (PR #50, see Milestone 5 above), so #42 stays gated on that PR landing, not
-on anything left in Milestone 13's own scope. The interactive approve/fix/skip/abort layer
-from the reference screenshot
-waits on Milestone 7's approval loop, which isn't specced yet, and stays documented in
-`docs/ROADMAP.md` rather than sliced into a ticket until then.
+`agent/claude_cli.py`, and `tui/input_relay.py`'s `InputRelay`; #42 landed as
+`tui/widgets.py`'s `FindingsBox` and `tui/state.py`'s `latest_findings`, once #27
+(Milestone 5) merged and cleared its blocker. Milestone 13 (issue #38) is closed - all
+4 sub-issues complete. The interactive approve/fix/skip/abort layer from the reference
+screenshot waits on Milestone 7's approval loop, which isn't specced yet, and stays
+documented in `docs/ROADMAP.md` rather than sliced into a ticket until then.
 
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.
