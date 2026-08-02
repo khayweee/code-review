@@ -116,16 +116,25 @@ def test_diff_against_head_returns_the_branchs_changes_since_merge_base(
 
 
 def test_diff_against_head_surfaces_a_bad_ref_as_a_clear_cli_exit(
-    repo_with_branch: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+    repo_with_branch: tuple[Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo, _branch = repo_with_branch
     monkeypatch.chdir(repo)
 
     # `_diff_against_head` is called directly here, not through Typer's CLI runner, so its
     # `typer.Exit` (Click's `Exit`) surfaces as itself rather than the `SystemExit` Typer
-    # converts it to when a full command run raises it.
+    # converts it to when a full command run raises it. The message is this module's own
+    # wording, not `git diff`'s raw "ambiguous argument"/path-vs-revision stderr -- a bad
+    # BRANCH is caught by a dedicated `git rev-parse --verify` check before the real diff
+    # call runs.
     with pytest.raises(typer.Exit):
         _diff_against_head("does-not-exist")
+
+    err = capsys.readouterr().err
+    assert "'does-not-exist' is not a valid branch or ref" in err
+    assert "ambiguous argument" not in err
 
 
 def test_diff_against_head_reports_when_git_is_missing(
