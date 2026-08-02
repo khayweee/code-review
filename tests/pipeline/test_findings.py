@@ -56,6 +56,20 @@ def test_finding_review_scope_accepts_the_reserved_external_delivery_value() -> 
     assert finding.review_scope == "external-delivery"
 
 
+def test_finding_location_defaults_to_none_when_unset() -> None:
+    # No producer sets `location` yet (see the field's doc comment in
+    # pipeline/findings.py) -- an agent response omitting it entirely must still validate.
+    finding = _finding()
+
+    assert finding.location is None
+
+
+def test_finding_location_accepts_a_file_line_string() -> None:
+    finding = _finding(location="steps/review.py:42")
+
+    assert finding.location == "steps/review.py:42"
+
+
 # --- action_or_default: the fail-safe default -------------------------------------------
 
 
