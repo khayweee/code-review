@@ -79,7 +79,10 @@ def _run_uv_tool_command(
     """
 
     uv = _require_uv()
-    result = subprocess.run([uv, *args], capture_output=True, text=True)
+    # `--color never` keeps stderr plain text regardless of environment/terminal color
+    # detection -- observed in practice: `uv` still emits ANSI escapes in captured
+    # (non-TTY) output, which breaks `_UPGRADE_LINE`'s regex match on the version line.
+    result = subprocess.run([uv, "--color", "never", *args], capture_output=True, text=True)
     if result.returncode != 0:
         typer.echo(f"{failure_prefix}: {result.stderr.strip()}", err=True)
         raise typer.Exit(code=result.returncode)
