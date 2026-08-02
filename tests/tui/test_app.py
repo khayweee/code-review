@@ -12,6 +12,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 
+from textual.pilot import Pilot
 from textual.widgets import Input, Static
 
 from code_review.pipeline.findings import Finding
@@ -20,9 +21,23 @@ from code_review.steps.review import ReviewOutput
 from code_review.tui.app import ReviewApp
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
-from code_review.tui.widgets import FindingsBox, PipelineBox, render_findings
+from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox, render_findings
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
+
+
+async def _wait_until_done(pilot: Pilot[None], app: ReviewApp) -> None:
+    """Poll until `app` marks its run done (a `StatusBox` mounted -- see `app.py`'s
+    `_render_status`), replacing the old "wait until `is_running` goes False" pattern now
+    that the app deliberately stays alive, showing a Status box, until "e" is pressed."""
+
+    for _ in range(20):
+        if list(app.query(StatusBox)):
+            return
+        await pilot.pause()
+        await asyncio.sleep(0.01)
+    raise AssertionError("ReviewApp never reached its done state (no StatusBox mounted)")
+
 
 _OUTCOME = StepOutcome(needs_approval=False, auto_fixable=False, findings=None)
 
@@ -97,18 +112,43 @@ def test_review_app_shows_not_yet_implemented_steps_as_pending_throughout_the_ru
     asyncio.run(scenario())
 
 
-def test_review_app_exits_itself_on_success_with_no_keypress_and_no_error() -> None:
+def test_review_app_does_not_exit_itself_on_success_until_e_is_pressed() -> None:
+    """The app used to exit itself the instant `events` was exhausted -- with today's
+    pipeline being a single near-instant `IntentStep`, that made a real run flash onto the
+    terminal and vanish in well under a second (see `app.py`'s module docstring). It now
+    waits for "e" instead."""
+
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _one_step_completes())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
 
-        assert app.is_running is False
-        assert app.error is None
+            assert app.is_running is True
+            assert app.error is None
+
+            await pilot.press("e")
+            await pilot.pause()
+
+            assert app.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_review_app_e_before_the_run_is_done_does_not_exit() -> None:
+    async def scenario() -> None:
+        async def hangs_until_cancelled() -> AsyncIterator[StepEvent]:
+            await asyncio.Future()
+            yield  # pragma: no cover - unreachable, only makes this an async generator
+
+        app = ReviewApp(REGISTRY, hangs_until_cancelled())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            await pilot.press("e")
+            await pilot.pause()
+
+            assert app.is_running is True
+            app.exit()
 
     asyncio.run(scenario())
 
@@ -117,11 +157,7 @@ def test_review_app_final_render_shows_intent_step_completed() -> None:
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _one_step_completes())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
             box = app.query_one(PipelineBox)
             assert "✓ IntentStep" in box.content
 
@@ -132,15 +168,69 @@ def test_review_app_records_the_error_and_marks_the_mid_flight_step_failed() -> 
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _second_step_raises())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
 
-        assert app.is_running is False
         assert isinstance(app.error, RuntimeError)
         assert str(app.error) == "rebase conflict"
+
+    asyncio.run(scenario())
+
+
+def test_review_app_does_not_exit_itself_on_failure_until_e_is_pressed() -> None:
+    """A broken run stays on screen exactly like a successful one -- seeing the failed step
+    and the error message matters at least as much as a clean exit does."""
+
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _second_step_raises())
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+
+            assert app.is_running is True
+
+            await pilot.press("e")
+            await pilot.pause()
+
+            assert app.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_review_app_shows_no_status_box_while_the_run_is_still_in_progress() -> None:
+    async def scenario() -> None:
+        async def hangs_until_cancelled() -> AsyncIterator[StepEvent]:
+            await asyncio.Future()
+            yield  # pragma: no cover - unreachable, only makes this an async generator
+
+        app = ReviewApp(REGISTRY, hangs_until_cancelled())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert list(app.query(StatusBox)) == []
+            app.exit()
+
+    asyncio.run(scenario())
+
+
+def test_review_app_status_box_shows_success_message_after_a_clean_run() -> None:
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _one_step_completes())
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+            box = app.query_one(StatusBox)
+            assert box.content.startswith("Pipeline ran successfully.")
+            assert "Press 'e' to exit." in box.content
+            app.exit()
+
+    asyncio.run(scenario())
+
+
+def test_review_app_status_box_shows_the_error_message_after_a_failed_run() -> None:
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _second_step_raises())
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+            box = app.query_one(StatusBox)
+            assert box.content.startswith("Pipeline failed: rebase conflict")
+            app.exit()
 
     asyncio.run(scenario())
 
@@ -257,11 +347,7 @@ def test_review_app_shows_a_findings_box_once_a_step_completes_with_non_empty_fi
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _review_step_completes_with_findings())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
 
             expected = _review_output(
                 Finding(
@@ -279,11 +365,7 @@ def test_review_app_shows_no_findings_box_when_the_only_completed_outcome_has_no
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _one_step_completes())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
 
             # `_one_step_completes` reports an outcome with `findings=None` -- not a
             # `ReviewOutput` -- so no Findings box should ever mount.
@@ -296,11 +378,7 @@ def test_review_app_shows_no_findings_box_when_the_completed_review_output_is_em
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _review_step_completes_with_no_findings())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
 
             assert list(app.query(FindingsBox)) == []
 
@@ -311,11 +389,7 @@ def test_review_app_findings_box_shows_the_later_of_two_completed_findings() -> 
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _two_steps_complete_with_findings())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
 
             box = app.query_one(FindingsBox)
             assert "second pass finding" in box.content
@@ -328,11 +402,7 @@ def test_review_app_final_render_on_failure_shows_the_broken_step_as_failed() ->
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _second_step_raises())
         async with app.run_test() as pilot:
-            for _ in range(20):
-                if not app.is_running:
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
+            await _wait_until_done(pilot, app)
             box = app.query_one(PipelineBox)
             assert "✓ IntentStep" in box.content
             assert "✗ RebaseStep" in box.content

@@ -9,7 +9,10 @@ validation, and the full pipeline run) instead uses a real pty via the `script` 
 against a real throwaway git repo, matching this project's "real subprocess, no mocking the
 external tool" testing convention (see tests/pipeline/test_executor.py, tests/test_cli_update.py).
 `IntentStep` never calls through `ctx.agent`, so this file's full run needs no real `claude`
-CLI on PATH either.
+CLI on PATH either. The full-run test also has to press "e" itself once the run finishes --
+`ReviewApp` no longer exits on its own (see `tui/app.py`'s module docstring) -- so it uses
+`_run_review_and_press_e_to_exit` instead of the simpler `_run_in_real_pty` the other
+real-pty tests use, since those exit (on a validation error) before the TUI ever starts.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -182,6 +186,35 @@ def _code_review_executable() -> str:
     return str(Path(sys.executable).parent / "code-review")
 
 
+def _run_review_and_press_e_to_exit(
+    args: list[str], cwd: Path, *, wait_before_keypress: float = 2.0, timeout: float = 30.0
+) -> subprocess.CompletedProcess[str]:
+    """Like `_run_in_real_pty`, but for a full `review` run that reaches `ReviewApp`'s
+    Status box. The app no longer exits itself once its event stream ends (see
+    `tui/app.py`'s module docstring) -- it waits for "e" -- so this waits
+    `wait_before_keypress` seconds for the (today, near-instant single-`IntentStep`)
+    pipeline to finish, then sends "e" to close it. A generous margin over the run's own
+    real duration (well under a second, observed), not a tight one, since this is a real
+    subprocess and terminal, not a mock."""
+
+    script_bin = shutil.which("script")
+    assert script_bin is not None, "the 'script' command (util-linux) is required for this test"
+
+    command = shlex.join(args)
+    process = subprocess.Popen(
+        [script_bin, "-qec", command, "/dev/null"],
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    time.sleep(wait_before_keypress)
+    stdout, stderr = process.communicate(input="e", timeout=timeout)
+    assert process.returncode is not None
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
 def test_review_rejects_empty_intent_under_a_real_terminal(
     repo_with_branch: tuple[Path, str],
 ) -> None:
@@ -199,12 +232,13 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     repo_with_branch: tuple[Path, str],
 ) -> None:
     """A real terminal (pty), a real git repo and diff, a real `IntentStep` run through the
-    real executor and `ReviewApp` -- exits with code 0, no traceback, and (checked via `ps`
-    right after `script` returns) no leftover `code-review`/textual process."""
+    real executor and `ReviewApp` -- exits with code 0 once "e" is pressed, no traceback,
+    and (checked via `ps` right after `script` returns) no leftover `code-review`/textual
+    process."""
 
     repo, branch = repo_with_branch
 
-    result = _run_in_real_pty(
+    result = _run_review_and_press_e_to_exit(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
     )
@@ -212,5 +246,15 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     assert result.returncode == 0
     assert "Traceback" not in result.stdout
 
-    ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, check=True)
-    assert "code-review review" not in ps.stdout
+    # `script`'s own child (the shell that execs `code-review`) is a grandchild of this
+    # test process, not a direct child -- `communicate()` above only guarantees `script`
+    # itself has been reaped, not that init has finished reaping that orphaned grandchild
+    # too. Poll briefly rather than asserting once immediately after `communicate()`
+    # returns, so that reaping delay can't turn into a flaky failure.
+    for _ in range(20):
+        ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, check=True)
+        if "code-review review" not in ps.stdout:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("'code-review review' still present in `ps` output")

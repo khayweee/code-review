@@ -19,6 +19,11 @@ not a `ReviewStep`/agent-call dependency, and fine directionally (`tui` importin
 `steps/`-defined pydantic model does not create a cycle, since `steps/` never imports
 `tui/`). `tui/app.py` calls it alongside `backfill` on every event and on the timer tick;
 `tests/tui/test_state.py` calls it directly against hand-built `StepEvent`s.
+
+`final_status_message` is the same kind of pure extraction again: the Status box's text
+once a run has finished, so a run's outcome (and the "e" exits now" cue) is what's left on
+screen instead of an app that silently exits itself the instant the last event arrives --
+see `app.py`'s `_render_status` for why that self-exit was removed.
 """
 
 from __future__ import annotations
@@ -112,3 +117,18 @@ def latest_findings(events: Sequence[StepEvent]) -> ReviewOutput | None:
         if isinstance(findings, ReviewOutput) and findings.findings:
             result = findings
     return result
+
+
+def final_status_message(error: BaseException | None) -> str:
+    """The Status box's message once a run has finished (see `app.py`'s `_render_status`):
+    one line naming the outcome, then the reminder that pressing "e" now closes the app --
+    the run itself won't produce anything further either way. `error` is `None` for a
+    clean run and the raised exception for one that broke mid-step; either way this is the
+    one thing on screen once the run is done, so a fast (or headless-fast, e.g. today's
+    single-`IntentStep` pipeline) run cannot flash by and vanish with no visible trace of
+    what happened. Pure, like `backfill`/`latest_findings`, so `tests/tui/test_state.py`
+    can pin its wording directly, independent of a running `App`/`Pilot`.
+    """
+
+    outcome = "Pipeline ran successfully." if error is None else f"Pipeline failed: {error}"
+    return f"{outcome}\n\nPress 'e' to exit."
