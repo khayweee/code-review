@@ -12,8 +12,8 @@ The loop below is a plain `for` over `steps`: nothing here inspects a prior step
 `StepOutcome` to decide whether or how to run the next one. Step order is a property of
 the list the caller passes, not of anything a step returns -- see
 `tests/pipeline/test_executor.py` for a test that would fail if that stopped being true.
-Auto-fix and the approval park are Milestone 6's job, layered on top of this same call
-shape; head continuity is Milestone 8's.
+Auto-fix and the approval park are Milestone 7's job, layered on top of this same call
+shape; head continuity is Milestone 9's.
 """
 
 from __future__ import annotations

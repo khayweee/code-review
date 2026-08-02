@@ -1,4 +1,4 @@
-"""GitHub wrapper via the `gh` CLI — Milestone 7 (see docs/ROADMAP.md).
+"""GitHub wrapper via the `gh` CLI — Milestone 8 (see docs/ROADMAP.md).
 
 Note: `gh` is not installed on this machine as of the scaffold — install it before
 starting this milestone. Planned shape: shell out to `gh pr create`, piping the body via

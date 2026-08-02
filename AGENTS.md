@@ -81,18 +81,22 @@ Scope was deliberately narrower than the full orchestration core in
 `no-mistakes/learning/02-orchestration-core-and-state-machine.md`: the auto-fix/approval
 state machine is Milestone 7 and head continuity is Milestone 9, both out of scope for #12.
 
-Milestone 3 (`src/code_review/steps/intent.py`, explicit-only intent) is specced as #17,
-sliced into #18 (sanitize-and-wrap: `Intent` shape, secret redaction, adversarial-delimiter
-stripping) - merged to main - and #19 (wire `--intent` into `StepContext`/`IntentStep`,
-`cli.py` validation) - implemented on branch `feature/19-wire-explicit-intent`, pending
-review/merge. Once #19 merges, #17 closes and Milestone 4 becomes the next milestone to
-spec (see below).
+Milestone 3 (`src/code_review/steps/intent.py`, explicit-only intent) is closed: #17
+(parent), sliced into #18 (sanitize-and-wrap) and #19 (wire `--intent` into
+`StepContext`/`IntentStep`, `cli.py` validation), both merged to main.
 
 Milestone 4 (`src/code_review/steps/rebase.py`, sync onto latest default branch before
 Review) was missing from the roadmap entirely until this was caught by comparing against
 `no-mistakes`'s fixed step order (`internal/pipeline/steps/common.go`) - see
-`docs/ROADMAP.md` milestone 4. Not yet specced as an issue; do that when Milestone 3 closes
-and this becomes the next milestone up.
+`docs/ROADMAP.md` milestone 4. Now specced as #22, sliced into #23 (rebase onto latest
+default, abort cleanly on conflict) and #24 (block on unpushed local-default commits
+before rebasing, blocked by #23). Not yet implemented.
+
+Milestone 5 (`src/code_review/steps/review.py`, single-pass correctness and risk review)
+is specced as #25, sliced into #26 (schema, intent-conformance clause, deterministic
+pipeline-owned-delivery scope filter) and #27 (wire `ReviewStep` into the pipeline,
+blocked by #26). Sequenced after Milestone 4 per the build order, though the two
+milestones' code doesn't share files. Not yet implemented.
 
 Milestone 12 (`scripts/install.sh`, `src/code_review/install_state.py`, `cli.py`'s
 `update`/`uninstall` commands - orthogonal to pipeline progress, see `docs/ROADMAP.md`
@@ -139,6 +143,15 @@ Commit messages follow Conventional Commits: `<type>(<scope>): <summary>` (e.g.
 `feat(agent): survive chatty agent output`), matching this repo's existing history.
 `<type>` mirrors the branch category (`feature`→`feat`, `bugfix`/`hotfix`→`fix`, `docs`,
 `refactor`, `test`, `chore`).
+
+## Attribute documentation
+
+When declaring fields on a dataclass, Pydantic model, config object, or other structured
+record, document each field at its declaration with both its purpose and where or how it
+is consumed. Say explicitly when a field is reserved for future work and has no current
+consumer; do not make planned behavior sound implemented. Whenever a field's meaning,
+consumer, validation, or lifecycle changes, update its declaration comment in the same
+change so the documentation continues to describe actual usage.
 
 ## Living document policy
 

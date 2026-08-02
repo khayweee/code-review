@@ -13,7 +13,7 @@ outcome. Get this backwards (e.g. threading wrapped text through `StepOutcome.fi
 instead of re-deriving it from `ctx.intent`) and a step downstream of a hypothetical
 future intent-mutating step would silently see stale wrapped text.
 
-`review.py`, `test_sufficiency.py`, and `pr.py` remain unimplemented (Milestones 4-5 and
-7, see [docs/ROADMAP.md](../../../docs/ROADMAP.md)). Once real prompts/schemas land,
+`review.py`, `test_sufficiency.py`, and `pr.py` remain unimplemented (Milestones 5-6 and
+8, see [docs/ROADMAP.md](../../../docs/ROADMAP.md)). Once real prompts/schemas land,
 record here: the exact intent-conformance clause wording, the blocking-findings gate's
 definition, and any PR-body byte-budget/truncation rules.
