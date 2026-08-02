@@ -97,29 +97,40 @@ Milestone 5 (`src/code_review/steps/review.py`, single-pass correctness and risk
 is specced as #25, sliced into #26 (schema, intent-conformance clause, deterministic
 pipeline-owned-delivery scope filter) and #27 (wire `ReviewStep` into the pipeline,
 blocked by #26). Sequenced after Milestone 4 per the build order, though the two
-milestones' code doesn't share files. Not yet implemented.
+milestones' code doesn't share files. #26 is closed and merged to main (PR #48):
+`pipeline/findings.py`'s `Finding`/`action_or_default`/`has_blocking_finding`, and
+`steps/review.py`'s `ReviewOutput`/`intent_conformance_clause`/
+`filter_pipeline_owned_delivery_findings`. #27 (`ReviewStep` itself, still not registered
+in `steps/registry.py` or wired into `cli.py` - that's a later ticket) is implemented on
+branch `feature/27-wire-reviewstep`, pending review/merge (PR #50).
+
+Issue #47 (unrelated to Milestone 5 - a bug in Milestone 12's `cli.py` `update` command,
+found incidentally while validating #26: `uv tool upgrade`'s stderr carries ANSI color
+codes even when piped, which broke the version-line regex) is closed and merged (PR #49).
 
 Milestone 12 (`scripts/install.sh`, `src/code_review/install_state.py`, `cli.py`'s
 `update`/`uninstall` commands - orthogonal to pipeline progress, see `docs/ROADMAP.md`
 milestone 12) is specced as #30, sliced into #31 (install via `uv tool install`), #32
-(update, blocked by #31), and #33 (uninstall, blocked by #31). Implemented on PR #34,
-pending review/merge. Deliberately excludes a background daemon (tracked in #29) and
-automated version-bumping (tracked in #28) as separate future-work issues.
+(update, blocked by #31), and #33 (uninstall, blocked by #31). Implemented and merged
+(PR #34). Deliberately excludes a background daemon (tracked in #29) and automated
+version-bumping (tracked in #28) as separate future-work issues.
 
 Milestone 13 (`src/code_review/tui/`, a new sibling package to `agent/`/`pipeline/`/
 `steps/`/`scm/`, see `docs/ROADMAP.md` milestone 13) is specced as #38, sliced into #39
-(executor emits a `StepEvent` stream instead of returning `list[StepOutcome]`, merged),
-#40 (the `tui` package itself: live pipeline-progress view, registry-driven backfill of
-not-yet-implemented steps, wires `cli.py review` to `run_steps` for real, blocked by #39),
-#41 (relay an agent subprocess's interactive-input prompts through the TUI via a new
-`RunOpts.on_input_needed` seam, blocked by #40), and #42 (read-only findings display,
-blocked by #40 and #27). #40 is implemented on branch `feature/40-tui-pipeline-view`
-(`tui/state.py`'s pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s
-`ReviewApp`, `steps/registry.py`'s `STEP_REGISTRY`/`IMPLEMENTED_STEPS`), pending
-review/merge; #41 (`RunOpts.on_input_needed`/`StepContext.on_input_needed`, the
-stdin-relay seam in `agent/claude_cli.py`, and `tui/input_relay.py`'s `InputRelay`) is
-implemented on branch `feature/41-stdin-relay`, pending review/merge; #42 remains
-unimplemented. The interactive approve/fix/skip/abort layer from the reference screenshot
+(executor emits a `StepEvent` stream instead of returning `list[StepOutcome]`), #40 (the
+`tui` package itself: live pipeline-progress view, registry-driven backfill of
+not-yet-implemented steps, wires `cli.py review` to `run_steps` for real), #41 (relay an
+agent subprocess's interactive-input prompts through the TUI via a new
+`RunOpts.on_input_needed` seam), and #42 (read-only findings display). #39, #40, and #41
+are closed and merged to main (PRs #43, #44, #45; #44/#45 landed as `tui/state.py`'s pure
+`backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
+`steps/registry.py`'s `STEP_REGISTRY`/`IMPLEMENTED_STEPS`,
+`RunOpts.on_input_needed`/`StepContext.on_input_needed`, the stdin-relay seam in
+`agent/claude_cli.py`, and `tui/input_relay.py`'s `InputRelay`). #42 remains unimplemented
+and is blocked by #27, not #40 (that half of its blocker cleared) - #27 is implemented and
+pending merge (PR #50, see Milestone 5 above), so #42 stays gated on that PR landing, not
+on anything left in Milestone 13's own scope. The interactive approve/fix/skip/abort layer
+from the reference screenshot
 waits on Milestone 7's approval loop, which isn't specced yet, and stays documented in
 `docs/ROADMAP.md` rather than sliced into a ticket until then.
 
