@@ -4,7 +4,44 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import sys
+
+
+def read_prompt() -> str:
+    """Read the parent's full prompt from stdin, working for either call path.
+
+    The default `--dangerously-skip-permissions` path uses `process.communicate()`,
+    which sends EOF right after writing the prompt, so a blocking `sys.stdin.read()`
+    returns once it has all arrived. The stdin-relay path (issue #41,
+    `claude_cli._run_with_stdin_relay`) deliberately keeps stdin open for the rest of the
+    call -- a fake exercising that path must not block waiting for an EOF that will never
+    come, so this instead drains whatever is immediately available (see
+    `drain_available_stdin`). `sys.argv` already carries
+    `--dangerously-skip-permissions` when present, so that's the single source of truth
+    for which path a given invocation is on -- matching how `claude_cli._build_args`
+    itself decides.
+    """
+    if "--dangerously-skip-permissions" in sys.argv:
+        return sys.stdin.read()
+    return drain_available_stdin()
+
+
+def drain_available_stdin(idle_seconds: float = 0.05) -> str:
+    """Read and return whatever is immediately available on stdin, without an EOF.
+
+    Polls with a short `select` timeout and stops once nothing new has arrived for
+    `idle_seconds` -- fine for the small, single-write payloads these fakes are given.
+    Used by fakes exercising the stdin-relay path (issue #41), where the parent never
+    sends EOF, so plain `sys.stdin.read()`/`readline()` would hang forever.
+    """
+    chunks: list[str] = []
+    while select.select([sys.stdin], [], [], idle_seconds)[0]:
+        chunk = os.read(sys.stdin.fileno(), 65536)
+        if not chunk:
+            break
+        chunks.append(chunk.decode("utf-8"))
+    return "".join(chunks)
 
 
 def option_value(name: str) -> str:

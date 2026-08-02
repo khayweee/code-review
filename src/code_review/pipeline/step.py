@@ -13,6 +13,14 @@ off the same immutable `ctx`, rather than the first step handing it forward thro
 `StepOutcome`. It is not the place fix-loop or approval state lives -- Milestone 7 extends
 this type once that loop exists.
 
+`StepContext.on_input_needed` (issue #41) carries the same interactive-input relay
+`RunOpts.on_input_needed` (see `agent/base.py`) is shaped for, so a future step can pass
+`ctx.on_input_needed` through to its own `RunOpts` without needing a live reference to the
+TUI itself. No step consumes it yet -- none sets a non-default `permission_mode`, the only
+thing that makes a backend subprocess reach for it. `cli.py` wires it to a real
+`tui.input_relay.InputRelay.request_input`; tests that don't exercise it can leave it at
+its default `None`.
+
 `StepOutcome` carries `needs_approval`/`auto_fixable` now so Milestone 7 can act on them
 without a breaking schema change, even though nothing branches on them yet. `findings` is
 typed as `object` rather than the not-yet-built Milestone 5 `Finding`/`Findings` schema
@@ -33,6 +41,7 @@ elapsed time within this process.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -57,6 +66,12 @@ class StepContext:
     agent: Agent
     diff: str
     intent: Intent
+    # Reserved for a future step that pins a non-default `permission_mode` on its own
+    # `RunOpts` (see `agent/base.py`'s `RunOpts.on_input_needed`) and needs to pass this
+    # through so a blocked-on-stdin subprocess can relay its prompt to a human. No step
+    # consumes this yet -- see the module docstring. `cli.py` wires it to
+    # `tui.input_relay.InputRelay.request_input` for interactive runs.
+    on_input_needed: Callable[[str], Awaitable[str]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,8 +16,10 @@ from code_review.agent import (
     ProcessExitError,
     ProcessStartError,
     RunOpts,
+    StdinBlockedError,
     Usage,
 )
+from code_review.agent import claude_cli as claude_cli_module
 
 FAKES = Path(__file__).parent / "fakes"
 FAKE_CLI = FAKES / "valid_output.py"
@@ -26,6 +28,7 @@ PROSE_CLI = FAKES / "chatty_prose_output.py"
 NONZERO_EXIT_CLI = FAKES / "nonzero_exit.py"
 NO_JSON_CLI = FAKES / "no_json_output.py"
 INVALID_SCHEMA_CLI = FAKES / "invalid_schema_output.py"
+BLOCKS_ON_STDIN_CLI = FAKES / "blocks_on_stdin.py"
 
 
 class Answer(BaseModel):
@@ -282,3 +285,68 @@ def test_schema_mismatch_raises_output_validation_error(tmp_path: Path) -> None:
                 )
             )
         )
+
+
+# --- stdin relay (issue #41) ------------------------------------------------------------
+#
+# Both tests below pin `permission_mode` to a non-default value so `_build_args` omits
+# `--dangerously-skip-permissions`, routing the call through `_run_with_stdin_relay`
+# instead of the `process.communicate()` fast path (see `claude_cli.py`'s module
+# docstring). Both shrink `_STDIN_IDLE_TIMEOUT_SECONDS` via monkeypatch so the stall the
+# fake CLI (`blocks_on_stdin.py`) creates is detected quickly rather than after the real
+# 30s default.
+
+
+def test_stdin_relay_invokes_callback_and_writes_its_answer_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(claude_cli_module, "_STDIN_IDLE_TIMEOUT_SECONDS", 0.2)
+    received_prompts: list[str] = []
+
+    async def on_input_needed(prompt: str) -> str:
+        received_prompts.append(prompt)
+        return "yes"
+
+    async def scenario() -> Answer:
+        agent = ClaudeCLI()
+        result = await agent.run(
+            RunOpts(
+                prompt="inspect this change",
+                cwd=tmp_path,
+                output_schema=Answer,
+                executable=BLOCKS_ON_STDIN_CLI,
+                permission_mode="bypassPermissions",
+                on_input_needed=on_input_needed,
+            )
+        )
+        await agent.close()
+        return result.output
+
+    output = asyncio.run(scenario())
+
+    assert received_prompts == ["Allow file write to notes.txt? (y/n): "]
+    # The fake CLI echoes the received answer back through `build_response`'s `answer`
+    # field -- proof the callback's answer reached the subprocess, unblocking it.
+    assert output.answer == "received: yes"
+
+
+def test_stdin_relay_fails_closed_with_no_callback_after_bounded_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(claude_cli_module, "_STDIN_IDLE_TIMEOUT_SECONDS", 0.2)
+
+    agent = ClaudeCLI()
+    with pytest.raises(StdinBlockedError) as exc_info:
+        asyncio.run(
+            agent.run(
+                RunOpts(
+                    prompt="inspect this change",
+                    cwd=tmp_path,
+                    output_schema=Answer,
+                    executable=BLOCKS_ON_STDIN_CLI,
+                    permission_mode="bypassPermissions",
+                )
+            )
+        )
+
+    assert "Allow file write to notes.txt" in exc_info.value.stdout_so_far

@@ -47,10 +47,34 @@ names replaces Textual's own node registry). If a future `App` subclass attribut
 name that collides with a Textual internal, expect the same class of confusing failure —
 check `dir(App)`/`dir(DOMNode)` before naming a new attribute here.
 
+## The `InputRelay` seam (issue #41)
+
+`input_relay.py`'s `InputRelay` is, like `state.py`, deliberately Textual-import-free —
+its queueing contract (`request_input`/`next_request`) is unit-tested in isolation in
+`tests/tui/test_input_relay.py`, independent of a running `App`/`Pilot`. It exists to
+break a construction-order cycle: `cli.py` needs `ctx.on_input_needed` (see
+`pipeline/step.py`'s `StepContext.on_input_needed`) bound before `StepContext`/
+`run_steps(...)` can be built, but `ReviewApp` is constructed *from* that same `events`
+generator — neither side can hold a live reference to the other yet. `cli.py` builds the
+`InputRelay` first and hands `relay.request_input` to `StepContext` and `relay` itself to
+`ReviewApp(..., input_relay=relay)` independently.
+
+`ReviewApp.on_mount` starts a second worker (`_relay_input`) alongside `_consume_events`
+when `input_relay` is not `None`, in its own worker `group` — `run_worker(...,
+exclusive=True)` only cancels other workers in the *same* group, so the events worker
+(default group, exclusive) and this one don't race to cancel each other. Each iteration
+awaits `input_relay.next_request()`, pushes `screens.InputPromptScreen` via
+`await self.push_screen_wait(...)` to collect one line of human input, and resolves the
+matching `request_input` call's future with it.
+
+**Known limitation**: the modal round-trip is proven end-to-end against a hand-built
+`InputRelay` request in `tests/tui/test_app.py`, and the detection/relay logic itself is
+proven against a fake CLI subprocess in `tests/agent/test_claude_cli.py` — but the two have
+not been exercised together against a real `claude` CLI process that actually blocks on
+stdin waiting for a permission answer. See `agent/AGENTS.md`'s matching note.
+
 ## Non-goals landed in later issues, not here
 
-- Relaying an agent subprocess's stdin prompts through the TUI is issue #41
-  (`RunOpts.on_input_needed`) — no such seam exists yet.
 - A findings-display box is issue #42 — `PipelineBox` is the only widget so far.
 - The interactive approve/fix/skip/abort layer waits on Milestone 7's approval loop, which
   isn't specced yet.

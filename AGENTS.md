@@ -116,10 +116,12 @@ not-yet-implemented steps, wires `cli.py review` to `run_steps` for real, blocke
 blocked by #40 and #27). #40 is implemented on branch `feature/40-tui-pipeline-view`
 (`tui/state.py`'s pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s
 `ReviewApp`, `steps/registry.py`'s `STEP_REGISTRY`/`IMPLEMENTED_STEPS`), pending
-review/merge; #41 and #42 remain unimplemented. The interactive approve/fix/skip/abort
-layer from the reference screenshot waits on Milestone 7's approval loop, which isn't
-specced yet, and stays documented in `docs/ROADMAP.md` rather than sliced into a ticket
-until then.
+review/merge; #41 (`RunOpts.on_input_needed`/`StepContext.on_input_needed`, the
+stdin-relay seam in `agent/claude_cli.py`, and `tui/input_relay.py`'s `InputRelay`) is
+implemented on branch `feature/41-stdin-relay`, pending review/merge; #42 remains
+unimplemented. The interactive approve/fix/skip/abort layer from the reference screenshot
+waits on Milestone 7's approval loop, which isn't specced yet, and stays documented in
+`docs/ROADMAP.md` rather than sliced into a ticket until then.
 
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.

@@ -13,7 +13,9 @@ does not decide what steps run or in what order; that stays the executor's job.
 | `backfill` | Pure, Textual-independent function turning the `StepEvent`s seen so far into one `StepRow` per registry entry. | `registry`, `events`, `now`, optional `failed_step` | `list[StepRow]` |
 | `PipelineBox` | Bordered Textual widget rendering one line per `StepRow`, with a status icon and formatted duration. | `list[StepRow]` via `update_rows` | Rendered terminal content |
 | `render_rows`/`format_row`/`format_duration` | Formatting helpers behind `PipelineBox`, unit-testable on their own. | `StepRow`(s) | Plain display strings |
-| `ReviewApp` | The Textual `App`: consumes an injected `events` stream in a worker, re-renders `PipelineBox` on every event and on a timer tick, and exits itself when the stream ends or raises. | `registry: Sequence[str]`, `events: AsyncIterator[StepEvent]` | Terminal UI; `self.error` after `run()` returns |
+| `ReviewApp` | The Textual `App`: consumes an injected `events` stream in a worker, re-renders `PipelineBox` on every event and on a timer tick, exits itself when the stream ends or raises, and (if given an `input_relay`) runs a second worker relaying queued prompts through a modal. | `registry: Sequence[str]`, `events: AsyncIterator[StepEvent]`, optional `input_relay: InputRelay` | Terminal UI; `self.error` after `run()` returns |
+| `InputRelay` | Textual-import-free queue pairing a blocked backend's prompt with a future for the human's answer (issue #41). | `request_input(prompt)` from a backend call; `next_request()` from `ReviewApp` | An awaited answer string; a `(prompt, future)` pair |
+| `InputPromptScreen` | Modal screen (`screens.py`) showing one prompt and collecting one line of input. | `prompt: str` | Dismisses with the submitted line |
 
 ## Place in the complete pipeline
 

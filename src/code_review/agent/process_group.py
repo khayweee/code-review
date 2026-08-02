@@ -12,8 +12,11 @@ non-zero exit, a parse/validation failure, or cancellation.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
+
+_logger = logging.getLogger(__name__)
 
 # How long to wait after SIGTERM, and after SIGKILL, before giving up. Deliberately
 # module-level constants rather than a public parameter: only tests need to shrink
@@ -39,13 +42,23 @@ async def terminate_process_group(process: asyncio.subprocess.Process) -> None:
     if _signal_group(pgid, signal.SIGTERM) and not await _group_exited(
         pgid, _TERMINATION_GRACE_SECONDS
     ):
+        # Escalate to SIGKILL if the group is still alive after the grace period.
         if _signal_group(pgid, signal.SIGKILL):
             await _group_exited(pgid, _KILL_TIMEOUT_SECONDS)
 
     try:
         await asyncio.wait_for(process.wait(), timeout=_KILL_TIMEOUT_SECONDS)
     except TimeoutError:
-        pass  # Give up cleanly rather than block this coroutine forever.
+        # Give up cleanly rather than block this coroutine forever, but this is not
+        # supposed to happen after SIGKILL - most likely the direct child is stuck in
+        # uninterruptible sleep (D state), so it may still be alive. Surface that so it
+        # doesn't fail silently.
+        _logger.warning(
+            "process group %d: direct child did not exit within %.1fs of SIGKILL; "
+            "it may still be running",
+            pgid,
+            _KILL_TIMEOUT_SECONDS,
+        )
 
 
 def _signal_group(pgid: int, sig: signal.Signals) -> bool:
