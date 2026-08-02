@@ -1,10 +1,13 @@
 """Correctness/alignment review + risk assessment schema, intent-conformance clause, and
 deterministic scope filter -- Milestone 5 (see docs/ROADMAP.md), sliced as issue #26.
 
-This module builds the schema and pure-function building blocks `ReviewStep` will use;
-`ReviewStep` itself (the class that actually calls `ctx.agent.run`, wires `wrap_intent`,
-and gets registered in `steps/registry.py`) is issue #27, blocked by this one and
-deliberately not built here -- there is no agent or subprocess call anywhere in this file.
+This module also builds `ReviewStep` (issue #27, unblocked by #26 landing above): the
+class that actually calls `ctx.agent.run`, wires `wrap_intent`, and applies the scope
+filter below to the parsed answer before reporting a `StepOutcome`. `ReviewStep` is
+deliberately NOT added to `steps/registry.py`'s `IMPLEMENTED_STEPS` or wired into
+`cli.py`'s step list here -- issue #27 is scoped to proving the class directly, the same
+way `tests/pipeline/test_executor.py`'s `_ReviewStep`/`_OrderStep` are proven without ever
+being registered anywhere; that wiring is a later ticket.
 
 Single prompt, single schema: `ReviewOutput` carries findings *and* the required
 `risk_level`/`risk_rationale` fields together (see docs/GLOSSARY.md's "Risk verdict") --
@@ -34,12 +37,16 @@ level -- see the function's own docstring for the exact rule and its documented 
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel
 
-from code_review.pipeline.findings import Finding
-from code_review.steps.intent import Intent
+from code_review.agent import RunOpts
+from code_review.pipeline.findings import Finding, action_or_default, has_blocking_finding
+from code_review.pipeline.step import Step, StepContext, StepOutcome
+from code_review.steps.intent import Intent, wrap_intent
 
 # --- ReviewOutput ----------------------------------------------------------------------
 
@@ -164,3 +171,81 @@ def filter_pipeline_owned_delivery_findings(output: ReviewOutput) -> ReviewOutpu
         )
 
     return output.model_copy(update={"findings": remaining})
+
+
+# --- ReviewStep --------------------------------------------------------------------------
+
+
+def _build_prompt(ctx: StepContext) -> str:
+    """Assemble `ReviewStep`'s single prompt: the diff, then the wrapped intent block
+    (`wrap_intent`, see `steps/intent.py`), then the intent-conformance clause appended
+    only when non-empty (see `intent_conformance_clause` above). Diff first, so the agent
+    reads what changed before what it is being held to -- mirroring `ReviewOutput`'s own
+    findings-before-risk field ordering rationale.
+    """
+
+    sections = [
+        f"Review this diff:\n{ctx.diff}",
+        wrap_intent(ctx.intent.summary, ctx.intent.source),
+    ]
+
+    clause = intent_conformance_clause(ctx.intent)
+    if clause:
+        sections.append(clause)
+
+    return "\n\n".join(sections)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewStep(Step):
+    """Milestone 5's single-pass correctness/alignment review and risk assessment (issue
+    #27): one prompt built by `_build_prompt`, exactly one `ctx.agent.run` call against
+    `ReviewOutput`, and the deterministic pipeline-owned-delivery scope filter applied to
+    the parsed answer before it becomes this step's `StepOutcome`.
+
+    Single pass only -- no retry, no re-review, no session persistence (see
+    docs/GLOSSARY.md's "Agent": one call in, one result out; a step that needs more calls
+    makes more calls, this one needs exactly one). The fix/approval loop that would act on
+    a parked run is Milestone 7's, not this step's.
+    """
+
+    # Subprocess test seam threaded through to `RunOpts.executable` (see `agent/base.py`'s
+    # own field comment: "swap for a fake CLI in tests"). Defaults to "claude" for
+    # production use; tests construct `ReviewStep(executable=...)` to point the real
+    # `ClaudeCLI` backend at a fake CLI script, mirroring
+    # `tests/pipeline/test_executor.py`'s `_OrderStep.executable` field for the same
+    # reason. No current caller overrides it -- `ReviewStep` is not yet registered in
+    # `steps/registry.py`'s `IMPLEMENTED_STEPS` or wired into `cli.py` (see module
+    # docstring); that wiring is a later ticket.
+    executable: str | Path = "claude"
+
+    async def run(self, ctx: StepContext) -> StepOutcome:
+        result = await ctx.agent.run(
+            RunOpts(
+                prompt=_build_prompt(ctx),
+                cwd=ctx.cwd,
+                output_schema=ReviewOutput,
+                executable=self.executable,
+            )
+        )
+
+        filtered = filter_pipeline_owned_delivery_findings(result.output)
+
+        # The shared blocking-findings gate (see docs/GLOSSARY.md's "Blocking finding"):
+        # true iff a surviving finding's resolved action is "ask-user".
+        blocking = has_blocking_finding(filtered.findings)
+        # Auto-fixable iff at least one surviving finding resolves to "auto-fix" and none
+        # resolve to "ask-user" -- the latter half is exactly `not blocking` above, kept
+        # as its own gate rather than folded into one boolean expression so each half of
+        # the acceptance rule ("at least one auto-fix" / "no ask-user") stays independently
+        # readable and testable.
+        has_auto_fix = any(
+            action_or_default(finding.action) == "auto-fix" for finding in filtered.findings
+        )
+        auto_fixable = has_auto_fix and not blocking
+
+        return StepOutcome(
+            needs_approval=blocking,
+            auto_fixable=auto_fixable,
+            findings=filtered,
+        )
