@@ -230,6 +230,150 @@ def test_rebase_step_raises_rather_than_misclassify_a_dirty_working_tree_as_a_co
     assert (checkout / "a.txt").read_text() == "locally dirtied, never committed\n"
 
 
+# --- Scenario 5: issue #24 guard fires --------------------------------------------------
+
+
+def test_rebase_step_blocks_when_local_default_branch_carries_unpushed_commits_into_head(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    """Guard fires: local `main` (distinct from `origin/main`) gains a commit never pushed
+    anywhere, and the checkout's `feature` branch (HEAD) already incorporates that commit
+    by merging local `main` into itself -- so local `main`'s tip is both strictly ahead of
+    `origin/main` and an ancestor of HEAD, both conditions the guard requires. No rebase
+    may be attempted at all."""
+
+    origin, checkout = origin_and_checkout
+
+    # Local `main`, branched from origin/main, gains a commit the developer never pushed.
+    _run_git(["branch", "main", "origin/main"], checkout)
+    _run_git(["checkout", "-q", "main"], checkout)
+    local_only_sha = _commit_file(
+        checkout, "local_main_only.txt", "unpushed\n", "add local-main-only file"
+    )
+
+    # `feature` (the branch under review) already carries that unpushed tip -- e.g. the
+    # developer merged their own local main into their feature branch.
+    _run_git(["checkout", "-q", "feature"], checkout)
+    _run_git(["merge", "-q", "--no-ff", "main", "-m", "merge local main into feature"], checkout)
+
+    head_before = _run_git(["rev-parse", "HEAD"], checkout).stdout.strip()
+
+    agent = _SpyAgent()
+    outcome = asyncio.run(RebaseStep().run(_ctx(checkout, agent)))
+
+    assert agent.run_called is False
+    assert isinstance(outcome, StepOutcome)
+    assert outcome.needs_approval is True
+    assert outcome.auto_fixable is False
+
+    findings = outcome.findings
+    assert isinstance(findings, list)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert isinstance(finding, Finding)
+    assert finding.action == "ask-user"
+    # Names the offending commit (short SHA + subject) and the file it touches.
+    assert local_only_sha[:7] in finding.description
+    assert "add local-main-only file" in finding.description
+    assert "local_main_only.txt" in finding.description
+
+    # No rebase was attempted at all: HEAD is exactly where the merge left it (git rebase
+    # would have moved it, even on a clean fast-forward), and there is no paused-rebase
+    # state -- proof the step returned before ever calling `git rebase`.
+    head_after = _run_git(["rev-parse", "HEAD"], checkout).stdout.strip()
+    assert head_after == head_before
+    _assert_not_mid_rebase(checkout)
+
+
+# --- Scenario 6: guard does not fire, no local default branch exists --------------------
+
+
+def test_rebase_step_does_not_block_and_rebases_normally_when_no_local_default_branch_exists(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    """Regression test: `origin_and_checkout`'s own fixture shape (no local `main` branch
+    in `checkout` at all, only the remote-tracking `origin/main`) is the ordinary case the
+    guard must stay silent on. Mirrors Scenario 2's real clean-rebase setup so this proves
+    both "the guard is a no-op" and "the ordinary rebase behavior it falls through to is
+    unaffected by the new code path" in one test."""
+
+    origin, checkout = origin_and_checkout
+    assert (
+        _run_git_unchecked(
+            ["rev-parse", "--verify", "--quiet", "refs/heads/main"], checkout
+        ).returncode
+        != 0
+    )
+
+    origin_sha = _commit_file(origin, "origin_only.txt", "from origin\n", "origin advances")
+    _commit_file(checkout, "feature_only.txt", "from feature\n", "feature advances")
+
+    agent = _SpyAgent()
+    outcome = asyncio.run(RebaseStep().run(_ctx(checkout, agent)))
+
+    assert agent.run_called is False
+    assert outcome.needs_approval is False
+    assert outcome.auto_fixable is False
+    assert outcome.findings == []
+    _assert_not_mid_rebase(checkout)
+
+    is_ancestor = _run_git_unchecked(["merge-base", "--is-ancestor", origin_sha, "HEAD"], checkout)
+    assert is_ancestor.returncode == 0
+
+
+# --- Scenario 7: guard does not fire, local default branch already equals origin --------
+
+
+def test_rebase_step_does_not_block_when_local_default_branch_already_equals_origin(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    """Regression test pinning down condition 1 in isolation: a local `main` branch
+    exists, but its tip already equals `origin/main`'s -- not genuinely ahead. Local
+    `main`'s tip is trivially an ancestor of HEAD (condition 2 holds, since `feature` was
+    itself cut from that same commit), but equality is exactly what condition 1's
+    strictness check excludes, so the guard must not fire on condition 2 alone."""
+
+    _origin, checkout = origin_and_checkout
+    _run_git(["branch", "main", "origin/main"], checkout)
+
+    agent = _SpyAgent()
+    outcome = asyncio.run(RebaseStep().run(_ctx(checkout, agent)))
+
+    assert agent.run_called is False
+    assert outcome.needs_approval is False
+    assert outcome.auto_fixable is False
+    assert outcome.findings == []
+    _assert_not_mid_rebase(checkout)
+
+
+# --- Scenario 8: guard does not fire, local default branch ahead but not incorporated ---
+
+
+def test_rebase_step_does_not_block_when_local_default_branch_is_ahead_but_not_incorporated(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    """Regression test pinning down condition 2 in isolation: local `main` gains a commit
+    never pushed to `origin/main` (condition 1 holds -- it is genuinely ahead), but
+    `feature` (HEAD) never merged it in, so local `main`'s tip is not an ancestor of HEAD.
+    The guard must not fire on condition 1 alone; `feature` still equals `origin/main`, so
+    this falls through to the ordinary already-up-to-date rebase outcome."""
+
+    origin, checkout = origin_and_checkout
+    _run_git(["branch", "main", "origin/main"], checkout)
+    _run_git(["checkout", "-q", "main"], checkout)
+    _commit_file(checkout, "local_main_only.txt", "unpushed\n", "add local-main-only file")
+    _run_git(["checkout", "-q", "feature"], checkout)
+
+    agent = _SpyAgent()
+    outcome = asyncio.run(RebaseStep().run(_ctx(checkout, agent)))
+
+    assert agent.run_called is False
+    assert outcome.needs_approval is False
+    assert outcome.auto_fixable is False
+    assert outcome.findings == []
+    _assert_not_mid_rebase(checkout)
+
+
 # --- default_branch override -----------------------------------------------------------
 
 

@@ -2,8 +2,9 @@
 
 Keeps the branch under review current with the latest default branch before Review runs,
 so later steps never answer against a stale diff (see docs/GLOSSARY.md's "Rebase step").
-`RebaseStep.run` does exactly two real `git` subprocess calls on the happy path (`fetch`,
-then `rebase`), no more on success, and no agent/LLM call anywhere -- mirroring
+On the happy path `RebaseStep.run` does `fetch`, then the issue #24 guard's own `git`
+calls (at minimum one `rev-parse` checking whether a local `<default_branch>` branch even
+exists -- see that section below), then `rebase`; no agent/LLM call anywhere -- mirroring
 `steps/intent.py`'s `IntentStep`, the other Step in this pipeline with no agent call.
 
 **"The branch under review" is HEAD.** `StepContext` (`pipeline/step.py`) has no field
@@ -50,10 +51,45 @@ a stylistic warning), and `source` because a rebase conflict is about the author
 branch content colliding with upstream, not about pipeline-generated delivery content (see
 `Finding.review_scope`'s field comment for what "pipeline-owned-delivery" is reserved for).
 
-Out of scope for this ticket (see docs/ROADMAP.md milestone 4's own text and issue #23):
-the "bundled local commits" guard -- detecting commits that exist only on the *local*
-default branch and were never pushed to `origin/<default_branch>` -- is issue #24, blocked
-by this one, and is not built here.
+**The unpushed-local-default guard (issue #24)** runs immediately after the `fetch` call
+above and before the `rebase` call -- it needs `origin/<default_branch>` current (hence
+after fetch), and it must stop the step cold before any rebase is attempted if it fires
+(hence before rebase). It reasons about a *third* ref this step otherwise never looks at: a
+local branch literally named `<default_branch>` in `ctx.cwd`, distinct from both
+`origin/<default_branch>` (the remote-tracking ref the rebase itself targets) and HEAD (the
+branch under review). The scenario: a developer committed directly to their local
+`<default_branch>` (or merged into it) without ever pushing, then that local tip ended up
+folded into HEAD's own history (e.g. the feature branch was cut from it, or later merged it
+in). Rebasing onto the *fresh* `origin/<default_branch>` would proceed without ever
+noticing that content, because the ordinary rebase path only ever reasons about
+`origin/<default_branch>` vs. HEAD -- it has no idea a local-only `<default_branch>` branch
+even exists. The guard closes that blind spot.
+
+It fires only when **both** hold, checked with `git merge-base --is-ancestor` (exit 0 means
+"is an ancestor of, or equal to"; exit 1 means "is not"; see `_is_ancestor`):
+1. Local `<default_branch>`'s tip is a strict descendant of `origin/<default_branch>`'s tip
+   -- i.e. it has commits `origin/<default_branch>` doesn't. Checked as "the two tips
+   differ" AND "origin's tip is an ancestor of local's tip" (the second alone would also
+   accept equality, which condition one already excludes).
+2. Local `<default_branch>`'s tip is itself an ancestor of HEAD -- the branch under review
+   already carries it.
+
+If no local branch literally named `<default_branch>` exists in `ctx.cwd` at all (the
+common case -- most checkouts, including this module's own `origin_and_checkout` test
+fixture, never create one), `_ref_sha` returns `None` and the guard is a no-op: there is
+nothing to compare, not an error condition. When it fires, `RebaseStep.run` returns
+immediately with `StepOutcome(needs_approval=True, auto_fixable=False)` and exactly *one*
+`Finding` (not one per commit, unlike the conflict-findings loop below) whose `description`
+names every offending commit (`git log --oneline origin/<default_branch>..<local tip>`,
+short SHA + subject -- enough for a reviewer to look each one up) and every file they touch
+(`git diff --name-only`, same range). One `Finding` rather than several because these
+commits are one coherent "unpushed local history" fact about the branch, not independent
+findings the way each conflicted file is its own independent collision; the acceptance
+criteria's own phrasing ("one Finding... naming the unpushed commits and affected files",
+plural nouns inside a singular Finding) is explicit about this. `severity="error"` and
+`review_scope="source"` mirror the conflict-findings' own reasoning below: `error` because
+this blocks the branch from safely proceeding, and `source` because it is about the
+author's own branch content, not pipeline-generated delivery content.
 """
 
 from __future__ import annotations
@@ -89,6 +125,93 @@ def _rebase_in_progress(cwd: Path) -> bool:
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
+def _ref_sha(ref: str, cwd: Path) -> str | None:
+    """Resolve `ref` to a SHA in `cwd`, or `None` if it does not exist. Uses `rev-parse
+    --verify --quiet` so a missing ref (most commonly: no local branch literally named
+    `<default_branch>` in this checkout) is an ordinary "not found" result -- nonzero
+    exit, no stderr noise -- rather than something a caller has to except around.
+    """
+
+    result = _run_git(["rev-parse", "--verify", "--quiet", ref], cwd)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _is_ancestor(maybe_ancestor: str, descendant: str, cwd: Path) -> bool:
+    """True if `maybe_ancestor` is `descendant` itself or a commit `descendant` was built
+    on top of, per `git merge-base --is-ancestor`'s own exit-code contract (0 for
+    ancestor-or-equal, 1 for "not an ancestor", >1 for a bad ref -- neither ref passed by
+    this module's callers is ever bad, since both come from a prior successful
+    `_ref_sha`/fetch). Equality counting as "is an ancestor" is exactly right for both call
+    sites in `_unpushed_local_default_finding` -- see their own strictness checks.
+    """
+
+    result = _run_git(["merge-base", "--is-ancestor", maybe_ancestor, descendant], cwd)
+    return result.returncode == 0
+
+
+def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding | None:
+    """Build the issue #24 guard's `Finding` if it fires, else `None` -- see module
+    docstring's "The unpushed-local-default guard" section for the full scenario and the
+    exact two conditions checked below. Must run after a successful `git fetch origin
+    <default_branch>` so the `origin/<default_branch>` tip this compares against is
+    current.
+    """
+
+    local_tip = _ref_sha(f"refs/heads/{default_branch}", cwd)
+    if local_tip is None:
+        # No local branch literally named `default_branch` exists here -- nothing to
+        # compare, so the guard cannot fire. Not an error: most checkouts, including this
+        # module's own test fixture, never create one.
+        return None
+
+    origin_tip = _ref_sha(f"refs/remotes/origin/{default_branch}", cwd)
+    if origin_tip is None:
+        # The fetch immediately before this call succeeded, so this should always
+        # resolve; treat an unexpected miss the same as "nothing to compare" rather than
+        # raising -- this guard has no stronger claim on the ref than the rebase call
+        # right after it.
+        return None
+
+    if local_tip == origin_tip:
+        # Local default branch is exactly origin's tip: nothing unpushed, condition 1 is
+        # trivially false.
+        return None
+
+    if not _is_ancestor(origin_tip, local_tip, cwd):
+        # Local `default_branch` has diverged from (or fallen behind) origin rather than
+        # being genuinely ahead of it -- condition 1 fails.
+        return None
+
+    if not _is_ancestor(local_tip, "HEAD", cwd):
+        # The local tip exists but never made it into HEAD's own history -- condition 2
+        # fails. The unpushed commits sit on local `default_branch` only; the branch under
+        # review never incorporated them, so there is nothing riding along to warn about.
+        return None
+
+    commit_range = f"{origin_tip}..{local_tip}"
+    commits = _run_git(["log", "--oneline", commit_range], cwd).stdout.strip()
+    files = sorted(
+        line
+        for line in _run_git(["diff", "--name-only", commit_range], cwd).stdout.splitlines()
+        if line
+    )
+
+    return Finding(
+        severity="error",
+        description=(
+            f"The local branch '{default_branch}' has commits never pushed to "
+            f"origin/{default_branch}, and the branch under review already carries them "
+            f"as ancestors of HEAD. Rebasing onto origin/{default_branch} now would "
+            f"silently drag this unreviewed, unpushed content along. Unpushed commits:\n"
+            f"{commits}\nAffected files: {', '.join(files)}"
+        ),
+        action="ask-user",
+        review_scope="source",
+    )
+
+
 def _conflicted_files(cwd: Path) -> list[str]:
     """Return the sorted list of paths with unresolved merge conflicts, read via `git
     diff --name-only --diff-filter=U`. Must be called before `git rebase --abort` runs --
@@ -122,6 +245,13 @@ class RebaseStep(Step):
                 f"git fetch origin {self.default_branch} failed in {ctx.cwd}: "
                 f"{fetch.stderr.strip()}"
             )
+
+        # Issue #24 guard -- must run after fetch (needs a current origin/<default_branch>)
+        # and before rebase (must stop cold, no rebase attempted, if it fires). See module
+        # docstring's "The unpushed-local-default guard" section.
+        unpushed_finding = _unpushed_local_default_finding(ctx.cwd, self.default_branch)
+        if unpushed_finding is not None:
+            return StepOutcome(needs_approval=True, auto_fixable=False, findings=[unpushed_finding])
 
         # One-argument form: rebases current HEAD onto origin/<default_branch> in place.
         # Deliberately not the two-argument form -- see module docstring.
