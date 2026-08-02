@@ -10,7 +10,7 @@ and requested actions; the pipeline executor owns ordering and control flow.
 | Module | Purpose | Main input | Main output | Status |
 |---|---|---|---|---|
 | `intent.py` | Represent user intent, redact credential-shaped text, defang prompt delimiters, and frame intent safely at each prompt site. `IntentStep` confirms the shared intent without calling an Agent. | `ctx.intent`; or text and provenance for `wrap_intent` | `Intent` in `StepOutcome.findings`; or sanitized prompt text | Implemented |
-| `rebase.py` | Update the branch onto the latest default branch before review; conflicts and unpushed local-default commits must block for a human. | Checkout and branch state | Updated checkout or a blocking finding | Planned; module not present yet |
+| `rebase.py` | Update the branch onto the latest default branch before review; conflicts and unpushed local-default commits must block for a human. | Checkout and branch state | Updated checkout or a blocking finding | Implemented |
 | `review.py` | Check correctness and conformance with intent, returning findings and a required risk verdict in one schema. | Diff plus safely wrapped intent | Findings, risk level, and risk rationale | Planned; design stub only |
 | `test_sufficiency.py` | Decide whether tests would catch a regression, following the ladder: existing test, focused new test, manual verification, or honest warning. | Diff, intent, and Review result as needed | Test evidence or findings | Planned; design stub only |
 | `pr.py` | Assemble PR evidence deterministically and optionally ask an Agent to draft the title and “What Changed” section. | Intent, risk, pipeline evidence, and diff summary | PR title/body and creation result | Planned; design stub only |
