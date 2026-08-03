@@ -1,6 +1,7 @@
-"""Finding schema, the fail-safe action default, and the blocking-findings gate --
-Milestone 5 (schema, issue #26). Milestone 7 (fix-loop helpers such as override-merging)
-is out of scope for this module today; nothing here builds a fix/approval state machine.
+"""Finding schema, the fail-safe action default, the blocking-findings gate, and the
+deterministic pipeline-owned-delivery scope filter -- Milestone 5 (schema, issue #26).
+Milestone 7 (fix-loop helpers such as override-merging) is out of scope for this module
+today; nothing here builds a fix/approval state machine.
 
 `Finding` is a pydantic `BaseModel`, not this repo's usual frozen/slotted dataclass (see
 `steps/intent.py`'s `Intent`), because it is passed as `RunOpts.output_schema` to an
@@ -20,13 +21,32 @@ is the one place that resolves an `action` value to one of the three known outco
 test-sufficiency step, see docs/GLOSSARY.md's "Blocking finding") is the one place that
 turns a list of findings into a single yes/no "does this run need a human" answer. Both
 are pure functions with no agent or subprocess dependency.
+
+`filter_pipeline_owned_delivery_findings` (moved here from `steps/review.py` in a later
+structural refactor, alongside its `Finding`-processing siblings above) strips
+pipeline-owned-delivery-scoped findings from a `ReviewStep` answer and resets `risk_level`
+back to `"low"` when that was the sole basis for an elevated verdict -- see the function's
+own docstring for the exact rule, its documented limits, and a note on how it avoids a
+`pipeline/` -> `steps/` import.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    # Import-direction note: `steps/` depends on `pipeline/`, never the reverse (see root
+    # AGENTS.md's invariants and `pipeline/step.py`'s matching `TYPE_CHECKING`-gated import
+    # of `steps.intent.Intent`, the precedent this follows). `ReviewOutput` is defined in
+    # `steps/review.py`, so a top-level import of it here would be circular in spirit even
+    # if not literally circular today. This module has `from __future__ import
+    # annotations`, so the `output: ReviewOutput` / `-> ReviewOutput` annotations below are
+    # lazy strings never evaluated at runtime -- a type-checking-only import is sufficient,
+    # and the function body only ever does duck-typed attribute access
+    # (`.findings`/`.risk_level`/`.model_copy`) that needs no runtime import at all.
+    from code_review.steps.review import ReviewOutput
 
 # The three outcomes `action_or_default` ever returns. `Finding.action` itself is typed
 # more loosely (see module docstring) so this alias is only used for return/parameter
@@ -111,3 +131,64 @@ def has_blocking_finding(findings: list[Finding]) -> bool:
     """
 
     return any(action_or_default(finding.action) == "ask-user" for finding in findings)
+
+
+# --- Deterministic pipeline-owned-delivery scope filter ---------------------------------
+
+# Severities treated as capable of justifying an elevated (`medium`/`high`) `risk_level`.
+# "info" findings are never, on their own, treated as elevating risk -- see the filter's
+# docstring for what this assumption does and does not cover.
+_RISK_SUPPORTING_SEVERITIES: frozenset[str] = frozenset({"error", "warning"})
+
+_RESET_RATIONALE = (
+    'risk_level reset to "low" by the deterministic pipeline-owned-delivery scope '
+    "filter: every error/warning-severity finding that could have justified the prior "
+    'risk_level was scoped "pipeline-owned-delivery" and has been removed, and no '
+    "remaining finding is severe enough to justify an elevated risk level on its own."
+)
+
+
+def filter_pipeline_owned_delivery_findings(output: ReviewOutput) -> ReviewOutput:
+    """Strip `pipeline-owned-delivery`-scoped findings from `output` and return a new
+    `ReviewOutput` (pure function; `output` itself is left untouched).
+
+    Also resets `risk_level` to `"low"` and overwrites `risk_rationale` (never appends to
+    it, so the rationale always matches the level actually returned) when, after
+    stripping, no surviving finding is at `"error"` or `"warning"` severity -- meaning
+    every finding that could have justified an elevated `risk_level` was itself
+    pipeline-owned-delivery-scoped and is now gone. If a `"source"`- (or
+    `"external-delivery"`-) scoped finding at `"error"`/`"warning"` severity survives
+    filtering, or `risk_level` was already `"low"`, the risk verdict is left untouched.
+
+    This is a severity-based heuristic, not a per-finding causal link: it assumes an
+    elevated `risk_level` is always attributable to at least one surviving
+    error/warning-severity finding. A `risk_level` the agent elevated on narrative
+    judgement alone, with no error/warning finding backing it, would also be reset by
+    this rule -- that case is out of scope for this filter (there is no field connecting
+    a risk verdict to the specific findings that justify it) and is not exercised by this
+    ticket's regression tests.
+
+    Import-direction note: `output`'s real type, `ReviewOutput`, is defined in
+    `steps/review.py`. This function is defined here (`pipeline/`, not `steps/`) because it
+    is a pure `Finding`-processing helper alongside `action_or_default`/
+    `has_blocking_finding` above, and `steps/` depends on `pipeline/`, never the reverse
+    (see root AGENTS.md). Rather than import `ReviewOutput` at runtime -- which would
+    invert that dependency -- the parameter/return annotation is type-checking-only (see
+    the module-level `TYPE_CHECKING` import above); at runtime this function only ever
+    does duck-typed attribute access (`.findings`, `.risk_level`, `.model_copy`), which any
+    object shaped like `ReviewOutput` satisfies without a runtime import of the real class.
+    """
+
+    remaining = [f for f in output.findings if f.review_scope != "pipeline-owned-delivery"]
+
+    still_supported = any(f.severity in _RISK_SUPPORTING_SEVERITIES for f in remaining)
+    if output.risk_level != "low" and not still_supported:
+        return output.model_copy(
+            update={
+                "findings": remaining,
+                "risk_level": "low",
+                "risk_rationale": _RESET_RATIONALE,
+            }
+        )
+
+    return output.model_copy(update={"findings": remaining})
