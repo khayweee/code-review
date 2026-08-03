@@ -1,14 +1,15 @@
 """The Pipeline box: one line per registry step, live status icon, elapsed/final duration.
 
-The Findings box (issue #42): the most recently completed step's `ReviewOutput`, one line
-per finding plus a severity-count summary.
+The Findings box (issue #42, widened for #61): the most recently completed step's
+`ReviewOutput` or `TestSufficiencyOutput`, one line per finding plus a severity-count
+summary.
 
 Rendering-only. Every widget here takes the data it displays as plain data (`StepRow`s for
-`PipelineBox`, a `ReviewOutput` for `FindingsBox`, see `state.py`) -- neither widget ever
-reads a `StepEvent` stream or a registry/agent output itself. That split keeps row/finding
-rendering unit-testable via `render_rows`/`render_findings` in isolation, and widget
-mounting/refresh testable via Textual's `Pilot` (`tests/tui/test_widgets.py`), without
-needing a live event stream either way.
+`PipelineBox`, a `ReviewOutput`/`TestSufficiencyOutput` for `FindingsBox`, see `state.py`) --
+neither widget ever reads a `StepEvent` stream or a registry/agent output itself. That split
+keeps row/finding rendering unit-testable via `render_rows`/`render_findings` in isolation,
+and widget mounting/refresh testable via Textual's `Pilot` (`tests/tui/test_widgets.py`),
+without needing a live event stream either way.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from textual.widgets import Static
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
+from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.state import ActivityRow, Status, StepRow
 
 # One glyph per status in the deterministic text fallback. The live pipeline view uses
@@ -289,9 +291,12 @@ def format_finding(finding: Finding) -> str:
     return f"{finding.severity}: {finding.description}{location}"
 
 
-def render_findings(output: ReviewOutput) -> str:
+def render_findings(output: ReviewOutput | TestSufficiencyOutput) -> str:
     """Render every finding in `output.findings`, one per line via `format_finding`, then a
-    blank line and a severity-count summary, e.g. `1 error, 2 warning, 0 info`."""
+    blank line and a severity-count summary, e.g. `1 error, 2 warning, 0 info`. `output` is
+    whichever of `ReviewOutput`/`TestSufficiencyOutput` `state.py`'s `latest_findings` picked
+    -- both schemas share an identical `findings: list[Finding]` shape, so nothing below
+    needs to branch on which one it got."""
 
     lines = [format_finding(finding) for finding in output.findings]
     counts = {severity: 0 for severity in ("error", "warning", "info")}
@@ -303,14 +308,15 @@ def render_findings(output: ReviewOutput) -> str:
 
 class FindingsBox(_BorderedBox):
     """A bordered box showing the most recently completed step's findings (see
-    `state.py`'s `latest_findings`): each finding's severity, description, and location
-    when it has one, plus a severity-count summary. Display only -- no key or action here
-    lets a user approve, fix, skip, or abort a finding (see docs/GLOSSARY.md's "Action";
-    Milestone 7's fix/approval loop is a later ticket)."""
+    `state.py`'s `latest_findings`, which recognizes a `ReviewOutput` (`ReviewStep`) or a
+    `TestSufficiencyOutput` (`TestSufficiencyStep`) equally): each finding's severity,
+    description, and location when it has one, plus a severity-count summary. Display
+    only -- no key or action here lets a user approve, fix, skip, or abort a finding (see
+    docs/GLOSSARY.md's "Action"; Milestone 7's fix/approval loop is a later ticket)."""
 
     def __init__(
         self,
-        output: ReviewOutput,
+        output: ReviewOutput | TestSufficiencyOutput,
         *,
         id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
@@ -318,7 +324,7 @@ class FindingsBox(_BorderedBox):
         super().__init__(render_findings(output), id=id, classes=classes)
         self.border_title = "Findings"
 
-    def update_findings(self, output: ReviewOutput) -> None:
+    def update_findings(self, output: ReviewOutput | TestSufficiencyOutput) -> None:
         """Replace the displayed findings with `output`'s, re-rendered."""
 
         self.update(render_findings(output))

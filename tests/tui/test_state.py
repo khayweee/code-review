@@ -12,6 +12,7 @@ from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.review import ReviewOutput
+from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.activity import ActivityEvent
 from code_review.tui.state import (
     ActivityRow,
@@ -152,6 +153,12 @@ def _review_output(*findings: Finding) -> ReviewOutput:
     return ReviewOutput(findings=list(findings), risk_level="low", risk_rationale="fine")
 
 
+def _test_sufficiency_output(*findings: Finding) -> TestSufficiencyOutput:
+    return TestSufficiencyOutput(
+        findings=list(findings), tested=[], testing_summary="fine", artifacts=[]
+    )
+
+
 def test_latest_findings_with_no_events_returns_none() -> None:
     assert latest_findings([]) is None
 
@@ -224,6 +231,97 @@ def test_latest_findings_with_two_completed_steps_the_later_one_wins() -> None:
         ),
         StepEvent(
             step_name="TestSufficiencyStep",
+            status="completed",
+            outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+            started_at=2.0,
+            duration=0.1,
+        ),
+    ]
+
+    assert latest_findings(events) is later
+
+
+def test_latest_findings_ignores_a_completed_test_sufficiency_step_with_empty_findings() -> None:
+    outcome = StepOutcome(
+        needs_approval=False, auto_fixable=False, findings=_test_sufficiency_output()
+    )
+    events = [
+        StepEvent(
+            step_name="TestSufficiencyStep",
+            status="completed",
+            outcome=outcome,
+            started_at=1.0,
+            duration=0.1,
+        )
+    ]
+
+    assert latest_findings(events) is None
+
+
+def test_latest_findings_returns_the_test_sufficiency_output_when_findings_are_non_empty() -> None:
+    output = _test_sufficiency_output(_FINDING)
+    outcome = StepOutcome(needs_approval=True, auto_fixable=False, findings=output)
+    events = [
+        StepEvent(
+            step_name="TestSufficiencyStep",
+            status="completed",
+            outcome=outcome,
+            started_at=1.0,
+            duration=0.1,
+        )
+    ]
+
+    assert latest_findings(events) is output
+
+
+def test_latest_findings_with_a_review_output_then_a_test_sufficiency_output_the_later_wins() -> (
+    None
+):
+    earlier = _review_output(
+        Finding(severity="info", description="first pass", review_scope="source")
+    )
+    later = _test_sufficiency_output(
+        Finding(severity="error", description="second pass", review_scope="source")
+    )
+    events = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+            started_at=1.0,
+            duration=0.1,
+        ),
+        StepEvent(
+            step_name="TestSufficiencyStep",
+            status="completed",
+            outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+            started_at=2.0,
+            duration=0.1,
+        ),
+    ]
+
+    assert latest_findings(events) is later
+
+
+def test_latest_findings_with_a_test_sufficiency_output_then_a_review_output_the_later_wins() -> (
+    None
+):
+    earlier = _test_sufficiency_output(
+        Finding(severity="info", description="first pass", review_scope="source")
+    )
+    later = _review_output(
+        Finding(severity="error", description="second pass", review_scope="source")
+    )
+    events = [
+        StepEvent(
+            step_name="TestSufficiencyStep",
+            status="completed",
+            outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+            started_at=1.0,
+            duration=0.1,
+        ),
+        StepEvent(
+            step_name="ReviewStep",
             status="completed",
             outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
             started_at=2.0,

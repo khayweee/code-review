@@ -102,7 +102,7 @@ proven against a fake CLI subprocess in `tests/agent/test_claude_cli.py` — but
 not been exercised together against a real `claude` CLI process that actually blocks on
 stdin waiting for a permission answer. See `agent/AGENTS.md`'s matching note.
 
-## The Findings box (issue #42)
+## The Findings box (issue #42, widened for #61)
 
 `FindingsBox` (`widgets.py`) is a second `_BorderedBox` widget (the shared base that also
 backs `PipelineBox` and `StatusBox` — see its own docstring for why the border/padding CSS
@@ -112,12 +112,17 @@ box, an `update_*` method) but with a different mount lifecycle:
 while `FindingsBox` is mounted/removed dynamically by `ReviewApp._render_findings` because
 "no findings" must show no box at all, not an empty one. `state.py`'s `latest_findings`
 picks the most recently *completed* step whose `outcome.findings` is a non-empty
-`ReviewOutput` (imported from `steps.review` -- a data-schema import, not a `ReviewStep`/
-agent-call dependency, and does not create an import cycle since `steps/` never imports
-`tui/`); `IntentStep`'s outcome (`findings` is an `Intent`) is exactly what the `isinstance`
-check there guards against. One box, most-recent-completion-wins -- not an accumulated
-history across steps, matching `PipelineBox`'s own "one box, updated in place" pattern.
-Display only: no key or action here lets a user approve, fix, skip, or abort a finding.
+`ReviewOutput` (imported from `steps.review`) or `TestSufficiencyOutput` (imported from
+`steps.test_sufficiency`) -- both are data-schema imports, not a `ReviewStep`/
+`TestSufficiencyStep`/agent-call dependency, and neither creates an import cycle since
+`steps/` never imports `tui/`; `IntentStep`'s outcome (`findings` is an `Intent`) is exactly
+what the `isinstance` check there guards against. `render_findings`/`FindingsBox` themselves
+never branch on which of the two schemas they were handed -- both share an identical
+`findings: list[Finding]` shape, so only `state.py`'s `isinstance` check and the type
+annotations threaded through `widgets.py` needed to widen; the rendering logic itself did
+not change. One box, most-recent-completion-wins -- not an accumulated history across
+steps, matching `PipelineBox`'s own "one box, updated in place" pattern. Display only: no
+key or action here lets a user approve, fix, skip, or abort a finding.
 
 ## The `ActivityRelay` seam (issue #66)
 

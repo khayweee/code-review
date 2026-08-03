@@ -19,6 +19,7 @@ from textual.app import App, ComposeResult
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
+from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.state import ActivityRow, StepRow
 from code_review.tui.widgets import (
     FindingsBox,
@@ -32,6 +33,7 @@ from code_review.tui.widgets import (
     gradient_text,
     render_findings,
     render_rows,
+    render_rows_live,
 )
 
 
@@ -134,6 +136,34 @@ def test_render_rows_a_row_with_no_activities_gets_no_extra_lines() -> None:
     rows = [StepRow(name="IntentStep", status="completed", duration=0.1)]
 
     assert render_rows(rows) == "✔ IntentStep  0.1s"
+
+
+def test_render_rows_live_keeps_each_steps_icon_column_independent_of_others_activities() -> None:
+    """Regression test for `render_rows_live`'s `Group`-of-per-row-grids shape (see its own
+    docstring): the previous single shared `Table.grid` sized its icon column to the widest
+    icon cell across *every* row ever added, so a step with no activities at all still got
+    padded out to match however wide another step's activity connector happened to be. A
+    step's own rendered line must therefore be identical whether or not some other step in
+    the same list has activities."""
+
+    alone = render_rows_live([StepRow(name="IntentStep", status="completed", duration=0.1)], {})
+    alongside_a_step_with_activities = render_rows_live(
+        [
+            StepRow(name="IntentStep", status="completed", duration=0.1),
+            StepRow(
+                name="RebaseStep",
+                status="running",
+                duration=1.0,
+                activities=(ActivityRow(label="fetch", status="running", duration=0.2),),
+            ),
+        ],
+        {},
+    )
+
+    def _first_line(renderable: object) -> str:
+        return _render_content(renderable).splitlines()[0]
+
+    assert _first_line(alone) == _first_line(alongside_a_step_with_activities)
 
 
 # --- gradient_text (animated running-step-name shimmer) ----------------------------------
@@ -422,6 +452,51 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
     asyncio.run(scenario())
 
 
+def test_pipeline_box_shimmers_a_running_steps_name_purely_from_its_own_interval_tick() -> None:
+    """Regression test: `PipelineBox.on_mount` used to wire its 60fps timer to
+    `self.refresh`, which repaints whatever renderable is already stored but never calls
+    `gradient_text` again -- so a running step's shimmer only ever moved on a *real*
+    `update_rows` call (see `_animate_shimmer`'s own docstring). It's now wired to
+    `_animate_shimmer`, which reruns `render_rows_live` (and therefore `gradient_text`,
+    phased by `time.monotonic()`) on every tick. Proven here by waiting real wall-clock time
+    with *no* `update_rows` call at all and checking the rendered color escape codes for the
+    running row's name actually change -- `_render_content`'s `color_system=None` can't see
+    this, so this test renders with real color on instead."""
+
+    async def scenario() -> None:
+        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=0.0)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+
+            def _colored_render() -> str:
+                buffer = StringIO()
+                console = Console(
+                    file=buffer, force_terminal=True, width=80, color_system="truecolor"
+                )
+                console.print(box.content)
+                return buffer.getvalue()
+
+            first = _colored_render()
+            changed = False
+            for _ in range(60):
+                await pilot.pause()
+                await asyncio.sleep(0.02)
+                if _colored_render() != first:
+                    changed = True
+                    break
+
+            assert changed
+            # Purely a repaint -- update_rows was never called, so the underlying data
+            # (name/status) is unchanged, only the shimmer's per-character color. Checked
+            # via the plain (no-color) render, not `_colored_render()` -- the shimmer wraps
+            # every character in its own color escape sequence, so the literal substring
+            # "RebaseStep" can never appear contiguously in colored output at all.
+            assert "RebaseStep" in _render_content(box.content)
+
+    asyncio.run(scenario())
+
+
 def test_pipeline_box_has_a_pipeline_border_title() -> None:
     async def scenario() -> None:
         app = _HostApp([])
@@ -490,6 +565,30 @@ def test_render_findings_summary_counts_zero_severities_not_seen() -> None:
     assert render_findings(output).endswith("0 error, 0 warning, 1 info")
 
 
+def test_render_findings_accepts_a_test_sufficiency_output() -> None:
+    output = TestSufficiencyOutput(
+        findings=[
+            Finding(
+                severity="error",
+                description="no test covers the new retry path",
+                review_scope="source",
+                location="tests/test_foo.py:10",
+            ),
+            Finding(severity="warning", description="manual check only", review_scope="source"),
+        ],
+        tested=["retry path"],
+        testing_summary="mostly covered",
+        artifacts=[],
+    )
+
+    assert render_findings(output) == (
+        "error: no test covers the new retry path (tests/test_foo.py:10)\n"
+        "warning: manual check only\n"
+        "\n"
+        "1 error, 1 warning, 0 info"
+    )
+
+
 # --- FindingsBox, mounted and driven through Pilot ----------------------------------------
 
 
@@ -497,7 +596,7 @@ class _FindingsHostApp(App[None]):
     """Minimal host app: mounts one `FindingsBox` so `Pilot` can drive it directly,
     independent of `ReviewApp`'s event-consuming worker."""
 
-    def __init__(self, output: ReviewOutput) -> None:
+    def __init__(self, output: ReviewOutput | TestSufficiencyOutput) -> None:
         super().__init__()
         self._initial_output = output
 
@@ -544,6 +643,32 @@ def test_findings_box_update_findings_replaces_the_rendered_content() -> None:
             await pilot.pause()
 
             assert box.content == render_findings(updated)
+
+    asyncio.run(scenario())
+
+
+def test_findings_box_renders_a_test_sufficiency_output_on_mount() -> None:
+    async def scenario() -> None:
+        output = TestSufficiencyOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="no test covers the retry path",
+                    review_scope="source",
+                )
+            ],
+            tested=[],
+            testing_summary="mostly fine",
+            artifacts=[],
+        )
+        app = _FindingsHostApp(output)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsBox)
+            assert box.content == render_findings(output)
+            assert box.content == (
+                "warning: no test covers the retry path\n\n0 error, 1 warning, 0 info"
+            )
 
     asyncio.run(scenario())
 
