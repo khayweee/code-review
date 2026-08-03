@@ -17,6 +17,7 @@ import colorsys
 import time
 from collections.abc import Sequence
 
+from rich.console import Group
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
@@ -34,6 +35,18 @@ _STATUS_ICONS: dict[Status, str] = {
     "running": "◔",  # ◔ quarter-filled glyph: fallback only; live view uses Spinner
     "completed": "✔",  # ✔ check mark: finished successfully
     "failed": "✘",  # ✘ cross mark: raised before it could complete
+}
+
+# Mid-gray for activity lines, so they read as subordinate detail beneath their step.
+_ACTIVITY_STYLE = "grey58"
+
+# Live pipeline view only: a completed/failed row's icon renders as this solid dot, colored
+# by status, instead of the fallback ✔/✘ glyph above -- the plain-text fallback keeps ✔/✘
+# since it has no color to lean on for the completed/failed distinction.
+_DOT_ICON = "●"
+_STATUS_DOT_STYLES: dict[Status, str] = {
+    "completed": "#5fafff",  # blue
+    "failed": "#bb6400",  # orange
 }
 
 
@@ -54,26 +67,40 @@ def format_row(row: StepRow) -> str:
     return f"{icon} {row.name}{duration}"
 
 
-def format_activity_row(activity: ActivityRow) -> str:
-    """Render one `ActivityRow` as an indented plain-text line, mirroring `format_row`'s
-    icon/duration conventions -- the two-space indent is what reads as "nested under its
-    owning step" in the plain-text fallback (`render_rows`); `render_rows_live`'s Rich
-    rendering (`_render_activity_row`) achieves the same nesting visually instead."""
+def format_activity_row(activity: ActivityRow, *, is_last: bool) -> str:
+    """Render one `ActivityRow` as a directory-tree-style line, mirroring `format_row`'s
+    icon/duration conventions. A plain two-space indent read as "some other top-level row"
+    at a glance rather than "nested under the row above it" -- the `├─`/`└─` connector
+    (`is_last` picks which) is what a `tree`/file-browser listing uses for exactly this
+    "these lines belong to the row above" signal, so it is used here for the same reason.
+    `is_last` is the caller's (`render_rows`/`render_rows_live`) job to compute, not this
+    function's: it only knows about one `ActivityRow` at a time, not its position among
+    its owning step's other activities."""
 
+    connector = "└ " if is_last else "├ "
     icon = _STATUS_ICONS[activity.status]
     duration = "" if activity.duration is None else f"  {format_duration(activity.duration)}"
-    return f"  {icon} {activity.label}{duration}"
+    return f"  {connector} {icon} {activity.label}{duration}"
 
 
 def render_rows(rows: Sequence[StepRow]) -> str:
     """Render every row as one line each, in order, with each row's own `activities` (issue
-    #66) rendered as indented lines immediately beneath it."""
+    #66) rendered as tree-connected lines immediately beneath it (see
+    `format_activity_row`'s docstring for why a connector, not a plain indent)."""
 
     lines = []
     for row in rows:
         lines.append(format_row(row))
-        lines.extend(format_activity_row(activity) for activity in row.activities)
+        last_index = len(row.activities) - 1
+        lines.extend(
+            format_activity_row(activity, is_last=index == last_index)
+            for index, activity in enumerate(row.activities)
+        )
     return "\n".join(lines)
+
+
+_SHIMMER_BASE_LIGHTNESS = 0.45
+_SHIMMER_PEAK_LIGHTNESS = 0.90
 
 
 def gradient_text(label: str, phase: float) -> Text:
@@ -83,19 +110,25 @@ def gradient_text(label: str, phase: float) -> Text:
     Textual or timing flakiness (`tui/AGENTS.md`'s pure/impure split convention: this
     module is otherwise impure, but the color computation itself doesn't need to be).
 
-    Each character gets its own hue stop, cycling once across the label
-    (`index / len(label)`), then the whole cycle is shifted by `phase` -- the caller passes
+    A single grayscale highlight band sweeps across the label once per phase cycle
+    (`index / len(label)`, shifted by `phase`), brightest at the band's center and fading
+    to `_SHIMMER_BASE_LIGHTNESS` at its edges (triangular falloff) -- the caller passes
     `time.monotonic()` so consecutive repaints visibly move (`PipelineBox` already
-    refreshes at 60fps, so no new timer is needed here, just a phase-aware render). Fixed,
-    high saturation/lightness (`colorsys.hls_to_rgb`) keeps every stop vividly colored
-    rather than washing out toward black or white at the ends of the hue wheel.
+    refreshes at 60fps, so no new timer is needed here, just a phase-aware render). Zero
+    saturation (`colorsys.hls_to_rgb`) keeps every stop neutral gray/white rather than
+    cycling through hues.
     """
 
     text = Text()
     length = max(len(label), 1)
     for index, char in enumerate(label):
-        hue = (index / length + phase) % 1.0
-        red, green, blue = colorsys.hls_to_rgb(hue, 0.6, 0.85)
+        position = (index / length + phase) % 2.0
+        distance_from_peak = abs(position - 0.5) * 2
+        brightness = max(0.0, 1.0 - distance_from_peak)
+        lightness = _SHIMMER_BASE_LIGHTNESS + brightness * (
+            _SHIMMER_PEAK_LIGHTNESS - _SHIMMER_BASE_LIGHTNESS
+        )
+        red, green, blue = colorsys.hls_to_rgb(0.0, lightness, 0.0)
         color = f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
         text.append(char, style=color)
     return text
@@ -117,11 +150,19 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
     A running row's name renders via `gradient_text` (phased by `time.monotonic()` at
     render time) instead of plain text -- the duration suffix stays plain, appended after,
     so only the name itself shimmers.
+
+    A completed/failed row's icon renders as a colored `_DOT_ICON` (`_STATUS_DOT_STYLES`)
+    rather than the fallback ✔/✘ glyph -- pending keeps its plain hollow-ring glyph, since
+    only completed/failed need a status color here.
     """
 
     if row.status != "running":
         spinners.pop(row.name, None)
-        icon: Spinner | Text = Text(_STATUS_ICONS[row.status])
+        dot_style = _STATUS_DOT_STYLES.get(row.status)
+        icon: Spinner | Text = (
+            Text(_DOT_ICON, style=dot_style) if dot_style else Text(
+                _STATUS_ICONS[row.status])
+        )
         row_text = Text(row.name)
     else:
         icon = spinners.setdefault(row.name, Spinner("moon"))
@@ -131,37 +172,45 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
     return icon, row_text
 
 
-def _render_activity_row(activity: ActivityRow) -> tuple[Text, Text]:
-    """Render one `ActivityRow` as an indented Rich line under its owning step's row.
-
-    Unlike `_render_row`, this never uses a live `Spinner` for a running activity --
-    reusing the plain `_STATUS_ICONS`/`format_duration` conventions (per issue #66's own
-    acceptance criteria) keeps this simple and avoids growing a second per-activity
-    spinner cache; "live" here comes from the duration number itself ticking on
-    `PipelineBox`'s existing 60fps refresh, the same way a `StepRow`'s duration does before
-    this method's icon distinction even matters.
-    """
-
-    icon = Text(f"  {_STATUS_ICONS[activity.status]}")
-    duration = "" if activity.duration is None else f"  {format_duration(activity.duration)}"
-    return icon, Text(f"{activity.label}{duration}")
-
-
-def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> Table:
+def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> Group:
     """Render every row as Rich renderables so the running row can animate itself, with
-    each row's own `activities` (issue #66) rendered as indented lines immediately
-    beneath it via `_render_activity_row`.
+    each row's own `activities` (issue #66) rendered as tree-connected lines immediately
+    beneath it.
+
+    Returns a `Group`, not one shared `Table.grid` spanning every row -- an earlier version
+    of the tree connectors below did exactly that (a single grid, an icon column, a text
+    column) and regressed into the "step rows are too indented" report this shape fixes: a
+    `Table.grid`'s columns are sized to the widest cell *anywhere in that column, across
+    every row ever added to it*, so a step with no activities at all still got padded out
+    to match however wide the longest connector among some *other* step's activities
+    happened to be, even though the two have nothing to do with each other. Giving every
+    step its own small `(icon, text)` grid -- sized only from that one row -- sidesteps the
+    shared-column coupling entirely: every step's icon cell is exactly one glyph wide
+    regardless of what any other step is doing.
+
+    Activity lines don't need a grid at all: unlike a step, an activity never renders a
+    live `Spinner` (see `format_activity_row`'s docstring for why), so there is no second
+    renderable that needs its own aligned cell -- each is one already-fully-formed `Text`
+    line, its `├─`/`└─` connector baked directly into the string by `format_activity_row`,
+    with no column alignment of any kind at play.
 
     `spinners` is the caller's cache (see `_render_row`) -- passed in rather than created
     here so it persists across repeated calls for the same `PipelineBox`.
     """
 
-    table = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
+    renderables: list[Table | Text] = []
     for row in rows:
-        table.add_row(*_render_row(row, spinners))
-        for activity in row.activities:
-            table.add_row(*_render_activity_row(activity))
-    return table
+        step_table = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
+        step_table.add_row(*_render_row(row, spinners))
+        renderables.append(step_table)
+
+        last_index = len(row.activities) - 1
+        for index, activity in enumerate(row.activities):
+            renderables.append(Text(
+                format_activity_row(activity, is_last=index == last_index),
+                style=_ACTIVITY_STYLE,
+            ))
+    return Group(*renderables)
 
 
 class _BorderedBox(Static):
@@ -201,7 +250,22 @@ class PipelineBox(_BorderedBox):
         self.border_title = "Pipeline"
 
     def on_mount(self) -> None:
-        self.set_interval(1 / 60, self.refresh)
+        self.set_interval(1 / 60, self._animate)
+
+    def _animate(self) -> None:
+        """Re-run `render_rows_live` every tick, not just `self.refresh()` -- `refresh()`
+        alone only repaints whatever renderable is already stored, it does not call
+        `gradient_text` again. A running row's shimmer color spans get baked into a plain
+        `Text` once, at whatever moment `render_rows_live` last ran (i.e. a real
+        `update_rows` call, driven by pipeline events, not by this timer), so without
+        recomputing here the shimmer freezes between events and jumps -- the `Spinner`
+        icon animates fine regardless because Rich re-invokes `Spinner.__rich_console__`
+        itself on every repaint, but a `Text`'s spans are static once built. `layout=False`
+        since this recompute never changes row count/line length, only per-character
+        color, so the layout pass every real `update_rows` does would be wasted work here.
+        """
+
+        self.update(render_rows_live(self._rows, self._spinners), layout=False)
 
     def update_rows(self, rows: Sequence[StepRow]) -> None:
         """Replace the displayed rows with `rows`, re-rendered in order."""

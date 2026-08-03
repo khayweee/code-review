@@ -173,9 +173,11 @@ parameter.
 activity under a given step, using the identical "elapsed-while-running, final-once-
 finished" duration rule `backfill` uses for `StepRow` itself; `backfill` attaches each
 step's own `ActivityRow`s to that `StepRow.activities` field. `widgets.py`'s
-`render_rows`/`render_rows_live` render each row's activities as indented lines
-immediately beneath it, reusing `_STATUS_ICONS`/`format_duration` rather than a parallel
-set — deliberately no live `Spinner` for a running activity (see `_render_activity_row`'s
+`render_rows`/`render_rows_live` render each row's activities as directory-tree-style lines
+(`├─`/`└─` connectors, the last activity in a step's list getting the closing `└─` --
+`format_activity_row`'s `is_last` argument, computed by the caller since neither rendering
+function knows a `ActivityRow`'s position among its siblings on its own) immediately
+beneath it, reusing `_STATUS_ICONS`/`format_duration` rather than a parallel set — deliberately no live `Spinner` for a running activity (see `_render_activity_row`'s
 docstring): "live" comes from the duration number itself ticking on `PipelineBox`'s
 existing 60fps refresh via `ReviewApp`'s own re-render, the same way a `StepRow`'s duration
 does. Activity lines stay attached to their step permanently once reported, regardless of
