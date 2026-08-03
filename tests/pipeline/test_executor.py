@@ -10,6 +10,13 @@ No mocking of `Step` or `Agent` anywhere here -- `_ReviewStep` and `_OrderStep` 
 `Step` subclasses, and `ClaudeCLI` is the real Milestone 1 backend. See
 `tests/agent/test_process_group.py` for why this repo goes through the real backend rather
 than a mocked one: a mock can't prove what actually happens when the tool runs.
+
+The final test in this file (issue #64) proves the other half of the ambient-
+`ActivityReporter`-binding contract `pipeline/step.py`/`gitutils.py` own: `IntentStep`
+makes no `git`/agent call, so binding `current_activity_reporter` around its `run` (which
+`run_steps` now does for every step, see `executor.py`'s module docstring) must produce
+zero activity events -- proving a step with nothing to report renders no empty nested rows,
+not that the binding itself is inert.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ from pydantic import BaseModel
 from code_review.agent import Agent, ClaudeCLI, RunOpts
 from code_review.pipeline import Step, StepContext, StepEvent, StepOutcome, run_steps
 from code_review.steps.intent import Intent, IntentStep
+from code_review.tui.activity import ActivityRelay
 
 FAKE_CLI = Path(__file__).parent / "fakes" / "review_findings.py"
 ORDER_FAKE_CLI_A = Path(__file__).parent / "fakes" / "order_step_a.py"
@@ -278,3 +286,40 @@ def test_run_steps_yields_a_running_and_completed_event_per_step_in_order(
     assert isinstance(second_outcome.findings, OrderProbe)
     assert first_outcome.findings.step == "a"
     assert second_outcome.findings.step == "b"
+
+
+def test_run_steps_binds_the_ambient_activity_reporter_but_a_step_with_no_git_call_reports_nothing(
+    tmp_path: Path,
+) -> None:
+    """Issue #64's other acceptance criterion: `run_steps` now binds `ctx.activity_reporter`
+    ambiently around every `step.run(ctx)` call (see this module's own docstring's final
+    paragraph), including `IntentStep`, which makes no `git`/agent call at all. A real
+    `ActivityRelay` attached to `ctx` must end the run with nothing queued -- the binding
+    itself does not manufacture activity out of a step that never reports one, so the TUI
+    renders `IntentStep` with no nested rows, exactly as before this seam existed.
+    """
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    intent = Intent(summary="add retry logic", source="explicit", score=1.0)
+    relay = ActivityRelay()
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=intent, activity_reporter=relay)
+    steps: list[Step] = [IntentStep()]
+
+    events = asyncio.run(_collect(steps, ctx))
+    asyncio.run(agent.close())
+
+    outcomes = _completed_outcomes(events)
+    assert len(outcomes) == 1
+    assert outcomes[0].findings is intent
+
+    # Nothing was ever reported: `relay.next_event()` would hang forever with nothing
+    # queued, so bound it with a short timeout instead of asserting on a private queue.
+    async def _next_event_or_none() -> object | None:
+        try:
+            return await asyncio.wait_for(relay.next_event(), timeout=0.05)
+        except TimeoutError:
+            return None
+
+    assert asyncio.run(_next_event_or_none()) is None

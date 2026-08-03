@@ -14,14 +14,15 @@ is what `cli.py` hands to both sides of that seam.
 
 `activity_relay` (issue #66) is a third, independent seam of the same shape: an optional
 `tui.activity.ActivityRelay` this app polls, in a third worker (`_consume_activities`), for
-nested sub-step activity relayed via `StepContext.report_activity`. It does not change
-`StepEvent`/`run_steps` at all -- it is a second event stream, not a new `StepEvent`
-status. `ActivityRelay` itself never knows which step an activity belongs to (see that
-module's docstring); this app supplies that correlation, but not by tagging each received
-`ActivityEvent` with whichever step `_consume_activities` sees as current *at the moment it
-dequeues that event* -- issue #65 found that design unsound (see `_tag_activity_events`'s
-docstring below) once a real producer (`ReviewStep`) existed to expose the race. Ownership
-is instead derived purely from timestamps, at render time.
+nested sub-step activity relayed via `StepContext.report_activity` or, ambiently,
+`gitutils.run_git` (issue #64). It does not change `StepEvent`/`run_steps` at all -- it is
+a second event stream, not a new `StepEvent` status. `ActivityRelay` itself never knows
+which step an activity belongs to (see that module's docstring); this app supplies that
+correlation, but not by tagging each received `ActivityEvent` with whichever step
+`_consume_activities` sees as current *at the moment it dequeues that event* -- issue #65
+found that design unsound (see `_tag_activity_events`'s docstring below) once a real
+producer (`ReviewStep`) existed to expose the race. Ownership is instead derived purely
+from timestamps, at render time.
 """
 
 from __future__ import annotations
@@ -218,7 +219,9 @@ class ReviewApp(App[None]):
         every other worker). Each iteration appends the raw `ActivityEvent` to
         `self._activity_events` and re-renders, the same way `_consume_events` re-renders
         after each `StepEvent` -- see `_tag_activity_events` for why owner correlation does
-        NOT happen here at receipt time (issue #65).
+        NOT happen here at receipt time (issue #65; an earlier "tag with `self._running_step`
+        at receipt time" design was unsound and is documented, for the historical record of
+        the exact race that broke it, in `_tag_activity_events`'s own docstring).
         """
 
         assert self._activity_relay is not None

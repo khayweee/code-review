@@ -548,6 +548,104 @@ def test_tag_activity_events_keeps_a_span_with_the_step_that_completed_before_it
     assert owners == ["ReviewStep", "ReviewStep"]
 
 
+def test_review_app_keeps_a_finished_activity_under_its_starting_step_across_a_fast_handoff() -> (
+    None
+):
+    """Regression for a real bug issue #64's real `RebaseStep` producer exposed in `#66`'s
+    own consuming code: the app used to tag an `ActivityEvent` with `self._running_step` at
+    receipt time, which -- unlike `_tag_activity_events` (see the test above and `app.py`'s
+    module docstring) -- is not sound, since `_consume_events` and the activity worker are
+    two independently scheduled tasks with no ordering guarantee between them.
+
+    `_consume_events` (driving the `StepEvent` stream) and the activity worker are two
+    independently scheduled tasks. Entering/exiting `relay.activity(...)` never itself
+    suspends (`asyncio.Queue.put` on an unbounded queue returns without a real checkpoint),
+    so both an activity's "started" and "finished" `ActivityEvent`s get queued perfectly
+    synchronously with whatever code enclosed them -- the activity worker only gets a
+    chance to actually drain the queue at the *next* genuine checkpoint (a real `await` that
+    suspends) anywhere in the app. This scenario reproduces the exact gap that bit
+    `RebaseStep` in production: one checkpoint inside the activity's own body (standing in
+    for `run_git`'s real subprocess spawn) lets the worker dequeue "started" while RebaseStep
+    is still the running step, then -- with no further checkpoint -- RebaseStep's "completed"
+    and ReviewStep's "running" `StepEvent`s render before the worker ever gets scheduled
+    again, so by the time it dequeues "finished", `self._running_step` has already become
+    "ReviewStep". `_tag_activity_events`'s timestamp-window attribution (not tied to live
+    scheduling order at all) keeps both halves under RebaseStep regardless.
+    """
+
+    relay = ActivityRelay()
+
+    async def events() -> AsyncIterator[StepEvent]:
+        started = time.monotonic()
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="running",
+            outcome=None,
+            started_at=started,
+            duration=None,
+        )
+
+        async with relay.activity("git rebase origin/main"):
+            # A real checkpoint (stands in for `run_git`'s real subprocess spawn) -- gives
+            # the activity worker its one chance to dequeue "started" while RebaseStep is
+            # still `self._running_step`.
+            await asyncio.sleep(0)
+
+        # Deliberately no checkpoint here, matching production: "finished" was just queued
+        # synchronously, and nothing suspends again until the render calls below return and
+        # this generator is asked for its next item.
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=started,
+            duration=0.01,
+        )
+        review_started = time.monotonic()
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="running",
+            outcome=None,
+            started_at=review_started,
+            duration=None,
+        )
+
+        # First real checkpoint since "finished" was queued -- this is where the activity
+        # worker finally gets to run, with `self._running_step` already "ReviewStep".
+        await asyncio.sleep(0.05)
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=review_started,
+            duration=0.01,
+        )
+
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, events(), activity_relay=relay)
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+
+            content = _pipeline_box_content(app.query_one(PipelineBox))
+            lines = content.splitlines()
+            rebase_idx = next(i for i, line in enumerate(lines) if "RebaseStep" in line)
+            review_idx = next(i for i, line in enumerate(lines) if "ReviewStep" in line)
+            activity_idx = next(
+                i for i, line in enumerate(lines) if "git rebase origin/main" in line
+            )
+
+            # The activity's line sits under RebaseStep's own row, not ReviewStep's, and
+            # appears exactly once -- not split across both.
+            assert rebase_idx < activity_idx < review_idx
+            assert sum(1 for line in lines if "git rebase origin/main" in line) == 1
+            # Nested and shows a final, completed duration -- not stuck "running" forever
+            # (the old bug's other failure shape, when the split landed the other way).
+            assert lines[activity_idx].startswith(" ")
+            assert "✔" in lines[activity_idx]
+
+    asyncio.run(scenario())
+
+
 def test_review_app_final_render_on_failure_shows_the_broken_step_as_failed() -> None:
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _second_step_raises())
