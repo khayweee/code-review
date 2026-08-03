@@ -37,6 +37,8 @@ _STATUS_ICONS: dict[Status, str] = {
     "running": "◔",  # ◔ quarter-filled glyph: fallback only; live view uses Spinner
     "completed": "✔",  # ✔ check mark: finished successfully
     "failed": "✘",  # ✘ cross mark: raised before it could complete
+    "parked": "⏸",  # ⏸ pause: needs_approval=True, waiting on a human approve/skip/abort
+    "skipped": "⏭",  # ⏭ skip-forward: a human chose "skip" -- bypassed, not an error
 }
 
 # Mid-gray for activity lines, so they read as subordinate detail beneath their step.
@@ -49,6 +51,8 @@ _DOT_ICON = "●"
 _STATUS_DOT_STYLES: dict[Status, str] = {
     "completed": "#5fafff",  # blue
     "failed": "#bb6400",  # orange
+    "parked": "#d7af00",  # amber -- waiting on a human decision
+    "skipped": "#8a8a8a",  # gray -- deliberately bypassed by a human, not an error
 }
 
 

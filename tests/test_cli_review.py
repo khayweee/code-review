@@ -22,6 +22,17 @@ also have to press "e" once the run finishes -- `ReviewApp` no longer exits on i
 `tui/app.py`'s module docstring) -- so they use `_run_review_and_press_e_to_exit` instead of
 the simpler `_run_in_real_pty` the other real-pty tests use, since those exit (on a
 validation error) before the TUI ever starts.
+
+Issue #80's approval park adds a real end-to-end proof against an already-shipped bug:
+`repo_with_unpushed_local_default_commits` builds a checkout where `RebaseStep`'s issue #24
+guard fires for real, and `_run_review_with_keypresses` (generalizing
+`_run_review_and_press_e_to_exit` to an ordered sequence of keypresses, not just the final
+"e") answers the resulting `ApprovalPromptScreen` with "a"/"s"/"x" over a real pty. Once
+`ReviewStep`/`TestSufficiencyStep` set `needs_approval` from `has_blocking_finding` (already
+shipped, `steps/review.py`/`steps/test_sufficiency.py`), `test_review_surfaces_a_blocking_
+finding_without_crashing` below changed too: a blocking finding now genuinely parks the run
+(it used to be silently ignored, pre-#80) -- `BLOCKING_FAKE_CLAUDE`'s own module docstring
+already anticipated this ("both steps report needs_approval=True from this one script").
 """
 
 from __future__ import annotations
@@ -33,8 +44,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import IO
 
 import pytest
 import typer
@@ -109,6 +122,59 @@ def repo_with_branch(tmp_path: Path) -> tuple[Path, str]:
     _run_git(["checkout", "-q", "-"], repo)
 
     return repo, "feature/change"
+
+
+@pytest.fixture
+def repo_with_unpushed_local_default_commits(tmp_path: Path) -> tuple[Path, str, str]:
+    """Like `repo_with_branch` above, but real, end-to-end proof for issue #80: `repo`'s
+    checked-out HEAD (local "main", exactly as `repo_with_branch` leaves it) gains one
+    commit never pushed to `origin` -- so local "main"'s tip and HEAD are literally the
+    same commit, which trivially satisfies `steps/rebase.py`'s issue #24 guard's second
+    condition ("local `default_branch`'s tip is itself an ancestor of HEAD") by identity,
+    while the first condition (local `default_branch` strictly ahead of `origin/main`)
+    holds because that commit was never pushed. `RebaseStep`'s own guard fires the moment
+    `review` reaches it, parking the whole run -- this is the already-shipped bug (issue
+    #24) this ticket (#80) is proven against: before #80, the executor silently ignored
+    `needs_approval=True` and rebased anyway.
+
+    Returns `(repo, branch, unpushed_sha)`: `branch` is `repo_with_branch`'s own
+    "feature/change" (used only for `_diff_against_head`'s diff, unrelated to the guard);
+    `unpushed_sha` is the local-only commit's full SHA, whose short form both `RebaseStep`'s
+    resulting `Finding.description` and `ApprovalPromptScreen`'s own displayed text name.
+    """
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _run_git(["init", "-q"], origin)
+    _run_git(["config", "user.email", "test@example.com"], origin)
+    _run_git(["config", "user.name", "Test"], origin)
+    _run_git(["checkout", "-q", "-b", "main"], origin)
+    (origin / "greeting.txt").write_text("hello\n")
+    _run_git(["add", "-A"], origin)
+    _run_git(["commit", "-q", "-m", "init"], origin)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(["init", "-q"], repo)
+    _run_git(["config", "user.email", "test@example.com"], repo)
+    _run_git(["config", "user.name", "Test"], repo)
+    _run_git(["remote", "add", "origin", str(origin)], repo)
+    _run_git(["fetch", "-q", "origin"], repo)
+    _run_git(["checkout", "-q", "-b", "main", "origin/main"], repo)
+
+    greeting = repo / "greeting.txt"
+    _run_git(["checkout", "-q", "-b", "feature/change"], repo)
+    greeting.write_text("hello\nworld\n")
+    _run_git(["add", "-A"], repo)
+    _run_git(["commit", "-q", "-m", "add world"], repo)
+    _run_git(["checkout", "-q", "main"], repo)
+
+    (repo / "local_main_only.txt").write_text("unpushed\n")
+    _run_git(["add", "-A"], repo)
+    _run_git(["commit", "-q", "-m", "add local-main-only file"], repo)
+    unpushed_sha = _run_git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+    return repo, "feature/change", unpushed_sha
 
 
 def _env_with_fake_claude(fake_cli: Path, tmp_path: Path) -> dict[str, str]:
@@ -344,6 +410,80 @@ def _run_review_and_press_e_to_exit(
     return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
+def _run_review_with_keypresses(
+    args: list[str],
+    cwd: Path,
+    *,
+    keypresses: list[tuple[float, str]],
+    final_wait: float = 3.0,
+    timeout: float = 30.0,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Like `_run_review_and_press_e_to_exit`, generalized to send an ordered sequence of
+    `(delay_seconds, key)` pairs -- issue #80's `ApprovalPromptScreen` needs a single
+    keypress ("a"/"s"/"x") answered *before* the run reaches its own Status box, unlike
+    every prior full-run test here, which only ever needs the final "e". Each `key` is
+    written directly to the child's stdin after sleeping `delay_seconds` -- the same
+    "generous margin over the run's own real duration, not a tight one" reasoning
+    `_run_review_and_press_e_to_exit` already documents. `final_wait` is the margin before
+    the closing "e".
+
+    Unlike `_run_review_and_press_e_to_exit` (a single `time.sleep` immediately followed by
+    `communicate()`), this drains `stdout`/`stderr` continuously on background threads for
+    the whole run, not just after the last keypress: `PipelineBox`'s own 4-times-a-second
+    repaint (`_TICK_INTERVAL`) writes enough escape-code-heavy output that leaving the
+    child's pty output pipe undrained across *multiple* waits (several seconds each, one
+    per keypress plus `final_wait`) can fill its kernel buffer and block the child's own
+    write -- wedging its single-threaded event loop, including the very stdin-read task
+    that would otherwise pick up the next keypress. Observed directly while developing this
+    helper: an earlier version that only read output via `communicate()` at the very end
+    reproduced this deadlock intermittently (a keypress sent during an undrained wait
+    windows to be silently dropped, sometimes, depending on how much had already been
+    rendered) -- draining throughout removes the dependency on wait length entirely.
+    """
+
+    process = subprocess.Popen(
+        _script_argv(args),
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _drain(stream: IO[str], chunks: list[str]) -> None:
+        for line in iter(stream.readline, ""):
+            chunks.append(line)
+
+    stdout_thread = threading.Thread(target=_drain, args=(process.stdout, stdout_chunks))
+    stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr_chunks))
+    stdout_thread.start()
+    stderr_thread.start()
+
+    for delay, key in keypresses:
+        time.sleep(delay)
+        process.stdin.write(key)
+        process.stdin.flush()
+    time.sleep(final_wait)
+    process.stdin.write("e")
+    process.stdin.close()
+
+    process.wait(timeout=timeout)
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+
+    return subprocess.CompletedProcess(
+        process.args, process.returncode, "".join(stdout_chunks), "".join(stderr_chunks)
+    )
+
+
 def test_review_rejects_empty_intent_under_a_real_terminal(
     repo_with_branch: tuple[Path, str],
 ) -> None:
@@ -404,24 +544,27 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     _assert_no_leftover_code_review_process()
 
 
-def test_review_surfaces_a_blocking_finding_without_crashing(
+def test_review_surfaces_a_blocking_finding_and_approving_both_parks_completes_the_run(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
-    """Acceptance criterion 3 from issue #60: a blocking ("ask-user") finding from
-    `ReviewStep` is surfaced -- rendered in the Findings box -- without the run crashing.
-    `run_steps` (`pipeline/executor.py`) never branches on a prior `StepOutcome`, and
-    `ReviewApp` only sets `self.error`/exits nonzero on an actually raised exception (see
-    `tui/app.py`'s module docstring) -- a blocking-but-non-exception outcome is a normal
-    return value, so this still exits 0 and still reaches the "Pipeline ran successfully."
-    Status message; no auto-fix/approval loop exists yet (Milestone 7) to make the run stop
-    early or wait on the finding interactively."""
+    """Acceptance criterion 3 from issue #60, updated for issue #80: a blocking ("ask-user")
+    finding from `ReviewStep` is surfaced -- rendered in the Findings box -- without the run
+    crashing. Before #80 this outcome's `needs_approval=True` was silently ignored; now it
+    genuinely parks the run (`BLOCKING_FAKE_CLAUDE`'s own module docstring already
+    anticipated this: "both steps report needs_approval=True from this one script", since
+    `TestSufficiencyStep` resolves the same fake `claude` on `PATH` and parks a second time
+    right after). Answering both parks with "approve" ("a") lets the run reach its own
+    "Pipeline ran successfully." Status message, proving a blocking finding still does not
+    crash the run -- it now genuinely pauses for a human instead of being silently
+    ignored."""
 
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(BLOCKING_FAKE_CLAUDE, tmp_path)
 
-    result = _run_review_and_press_e_to_exit(
+    result = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
+        keypresses=[(3.0, "a"), (2.0, "a")],
         env=env,
     )
     output = _plain(result.stdout)
@@ -430,5 +573,89 @@ def test_review_surfaces_a_blocking_finding_without_crashing(
     assert "Traceback" not in output
     assert "Pipeline ran successfully." in output
     assert "drops error handling required by the caller's contract" in output
+
+    _assert_no_leftover_code_review_process()
+
+
+# --- The approval park, proven against RebaseStep's real, already-shipped guard (#80) ----
+
+
+def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
+    repo_with_unpushed_local_default_commits: tuple[Path, str, str],
+) -> None:
+    """This is the ticket's own headline acceptance criterion: a branch whose history
+    includes unpushed local-default commits parks at `RebaseStep` and presents approve/
+    skip/abort through the TUI, instead of silently rebasing as it did before #80. Aborting
+    proves this without needing a fake `claude` on `PATH` -- `ReviewStep`/
+    `TestSufficiencyStep` never run."""
+
+    repo, branch, unpushed_sha = repo_with_unpushed_local_default_commits
+
+    result = _run_review_with_keypresses(
+        [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
+        cwd=repo,
+        keypresses=[(3.0, "x")],
+    )
+    output = _plain(result.stdout)
+
+    assert result.returncode == 1
+    assert "Traceback" not in output
+    assert "code-review review failed" in output
+    assert "RebaseStep" in output
+    # The finding this guard produces names the unpushed commit -- proof this is really
+    # `steps/rebase.py`'s issue #24 guard firing, not some other park.
+    assert unpushed_sha[:7] in output
+    # No further step ran: aborting stopped the run before ReviewStep ever started.
+    assert "ReviewStep" not in output or "◌ ReviewStep" in output
+
+    _assert_no_leftover_code_review_process()
+
+
+def test_review_choosing_approve_at_the_rebase_park_continues_the_run(
+    repo_with_unpushed_local_default_commits: tuple[Path, str, str],
+    tmp_path: Path,
+) -> None:
+    repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
+    env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
+
+    result = _run_review_with_keypresses(
+        [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
+        cwd=repo,
+        keypresses=[(3.0, "a")],
+        env=env,
+    )
+    output = _plain(result.stdout)
+
+    assert result.returncode == 0
+    assert "Traceback" not in output
+    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep"):
+        assert step_name in output
+    assert "Pipeline ran successfully." in output
+
+    _assert_no_leftover_code_review_process()
+
+
+def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continues(
+    repo_with_unpushed_local_default_commits: tuple[Path, str, str],
+    tmp_path: Path,
+) -> None:
+    """Skip is not an error: later steps still run, and the run still finishes cleanly."""
+
+    repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
+    env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
+
+    result = _run_review_with_keypresses(
+        [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
+        cwd=repo,
+        keypresses=[(3.0, "s")],
+        env=env,
+    )
+    output = _plain(result.stdout)
+
+    assert result.returncode == 0
+    assert "Traceback" not in output
+    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep"):
+        assert step_name in output
+    assert "Pipeline ran successfully." in output
 
     _assert_no_leftover_code_review_process()

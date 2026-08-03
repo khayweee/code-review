@@ -198,7 +198,74 @@ and `tests/steps/test_review.py`'s activity-span tests for real end-to-end runs 
 full sequence, which between them is what caught the owner-tagging race documented above.
 Both issues are closed.
 
+## The `ApprovalRelay` seam (issue #80)
+
+`approval_relay.py`'s `ApprovalRelay` is the same shape as `InputRelay`/`ActivityRelay`
+above -- Textual-import-free, unit-tested in isolation in `tests/tui/test_approval_relay.py`
+-- for a third purpose: relaying a parked step's approve/skip/abort decision. A distinct
+class from `InputRelay`, not a reuse of it, since the answer here is a three-way `Decision`
+(`Literal["approve", "skip", "abort"]`), not free text. Breaks the same construction-order
+cycle the other two do: `cli.py` builds one `ApprovalRelay`, hands `relay.request_approval`
+to `StepContext.on_approval_needed` on one side and `relay` itself to `ReviewApp(...,
+approval_relay=relay)` on the other. The caller that actually invokes `on_approval_needed`
+is `pipeline.executor.run_steps` itself (not a step -- see that module's "The approval
+park" section), the moment a step's `StepOutcome.needs_approval` is True.
+
+`ReviewApp.on_mount` starts a fourth worker (`_relay_approval`) in its own worker group
+("approval-relay") when `approval_relay` is not `None`. Each iteration awaits
+`approval_relay.next_request()` (the parked step's name and its `StepOutcome`), sets
+`self._parked_step` and re-renders (so the Pipeline box shows that row as "parked" right
+away), pushes `screens.ApprovalPromptScreen` via `await self.push_screen_wait(...)` to
+collect a `Decision`, records a "skip" into `self._skipped_steps` (permanently, the same
+"stays visible for the rest of the run" rule reported activities and `_failed_step` already
+follow), clears `self._parked_step` back to `None`, re-renders again, and only then resolves
+`future.set_result(decision)` -- so the app's own rendered state already reflects the
+decision by the time the parked `run_steps` call resumes (or, on "abort", raises `pipeline.
+executor.RunAbortedError`, unwinding the run through the same generic `ReviewApp.error` path
+every other step failure already uses -- `cli.py` needs no dedicated `except` clause for it).
+
+**"Parked"/"skipped" are overrides of "completed", not a third `StepEvent` status** -- see
+`state.py`'s module docstring's `parked_step`/`skipped_steps` section for why (the same
+design nuance driving `_relay_approval`'s ordering above): `run_steps` already yields a
+step's "completed" event before it even checks `needs_approval`, so by the time a park
+happens the event stream already calls that step "completed". `ReviewApp` is the only thing
+that knows a step is currently parked or was skipped, exactly the same "derived by the
+caller, not reported by the executor" rule `failed_step` already established.
+
+`ApprovalPromptScreen` (`screens.py`) mirrors `InputPromptScreen`'s split-out-of-`app.py`
+shape, but offers both a mouse path (`Button`s) and a keyboard path (single-key `BINDINGS`:
+"a"/"s"/"x") so a script-driven real-pty test (no mouse available) can answer it the same
+way a `Pilot`-driven test can. Every `Static` on this screen is constructed with
+`markup=False` -- `_format_outcome`'s text ultimately embeds agent-produced `Finding.
+description` text (untrusted), and rendering a real `ReviewOutput`/`TestSufficiencyOutput`
+outcome via `str(...)` (an earlier version of this function) reproduced a real `MarkupError`
+crash from Rich trying to parse that repr's own `[...]`-shaped list syntax as a style tag --
+`tests/tui/test_app.py`'s `test_review_app_parks_with_a_review_output_outcome_without_
+crashing_on_markup` pins this regression. `_format_outcome` itself now renders a
+`ReviewOutput`/`TestSufficiencyOutput` via `widgets.render_findings` (the same function
+`FindingsBox` uses) and a bare `list[Finding]` (the shape `steps/rebase.py`'s two
+`needs_approval=True` returns actually carry) via `widgets.format_finding`, falling back to
+`str(...)` only for a schema this module has no business assuming -- `markup=False` is a
+second, independent safety net for that fallback and for `Finding.description` content in
+general, not a replacement for rendering known schemas properly.
+
+First proven end to end with a hand-built, synthetic parked `StepOutcome` in
+`tests/tui/test_app.py` (a generator that calls `relay.request_approval` itself, exactly
+mirroring how #41/#66 each proved `InputRelay`/`ActivityRelay` before any real producer
+existed), then against `steps/rebase.py`'s already-shipped issue #24 guard end to end
+(`tests/test_cli_review.py`'s `repo_with_unpushed_local_default_commits` fixture, driven
+over a real pty). That real-pty helper (`_run_review_with_keypresses`) had to drain the
+child's `stdout`/`stderr` continuously on background threads, not just once at the end the
+way `_run_review_and_press_e_to_exit` does -- an earlier version that only read output via
+`communicate()` reproduced an intermittent deadlock (a keypress sent during an undrained
+multi-second wait could be silently dropped, since `PipelineBox`'s own repaint ticks can
+fill the pty's output buffer and block the child's single-threaded event loop, including its
+own stdin-reading task) -- see that helper's own docstring.
+
 ## Non-goals landed in later issues, not here
 
-- The interactive approve/fix/skip/abort layer waits on Milestone 7's approval loop, which
-  isn't specced yet.
+- The bounded auto-fix-before-park round (issue #81, blocked by #80) and its mirror for
+  `TestSufficiencyStep` (issue #82, blocked by #81) are not built here -- #80 only makes an
+  already-`needs_approval=True` outcome stop the run; nothing here runs a fix attempt before
+  parking, or resumes the *same* step after a "fix" response (there is no "fix" response
+  yet, only approve/skip/abort).

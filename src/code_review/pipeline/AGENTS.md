@@ -65,6 +65,29 @@ This is the only case so far where `pipeline/` exposes ambient (non-`ctx`-thread
 across the `steps/` boundary — keep it that way; a second such seam is a sign the
 `StepContext` parameter itself should have grown instead.
 
-Once the fix/approval loop (Milestone 7) lands, record here: the fail-safe-default
-regression test name(s) and the bounded-vs-unbounded fix-round asymmetry. Milestone 9
-owns the head-continuity guard's exact comparison rule.
+**The approval park (Milestone 7's first ticket, issue #80)** is landed: `executor.py`'s
+`run_steps` now stops right after yielding a step's "completed" `StepEvent` whenever that
+step's `StepOutcome.needs_approval` is True, awaiting `StepContext.on_approval_needed(
+step_name, outcome)` and blocking for one of "approve"/"skip"/"abort" -- see `executor.py`'s
+own module docstring ("The approval park" section) for the full behavior and
+`pipeline/step.py`'s `StepContext.on_approval_needed` field comment for the exact callable
+shape. `executor.ApprovalNotAttachedError` (no relay attached; fails closed, mirroring
+`agent/errors.py`'s `StdinBlockedError`) and `executor.RunAbortedError` (a human chose
+"abort") both live in `executor.py` itself, not a dedicated `errors.py` -- this package has
+no such module yet and two exceptions with exactly one raiser each didn't justify adding
+one. `approve`/`skip` are otherwise identical from this loop's own perspective; only the
+caller (`tui/app.py`'s `ReviewApp`, via its own `ApprovalRelay`-driven worker) tells them
+apart, for display purposes only (`tui/AGENTS.md`'s "The `ApprovalRelay` seam" section).
+Proven both with a synthetic parked `StepOutcome` (`tests/pipeline/test_executor.py`'s
+"The approval park" section) and end to end against `steps/rebase.py`'s already-shipped
+issue #24 guard (`tests/test_cli_review.py`'s `repo_with_unpushed_local_default_commits`).
+
+Still open for #81 (blocked by #80, not started): the fix-round mechanism itself -- a
+`dataclasses.replace`-based round-state extension to `StepContext`, the auto-fix-before-park
+ordering with a bounded round cap, and the human "fix" response's own uncapped round. #81
+also owns `ReviewStep`'s fix-mode prompt; #82 mirrors that for `TestSufficiencyStep`. The
+fail-safe-default rule itself (`Finding.action` unset/null/unrecognized always resolves to
+`"ask-user"`, never `"no-op"`/`"auto-fix"`) is already pinned by `tests/pipeline/
+test_findings.py`, from Milestone 5 -- #81 does not change it, only adds a bounded auto-fix
+path that runs *before* a finding would otherwise reach this park. Milestone 9 owns the
+head-continuity guard's exact comparison rule.

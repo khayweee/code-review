@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -118,6 +119,18 @@ async def _collect(steps: list[Step], ctx: StepContext) -> list[StepEvent]:
     return [event async for event in run_steps(steps, ctx)]
 
 
+async def _approve(step_name: str, outcome: StepOutcome) -> Literal["approve", "skip", "abort"]:
+    """A stub `on_approval_needed` (issue #80) that always answers "approve" -- attached
+    only by the one test below whose `TestSufficiencyStep` outcome parks
+    (`needs_approval=True`), so `run_steps` doesn't fail closed (`executor.
+    ApprovalNotAttachedError`) before this file's shared `_collect`/`_only_outcome` helpers
+    can inspect that outcome. This file's own tests are about `TestSufficiencyStep`'s
+    outcome construction, not about the park/approve/skip/abort flow itself -- that is
+    `tests/pipeline/test_executor.py`'s job."""
+
+    return "approve"
+
+
 def _only_outcome(events: list[StepEvent]) -> StepOutcome:
     completed = [e for e in events if e.status == "completed"]
     assert len(completed) == 1
@@ -153,7 +166,9 @@ def test_test_sufficiency_step_needs_approval_on_an_ask_user_finding(tmp_path: P
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, on_approval_needed=_approve
+    )
     step: Step = TestSufficiencyStep(executable=BLOCKING_FAKE_CLI)
 
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))

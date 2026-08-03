@@ -50,11 +50,21 @@ leading underscore, unlike that one -- this needs to be read from a different pa
 nullcontext-when-absent branch both `StepContext.report_activity` (explicit reporter) and
 `run_git` (ambient reporter) need, so that branch has exactly one implementation.
 
-`StepOutcome` carries `needs_approval`/`auto_fixable` now so Milestone 7 can act on them
-without a breaking schema change, even though nothing branches on them yet. `findings` is
-typed as `object` rather than the not-yet-built Milestone 5 `Finding`/`Findings` schema
-(`pipeline/findings.py`) -- a step's own code narrows it back to whatever schema that step
-validated its agent call against.
+`StepOutcome` carries `needs_approval`/`auto_fixable` -- Milestone 7's own ticket 1 (issue
+#80) is what first acts on `needs_approval`: `executor.run_steps` now stops the run right
+after yielding a step's "completed" `StepEvent` when that step's `StepOutcome.needs_approval`
+is True, calling `StepContext.on_approval_needed` (see that field's own comment above) and
+blocking until it resolves to "approve"/"skip"/"abort" -- "approve" and "skip" both let the
+loop continue exactly as before (skip vs. approve is a presentational distinction the
+consuming `tui/` side draws, not one `run_steps` itself branches on), "abort" raises
+`executor.RunAbortedError` to unwind the whole run with no further step executed. `Step`
+implementations themselves are unaffected: nothing about park/approve/skip/abort belongs
+inside a `Step.run` method, matching Milestone 7's own auto-fix ticket (#81, still
+unimplemented) design intent of layering all of this on top of the same fixed `step.run(ctx)`
+call shape. `auto_fixable` still has no consumer -- that is #81's job. `findings` is typed
+as `object` rather than the Milestone 5 `Finding`/`Findings` schema (`pipeline/findings.py`)
+-- a step's own code narrows it back to whatever schema that step validated its agent call
+against.
 
 `StepEvent` (Milestone 13, issue #39) is `executor.run_steps`'s progress unit: one per
 "running" and one per "completed" per step. It gets `step_name` by calling `step.get_name()`
@@ -156,6 +166,25 @@ class StepContext:
     # (issue #64)" section. `cli.py` wires this field to a real `tui.activity.ActivityRelay`
     # instance for interactive runs.
     activity_reporter: ActivityReporter | None = None
+    # The approval-park seam (issue #80): `executor.run_steps` calls this, passing the
+    # parking step's own name and its full `StepOutcome`, whenever that `StepOutcome.
+    # needs_approval` is True -- and blocks until it resolves to one of "approve"/"skip"/
+    # "abort". Shaped like `on_input_needed` above (a structural callable, `None` by
+    # default so every existing test constructing `StepContext` directly keeps passing
+    # unchanged), but takes `(step_name, outcome)` rather than a single prompt string: the
+    # park logic in `pipeline/` must not itself format `StepOutcome.findings` (typed as
+    # bare `object`, see below) into display text -- that is the relay/modal's job, on the
+    # `tui/` side of the boundary this field exists to preserve. Unlike `on_input_needed`,
+    # this field already has a real consumer as of this same change: `executor.run_steps`'s
+    # own park/approve/skip/abort logic, not a step. `None` (the default, and every test
+    # that doesn't park a step) means `run_steps` fails closed with `executor.
+    # ApprovalNotAttachedError` rather than hanging or silently treating the park as
+    # approved -- mirroring `agent/errors.py`'s `StdinBlockedError`/`RunOpts.
+    # on_input_needed`'s own "`None` means fail closed" rule. `cli.py` wires this to
+    # `tui.approval_relay.ApprovalRelay.request_approval` for interactive runs.
+    on_approval_needed: (
+        Callable[[str, StepOutcome], Awaitable[Literal["approve", "skip", "abort"]]] | None
+    ) = None
 
     def report_activity(self, label: str) -> AbstractAsyncContextManager[None]:
         """Single-line call site for a step to report one nested unit of work named

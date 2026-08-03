@@ -59,7 +59,13 @@ def test_format_duration_renders_minute_and_above_as_mm_ss() -> None:
 
 @pytest.mark.parametrize(
     ("status", "icon"),
-    [("pending", "◌"), ("completed", "✔"), ("failed", "✘")],
+    [
+        ("pending", "◌"),
+        ("completed", "✔"),
+        ("failed", "✘"),
+        ("parked", "⏸"),
+        ("skipped", "⏭"),
+    ],
 )
 def test_format_row_uses_a_distinct_icon_per_status(status: str, icon: str) -> None:
     row = StepRow(name="IntentStep", status=status, duration=None)  # type: ignore[arg-type]
@@ -231,8 +237,8 @@ def test_render_row_gradients_the_name_of_a_running_step_only() -> None:
 
 def test_render_row_uses_a_colored_dot_icon_for_completed_and_failed_but_not_pending() -> None:
     """Distinct from the plain ✔/✘ glyph the deterministic text fallback (`format_row`)
-    uses -- the live pipeline view renders a completed/failed row's icon as a solid dot,
-    colored by status (blue/orange), so status reads at a glance from color rather than
+    uses -- the live pipeline view renders a completed/failed/parked/skipped row's icon as
+    a solid dot, colored by status, so status reads at a glance from color rather than
     glyph shape. Checked directly on the returned icon `Text` (`.style`), not via a printed
     console capture, for the same reason `gradient_text`'s tests do: color-only invariants
     aren't reliably recoverable from plain-text output."""
@@ -245,6 +251,12 @@ def test_render_row_uses_a_colored_dot_icon_for_completed_and_failed_but_not_pen
     failed_icon, _ = _render_row(
         StepRow(name="RebaseStep", status="failed", duration=0.1), spinners
     )
+    parked_icon, _ = _render_row(
+        StepRow(name="RebaseStep", status="parked", duration=0.1), spinners
+    )
+    skipped_icon, _ = _render_row(
+        StepRow(name="RebaseStep", status="skipped", duration=0.1), spinners
+    )
     pending_icon, _ = _render_row(
         StepRow(name="ReviewStep", status="pending", duration=None), spinners
     )
@@ -253,7 +265,12 @@ def test_render_row_uses_a_colored_dot_icon_for_completed_and_failed_but_not_pen
     assert completed_icon.style == "#5fafff"
     assert failed_icon.plain == "●"
     assert failed_icon.style == "#bb6400"
-    # Pending keeps the plain, uncolored hollow-ring glyph -- only completed/failed dot.
+    assert parked_icon.plain == "●"
+    assert parked_icon.style == "#d7af00"
+    assert skipped_icon.plain == "●"
+    assert skipped_icon.style == "#8a8a8a"
+    # Pending keeps the plain, uncolored hollow-ring glyph -- only the four statuses above
+    # get a colored dot.
     assert pending_icon.plain == "◌"
     assert pending_icon.style == ""
 

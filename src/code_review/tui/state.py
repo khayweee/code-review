@@ -12,6 +12,20 @@ executor reports. The caller here (the App) is the only thing that knows a run a
 mid-step; it passes that step's name in as `failed_step` so the final render can show it as
 failed instead of stuck "running" forever.
 
+`parked_step`/`skipped_steps` (issue #80) are the same kind of caller-supplied override, for
+a different reason: `pipeline.executor.run_steps` already yields a step's "completed"
+`StepEvent` *before* checking `outcome.needs_approval` (see that module's own docstring), so
+by the time a park happens the event stream already says that step is `"completed"` -- park/
+skip are not a third state alongside pending/running/completed the way `"failed"` is (which
+overrides an otherwise-stuck `"running"` row, since a raising step never gets a "completed"
+event at all). `ReviewApp` learns which step is currently parked, and which have been
+skipped, from its own `ApprovalRelay`-driven worker -- not from anything threaded through
+`StepEvent`/`StepOutcome` -- and passes that bookkeeping in here the same way it already
+passes `failed_step`. A step named `parked_step` renders `"parked"` and a step named in
+`skipped_steps` renders `"skipped"`, both overriding what the event stream alone would say
+(`"completed"`); every other step falls through to the unchanged completed/running/failed/
+pending logic below.
+
 `latest_findings` (issue #42, widened for #61) is the same kind of pure extraction as
 `backfill`, scanning `events` for the most recently completed step whose outcome carries a
 non-empty `ReviewOutput` or `TestSufficiencyOutput`. It imports both from `steps.review`/
@@ -42,7 +56,7 @@ completed `StepRow` itself stays visible for the rest of the run.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -51,7 +65,7 @@ from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.activity import ActivityEvent
 
-Status = Literal["pending", "running", "completed", "failed"]
+Status = Literal["pending", "running", "completed", "failed", "parked", "skipped"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +165,8 @@ def backfill(
     *,
     now: float,
     failed_step: str | None = None,
+    parked_step: str | None = None,
+    skipped_steps: Collection[str] = (),
     activity_events: Sequence[tuple[str | None, ActivityEvent]] = (),
 ) -> list[StepRow]:
     """Turn `events` seen so far into one `StepRow` per `registry` entry, in order.
@@ -158,10 +174,12 @@ def backfill(
     A registry entry with no event yet is `"pending"`. A `"running"` event with no
     matching `"completed"` event yet is `"running"` (or `"failed"` if its name equals
     `failed_step`), with `duration` computed as `now - started_at`. A `"completed"` event
-    is `"completed"`, with `duration` taken from that event itself. Each row's
-    `activities` comes from `backfill_activities(name, activity_events, now=now)` --
-    `()` when `activity_events` is omitted, so every existing caller/test keeps working
-    unchanged.
+    is `"completed"` -- unless its name equals `parked_step` (`"parked"`) or is present in
+    `skipped_steps` (`"skipped"`), both caller-supplied overrides of what the event stream
+    alone would say; see the module docstring's `parked_step`/`skipped_steps` section for
+    why. Either way `duration` is taken from that event itself. Each row's `activities`
+    comes from `backfill_activities(name, activity_events, now=now)` -- `()` when
+    `activity_events` is omitted, so every existing caller/test keeps working unchanged.
     """
 
     started_at_by_step: dict[str, float] = {}
@@ -176,7 +194,25 @@ def backfill(
     rows = []
     for name in registry:
         activities = tuple(backfill_activities(name, activity_events, now=now))
-        if name in duration_by_completed_step:
+        if name == parked_step:
+            rows.append(
+                StepRow(
+                    name=name,
+                    status="parked",
+                    duration=duration_by_completed_step.get(name),
+                    activities=activities,
+                )
+            )
+        elif name in skipped_steps:
+            rows.append(
+                StepRow(
+                    name=name,
+                    status="skipped",
+                    duration=duration_by_completed_step.get(name),
+                    activities=activities,
+                )
+            )
+        elif name in duration_by_completed_step:
             rows.append(
                 StepRow(
                     name=name,
