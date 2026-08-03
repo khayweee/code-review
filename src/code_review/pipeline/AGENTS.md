@@ -41,6 +41,16 @@ strips pipeline-owned-delivery-scoped findings from a `ReviewStep` answer and re
 narrow, non-circular exception `pipeline/step.py` already uses for `steps.intent.Intent`;
 see this function's own docstring for the exact mechanics.
 
+`step.py`'s `ActivityReporter` (Milestone 14, issue #66) is a structural, one-method
+`Protocol` — `pipeline/`/`steps/` depend only on its `activity(label)` signature and never
+import `tui/` directly, the same rule `on_input_needed` already follows. `StepContext.
+activity_reporter` carries an optional instance; `StepContext.report_activity(label)` is
+the single-line call site (`async with ctx.report_activity("..."): ...`) that delegates to
+it or no-ops via `contextlib.nullcontext()` when unset, so no call site ever needs an `if`
+branch. `tui.activity.ActivityRelay` satisfies the Protocol purely structurally. No step
+consumes this yet — see `tui/AGENTS.md`'s "The `ActivityRelay` seam" section for the
+consuming side.
+
 Once the fix/approval loop (Milestone 7) lands, record here: the fail-safe-default
 regression test name(s) and the bounded-vs-unbounded fix-round asymmetry. Milestone 9
 owns the head-continuity guard's exact comparison rule.

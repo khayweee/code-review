@@ -119,6 +119,45 @@ check there guards against. One box, most-recent-completion-wins -- not an accum
 history across steps, matching `PipelineBox`'s own "one box, updated in place" pattern.
 Display only: no key or action here lets a user approve, fix, skip, or abort a finding.
 
+## The `ActivityRelay` seam (issue #66)
+
+`activity.py`'s `ActivityRelay` is the same shape as `InputRelay` above, for a different
+purpose: a second, independent progress stream for nested sub-step activity (one `git
+fetch`, one agent call), not a new `StepEvent` status. Textual-import-free like
+`input_relay.py`/`state.py`, unit-tested in isolation in `tests/tui/test_activity.py`.
+Breaks the same construction-order cycle `InputRelay` does: `cli.py` builds one
+`ActivityRelay`, hands it to `StepContext.activity_reporter` (via `pipeline/step.py`'s
+`ActivityReporter` Protocol) on one side and to `ReviewApp(..., activity_relay=relay)` on
+the other.
+
+`ReviewApp.on_mount` starts a third worker (`_consume_activities`) in its own worker
+`group` ("activity-relay", distinct from both the default events group and "input-relay")
+when `activity_relay` is not `None`. Each iteration awaits `activity_relay.next_event()`
+and tags the received `ActivityEvent` with `self._running_step` — steps run strictly
+sequentially and never in parallel, so whichever step is "running" at receipt time is
+always the right owner; `ActivityRelay` itself never needs to know steps exist. Tagged
+`(step_name, ActivityEvent)` pairs accumulate in `self._activity_events` and feed
+`state.backfill`'s new `activity_events` parameter on every render.
+
+`state.py`'s `backfill_activities` groups those tagged pairs into one `ActivityRow` per
+activity under a given step, using the identical "elapsed-while-running, final-once-
+finished" duration rule `backfill` uses for `StepRow` itself; `backfill` attaches each
+step's own `ActivityRow`s to that `StepRow.activities` field. `widgets.py`'s
+`render_rows`/`render_rows_live` render each row's activities as indented lines
+immediately beneath it, reusing `_STATUS_ICONS`/`format_duration` rather than a parallel
+set — deliberately no live `Spinner` for a running activity (see `_render_activity_row`'s
+docstring): "live" comes from the duration number itself ticking on `PipelineBox`'s
+existing 60fps refresh via `ReviewApp`'s own re-render, the same way a `StepRow`'s duration
+does. Activity lines stay attached to their step permanently once reported, regardless of
+that step's own current status — the same way a completed `StepRow` itself stays visible
+for the rest of the run, rather than disappearing once the step moves on.
+
+No real producer exists yet — proven end to end with a hand-built, synthetic
+`relay.activity(...)` call feeding a real `ReviewApp` in `tests/tui/test_app.py`, exactly
+mirroring how #41 proved `InputRelay`'s own queueing contract before any real backend
+existed. Issues #64 (`gitutils.run_git`) and #65 (`ReviewStep`'s one agent call) are the
+first real producers, both blocked by this one.
+
 ## Non-goals landed in later issues, not here
 
 - The interactive approve/fix/skip/abort layer waits on Milestone 7's approval loop, which

@@ -11,6 +11,15 @@ Takes `registry` and `events` as constructor arguments rather than importing
 backend subprocess relayed via `StepContext.on_input_needed`. See `input_relay.py`'s
 module docstring for why the relay object -- not a live reference to `ReviewApp` itself --
 is what `cli.py` hands to both sides of that seam.
+
+`activity_relay` (issue #66) is a third, independent seam of the same shape: an optional
+`tui.activity.ActivityRelay` this app polls, in a third worker (`_consume_activities`), for
+nested sub-step activity relayed via `StepContext.report_activity`. It does not change
+`StepEvent`/`run_steps` at all -- it is a second event stream, not a new `StepEvent`
+status. `ActivityRelay` itself never knows which step an activity belongs to (see that
+module's docstring); this app supplies that correlation by tagging each received
+`ActivityEvent` with `self._running_step` at receipt time, since steps run strictly
+sequentially and never in parallel.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ from textual.app import App, ComposeResult
 from textual.timer import Timer
 
 from code_review.pipeline.step import StepEvent
+from code_review.tui.activity import ActivityEvent, ActivityRelay
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
@@ -60,6 +70,7 @@ class ReviewApp(App[None]):
         registry: Sequence[str],
         events: AsyncIterator[StepEvent],
         input_relay: InputRelay | None = None,
+        activity_relay: ActivityRelay | None = None,
     ) -> None:
         super().__init__()
         # Named `_step_registry`, not `_registry` -- `textual.app.App` already owns a
@@ -70,6 +81,13 @@ class ReviewApp(App[None]):
         # None (the default, and every test that doesn't exercise the relay) means no
         # interactive-input worker starts in `on_mount` below -- see `input_relay.py`.
         self._input_relay = input_relay
+        # Same "None means no worker starts" shape as `_input_relay`, for the activity
+        # stream (issue #66) -- see `activity.py`.
+        self._activity_relay = activity_relay
+        # `(owning_step_name, ActivityEvent)` pairs collected by `_consume_activities`,
+        # tagged with `self._running_step` at receipt time -- fed to `state.backfill` on
+        # every render so each row can show its own nested activity lines.
+        self._activity_events: list[tuple[str | None, ActivityEvent]] = []
         self._seen: list[StepEvent] = []
         # Name of the step most recently seen "running" with no "completed" yet -- the
         # step a mid-flight exception must be blamed on. Reset to None once that step's
@@ -101,6 +119,9 @@ class ReviewApp(App[None]):
             # above -- `exclusive` only cancels other workers in the *same* group, so this
             # would otherwise race with and cancel `_consume_events` on startup.
             self.run_worker(self._relay_input(), group="input-relay")
+        if self._activity_relay is not None:
+            # A third, independent worker group -- same reasoning as `input-relay` above.
+            self.run_worker(self._consume_activities(), group="activity-relay")
 
     def action_exit_when_done(self) -> None:
         """Bound to "e" -- exits the app, but only once the run has actually finished."""
@@ -110,7 +131,11 @@ class ReviewApp(App[None]):
 
     def _rows(self) -> list[StepRow]:
         return backfill(
-            self._step_registry, self._seen, now=time.monotonic(), failed_step=self._failed_step
+            self._step_registry,
+            self._seen,
+            now=time.monotonic(),
+            failed_step=self._failed_step,
+            activity_events=self._activity_events,
         )
 
     def _render(self) -> None:
@@ -181,3 +206,20 @@ class ReviewApp(App[None]):
             prompt, future = await self._input_relay.next_request()
             answer = await self.push_screen_wait(InputPromptScreen(prompt))
             future.set_result(answer)
+
+    async def _consume_activities(self) -> None:
+        """Poll `self._activity_relay` for reported sub-step activity (issue #66).
+
+        Runs for the app's whole lifetime (cancelled automatically on `self.exit()`, like
+        every other worker). Each iteration tags the received `ActivityEvent` with
+        `self._running_step` -- correct because steps run strictly sequentially and never
+        in parallel, so whichever step is "running" when an activity event arrives is
+        always the step that reported it -- appends it to `self._activity_events`, and
+        re-renders, the same way `_consume_events` re-renders after each `StepEvent`.
+        """
+
+        assert self._activity_relay is not None
+        while True:
+            event = await self._activity_relay.next_event()
+            self._activity_events.append((self._running_step, event))
+            self._render()

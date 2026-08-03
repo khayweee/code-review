@@ -12,7 +12,15 @@ from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.review import ReviewOutput
-from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
+from code_review.tui.activity import ActivityEvent
+from code_review.tui.state import (
+    ActivityRow,
+    StepRow,
+    backfill,
+    backfill_activities,
+    final_status_message,
+    latest_findings,
+)
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
 
@@ -241,3 +249,100 @@ def test_final_status_message_reports_the_error_when_present() -> None:
 
     assert message.startswith("Pipeline failed: rebase conflict")
     assert "Press 'e' to exit." in message
+
+
+# --- backfill_activities / StepRow.activities (issue #66) ---------------------------------
+
+
+def test_backfill_activities_with_no_events_is_empty() -> None:
+    assert backfill_activities("RebaseStep", [], now=10.0) == []
+
+
+def test_backfill_activities_ignores_events_tagged_for_a_different_step() -> None:
+    events: list[tuple[str | None, ActivityEvent]] = [
+        ("ReviewStep", ActivityEvent(1, None, "agent call", "started", 5.0)),
+        (None, ActivityEvent(2, None, "untagged", "started", 5.0)),
+    ]
+
+    assert backfill_activities("RebaseStep", events, now=10.0) == []
+
+
+def test_backfill_activities_reports_elapsed_duration_for_a_still_running_activity() -> None:
+    events: list[tuple[str | None, ActivityEvent]] = [
+        ("RebaseStep", ActivityEvent(1, None, "fetch", "started", 5.0)),
+    ]
+
+    rows = backfill_activities("RebaseStep", events, now=7.5)
+
+    assert rows == [ActivityRow(label="fetch", status="running", duration=2.5)]
+
+
+def test_backfill_activities_reports_final_duration_not_elapsed_once_finished() -> None:
+    events: list[tuple[str | None, ActivityEvent]] = [
+        ("RebaseStep", ActivityEvent(1, None, "fetch", "started", 5.0)),
+        ("RebaseStep", ActivityEvent(1, None, "fetch", "finished", 5.4)),
+    ]
+
+    # `now` is far past the activity's own duration -- a finished activity's duration must
+    # come from its own events, not `now - started_at`, mirroring `backfill`'s own rule.
+    rows = backfill_activities("RebaseStep", events, now=999.0)
+
+    assert len(rows) == 1
+    assert rows[0].label == "fetch"
+    assert rows[0].status == "completed"
+    assert rows[0].duration == pytest.approx(0.4)
+
+
+def test_backfill_activities_preserves_first_seen_order_across_multiple_activities() -> None:
+    events: list[tuple[str | None, ActivityEvent]] = [
+        ("RebaseStep", ActivityEvent(1, None, "fetch", "started", 1.0)),
+        ("RebaseStep", ActivityEvent(1, None, "fetch", "finished", 1.2)),
+        ("RebaseStep", ActivityEvent(2, None, "rebase", "started", 1.2)),
+    ]
+
+    rows = backfill_activities("RebaseStep", events, now=1.5)
+
+    assert len(rows) == 2
+    assert rows[0].label == "fetch"
+    assert rows[0].status == "completed"
+    assert rows[0].duration == pytest.approx(0.2)
+    assert rows[1].label == "rebase"
+    assert rows[1].status == "running"
+    assert rows[1].duration == pytest.approx(0.3)
+
+
+def test_backfill_attaches_each_steps_own_activities_to_its_row() -> None:
+    events = [
+        StepEvent(
+            step_name="RebaseStep", status="running", outcome=None, started_at=1.0, duration=None
+        )
+    ]
+    activity_events: list[tuple[str | None, ActivityEvent]] = [
+        ("RebaseStep", ActivityEvent(1, None, "fetch", "started", 1.1)),
+    ]
+
+    rows = backfill(REGISTRY, events, now=1.4, activity_events=activity_events)
+
+    # REGISTRY is ("IntentStep", "RebaseStep", "ReviewStep") -- RebaseStep is rows[1].
+    assert rows[1].name == "RebaseStep"
+    assert len(rows[1].activities) == 1
+    assert rows[1].activities[0].label == "fetch"
+    assert rows[1].activities[0].status == "running"
+    assert rows[1].activities[0].duration == pytest.approx(0.3)
+    # Steps with no reported activity keep an empty tuple.
+    assert rows[0].activities == ()
+    assert rows[2].activities == ()
+
+
+def test_backfill_without_activity_events_defaults_every_row_to_no_activities() -> None:
+    """`activity_events` defaults to `()` -- every existing caller/test that never passes
+    it keeps getting `StepRow`s equal to ones built with an explicit empty tuple."""
+
+    rows = backfill(REGISTRY, [], now=100.0)
+
+    assert rows == [
+        StepRow(name="IntentStep", status="pending", duration=None),
+        StepRow(name="RebaseStep", status="pending", duration=None),
+        StepRow(name="ReviewStep", status="pending", duration=None),
+    ]
+    assert all(row.activities == () for row in rows)

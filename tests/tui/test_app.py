@@ -20,6 +20,7 @@ from textual.widgets import Input, Static
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.review import ReviewOutput
+from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
@@ -407,6 +408,88 @@ def test_review_app_findings_box_shows_the_later_of_two_completed_findings() -> 
             box = app.query_one(FindingsBox)
             assert "second pass finding" in box.content
             assert "first pass finding" not in box.content
+
+    asyncio.run(scenario())
+
+
+def test_review_app_shows_synthetic_activity_events_nested_under_the_running_step() -> None:
+    """Issue #66 end-to-end proof, mirroring `test_review_app_relays_a_queued_input_
+    request_through_a_modal`'s own shape for `InputRelay`: a real `ActivityRelay` fed
+    synthetic `ActivityEvent`s the same way #41 proved `InputRelay`'s queueing contract
+    before any real producer existed -- no `gitutils`/`ReviewStep` involved here, just a
+    hand-built `relay.activity(...)` call standing in for a future real one (#64/#65).
+
+    Proves: the reported activity renders as a nested (indented) line under `RebaseStep`
+    -- the step `ReviewApp._running_step` names at the moment the event arrives -- ticks
+    live while open, and collapses to a completed icon once the `async with` block exits.
+    """
+
+    async def rebase_step_running_forever() -> AsyncIterator[StepEvent]:
+        started = time.monotonic()
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="running",
+            outcome=None,
+            started_at=started,
+            duration=None,
+        )
+        # Never completes -- keeps RebaseStep "running" (and thus the activity's owner)
+        # for the whole test; the test calls `app.exit()` itself once done.
+        await asyncio.Future()
+        yield  # pragma: no cover - unreachable, only makes this an async generator
+
+    async def _fetch_line(pilot: Pilot[None], app: ReviewApp) -> str | None:
+        content = _pipeline_box_content(app.query_one(PipelineBox))
+        return next((line for line in content.splitlines() if "fetch" in line), None)
+
+    async def scenario() -> None:
+        relay = ActivityRelay()
+        app = ReviewApp(REGISTRY, rebase_step_running_forever(), activity_relay=relay)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            async with relay.activity("fetch"):
+                fetch_line: str | None = None
+                for _ in range(20):
+                    fetch_line = await _fetch_line(pilot, app)
+                    if fetch_line is not None:
+                        break
+                    await pilot.pause()
+                    await asyncio.sleep(0.01)
+
+                assert fetch_line is not None
+                # Nested: indented beneath RebaseStep's own line, not a flush-left row of
+                # its own.
+                assert fetch_line.startswith(" ")
+                assert "RebaseStep" in _pipeline_box_content(app.query_one(PipelineBox))
+
+                # Live-ticking: let at least one real 0.25s tick interval pass (see
+                # `app.py`'s `_TICK_INTERVAL`) and confirm the rendered line actually
+                # changed, i.e. the duration is advancing, not frozen.
+                ticked_line = fetch_line
+                for _ in range(60):
+                    await pilot.pause()
+                    await asyncio.sleep(0.02)
+                    ticked_line = await _fetch_line(pilot, app)
+                    if ticked_line != fetch_line:
+                        break
+                assert ticked_line != fetch_line
+
+            # Once the `async with` exits, the activity's "finished" event collapses the
+            # line to a final, completed-status duration.
+            final_line: str | None = None
+            for _ in range(20):
+                final_line = await _fetch_line(pilot, app)
+                if final_line is not None and "✔" in final_line:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            assert final_line is not None
+            assert "✔" in final_line
+            assert final_line.startswith(" ")
+
+            app.exit()
 
     asyncio.run(scenario())
 

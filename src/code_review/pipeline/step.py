@@ -21,6 +21,19 @@ thing that makes a backend subprocess reach for it. `cli.py` wires it to a real
 `tui.input_relay.InputRelay.request_input`; tests that don't exercise it can leave it at
 its default `None`.
 
+`ActivityReporter` (issue #66) is the same kind of narrow seam, mirroring the
+`on_input_needed` rule: `pipeline/`/`steps/` depend only on this structural `Protocol`,
+never on `tui/` directly, "without needing a live reference to the TUI itself". It is
+satisfied by `tui.activity.ActivityRelay` (Textual-import-free, see that module's
+docstring) purely structurally -- nothing here imports `tui/`. `StepContext.activity_reporter`
+carries an optional instance of it, and `StepContext.report_activity(label)` is the
+single-line call site a step uses regardless of whether one is attached: `async with
+ctx.report_activity("fetch"): ...`. It reports a second, independent event stream from
+`StepEvent`'s own "running"/"completed" pair -- `StepEvent`/`run_steps` are unchanged by
+this. No step consumes it yet; issues #64 (`gitutils.run_git`) and #65 (`ReviewStep`'s
+agent call) are the first real producers, both blocked by this ticket (#66). `cli.py` wires
+it to a real `tui.activity.ActivityRelay` instance.
+
 `StepOutcome` carries `needs_approval`/`auto_fixable` now so Milestone 7 can act on them
 without a breaking schema change, even though nothing branches on them yet. `findings` is
 typed as `object` rather than the not-yet-built Milestone 5 `Finding`/`Findings` schema
@@ -42,9 +55,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from code_review.agent import Agent
 
@@ -56,6 +70,21 @@ if TYPE_CHECKING:
     # Intent` field annotation below is a lazy string dataclass never evaluates at
     # runtime -- a type-checking-only import is sufficient and avoids the cycle.
     from code_review.steps.intent import Intent
+
+
+class ActivityReporter(Protocol):
+    """Structural, one-method contract for reporting nested sub-step activity (issue #66).
+
+    Satisfied by `tui.activity.ActivityRelay` purely structurally -- nothing here imports
+    `tui/` (mirrors `on_input_needed`'s own rule; see this module's docstring). A step
+    never calls this directly; it goes through `StepContext.report_activity`, which
+    delegates here when a reporter is attached.
+    """
+
+    def activity(self, label: str) -> AbstractAsyncContextManager[None]:
+        """Report one nested unit of work named `label`, open for as long as the returned
+        async context manager's body runs."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +101,28 @@ class StepContext:
     # consumes this yet -- see the module docstring. `cli.py` wires it to
     # `tui.input_relay.InputRelay.request_input` for interactive runs.
     on_input_needed: Callable[[str], Awaitable[str]] | None = None
+    # Reports nested sub-step activity (issue #66) -- e.g. one `git fetch` call, or one
+    # agent call -- as a second, independent event stream from this run's `StepEvent`
+    # "running"/"completed" pair. `None` (the default, and every test that doesn't
+    # exercise it) means no reporter is attached; a step calls `self.report_activity(label)`
+    # regardless -- see that method below -- so no call site ever needs an `if` branch on
+    # whether one is present. No step consumes this yet: issues #64 (`gitutils.run_git`)
+    # and #65 (`ReviewStep`'s agent call) are the first real producers, both blocked by
+    # this ticket (#66). `cli.py` wires it to a real `tui.activity.ActivityRelay` instance
+    # for interactive runs.
+    activity_reporter: ActivityReporter | None = None
+
+    def report_activity(self, label: str) -> AbstractAsyncContextManager[None]:
+        """Single-line call site for a step to report one nested unit of work named
+        `label`: `async with ctx.report_activity("fetch"): ...`. Delegates to
+        `self.activity_reporter.activity(label)` when a reporter is attached; no-ops via
+        `contextlib.nullcontext()` otherwise, so every call site is this one line with no
+        branching needed regardless of whether a reporter is present.
+        """
+
+        if self.activity_reporter is None:
+            return nullcontext()
+        return self.activity_reporter.activity(label)
 
 
 @dataclass(frozen=True, slots=True)

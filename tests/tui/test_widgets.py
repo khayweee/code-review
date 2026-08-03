@@ -18,11 +18,12 @@ from textual.app import App, ComposeResult
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
-from code_review.tui.state import StepRow
+from code_review.tui.state import ActivityRow, StepRow
 from code_review.tui.widgets import (
     FindingsBox,
     PipelineBox,
     StatusBox,
+    format_activity_row,
     format_duration,
     format_finding,
     format_row,
@@ -88,6 +89,48 @@ def test_render_rows_renders_one_line_per_row_in_order() -> None:
     ]
 
     assert render_rows(rows) == "✔ IntentStep  0.1s\n◌ RebaseStep"
+
+
+# --- ActivityRow rendering (issue #66) ---------------------------------------------------
+
+
+def test_format_activity_row_is_indented_and_uses_the_same_status_icons() -> None:
+    running = ActivityRow(label="fetch", status="running", duration=1.2)
+    completed = ActivityRow(label="rebase", status="completed", duration=3.4)
+
+    assert format_activity_row(running) == "  ◔ fetch  1.2s"
+    assert format_activity_row(completed) == "  ✔ rebase  3.4s"
+
+
+def test_format_activity_row_omits_duration_when_none() -> None:
+    activity = ActivityRow(label="fetch", status="running", duration=None)
+
+    assert format_activity_row(activity) == "  ◔ fetch"
+
+
+def test_render_rows_nests_each_rows_activities_beneath_it() -> None:
+    rows = [
+        StepRow(
+            name="RebaseStep",
+            status="running",
+            duration=1.5,
+            activities=(
+                ActivityRow(label="fetch", status="completed", duration=0.2),
+                ActivityRow(label="rebase", status="running", duration=1.1),
+            ),
+        ),
+        StepRow(name="ReviewStep", status="pending", duration=None),
+    ]
+
+    assert render_rows(rows) == (
+        "◔ RebaseStep  1.5s\n  ✔ fetch  0.2s\n  ◔ rebase  1.1s\n◌ ReviewStep"
+    )
+
+
+def test_render_rows_a_row_with_no_activities_gets_no_extra_lines() -> None:
+    rows = [StepRow(name="IntentStep", status="completed", duration=0.1)]
+
+    assert render_rows(rows) == "✔ IntentStep  0.1s"
 
 
 # --- PipelineBox, mounted and driven through Pilot --------------------------------------
@@ -178,6 +221,94 @@ def test_pipeline_box_evicts_a_step_s_spinner_once_it_stops_running() -> None:
     asyncio.run(scenario())
 
     asyncio.run(scenario())
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_box_renders_nested_activity_lines_under_their_owning_row() -> None:
+    async def scenario() -> None:
+        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=1.0)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=1.0,
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.4),),
+                    )
+                ]
+            )
+            await pilot.pause()
+
+            content = _render_content(box.content)
+            lines = content.splitlines()
+            assert any("RebaseStep" in line for line in lines)
+            assert any("fetch" in line and "0.4s" in line for line in lines)
+            # The activity line is indented (nested) beneath the step's own line, not a
+            # flush-left top-level row.
+            fetch_line = next(line for line in lines if "fetch" in line)
+            assert fetch_line.startswith(" ")
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duration() -> None:
+    """Mirrors `test_pipeline_box_update_rows_replaces_the_rendered_content`'s own
+    live-then-final shape, for a nested activity line: a still-running activity's duration
+    changes as `update_rows` is called with a later `now`, and once it reports
+    `status="completed"` the duration stops moving and reflects the activity's own final
+    span -- matching a `StepRow`'s own "elapsed-so-far, then frozen" duration rule."""
+
+    async def scenario() -> None:
+        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=0.0)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=0.2,
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.2),),
+                    )
+                ]
+            )
+            await pilot.pause()
+            assert "0.2s" in _render_content(box.content)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=0.6,
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.6),),
+                    )
+                ]
+            )
+            await pilot.pause()
+            assert "0.6s" in _render_content(box.content)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=5.0,
+                        activities=(ActivityRow(label="fetch", status="completed", duration=0.63),),
+                    )
+                ]
+            )
+            await pilot.pause()
+            content = _render_content(box.content)
+            assert "0.6s" in content
+            assert "✔" in content
 
     asyncio.run(scenario())
 
