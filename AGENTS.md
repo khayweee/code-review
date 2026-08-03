@@ -147,9 +147,10 @@ pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
 `agent/claude_cli.py`, and `tui/input_relay.py`'s `InputRelay`; #42 landed as
 `tui/widgets.py`'s `FindingsBox` and `tui/state.py`'s `latest_findings`, once #27
 (Milestone 5) merged and cleared its blocker. Milestone 13 (issue #38) is closed - all
-4 sub-issues complete. The interactive approve/fix/skip/abort layer from the reference
-screenshot waits on Milestone 7's approval loop, which isn't specced yet, and stays
-documented in `docs/ROADMAP.md` rather than sliced into a ticket until then.
+4 sub-issues complete. The interactive approve/skip/abort layer from the reference
+screenshot landed as Milestone 7's #80 (see that milestone's own paragraph below); the
+"fix" half of that reference screenshot (auto-fix, and a human "fix" response beyond
+approve/skip/abort) is still #81/#82, not started.
 
 Milestone 14 (`src/code_review/tui/activity.py`, `pipeline/step.py`, `steps/gitutils.py`,
 see `docs/ROADMAP.md` milestone 14) is specced as #63, sliced into #66 (a dedicated
@@ -193,6 +194,30 @@ why this design, not the simpler "record the owner once, on `started`" one, was 
 #65 is also closed: `ReviewStep.run` wraps its one `ctx.agent.run(...)` call in `async with
 ctx.report_activity("Agent: reviewing diff via claude")`. Milestone 14 (issue #63) is
 closed -- all three sub-issues (#64, #65, #66) and prerequisite #62 are done.
+
+Milestone 7 (`docs/ROADMAP.md` milestone 7: auto-fix + approval loop, the rest of
+`pipeline/executor.py`) is specced as #79 (parent), sliced into #80 (approval park core),
+#81 (the fix-round mechanism, blocked by #80), and #82 (the same mechanism's second
+application to `TestSufficiencyStep`, blocked by #81). #80 is closed: `StepOutcome.
+needs_approval` now actually stops `executor.run_steps` right after a step's "completed"
+`StepEvent` is yielded, via a new `StepContext.on_approval_needed` seam mirroring
+`on_input_needed`'s shape exactly (structural callable, `None`-default, fails closed with a
+new `executor.ApprovalNotAttachedError` when unattached); "approve"/"skip" both let the run
+continue (skip vs. approve is purely a `tui/`-side rendering distinction, not something
+`run_steps` branches on), "abort" raises a new `executor.RunAbortedError` that unwinds the
+run and surfaces through `cli.py`'s already-existing `ReviewApp.error` exit path with no
+dedicated `except` clause needed. The human-facing side is a new `tui.approval_relay.
+ApprovalRelay`/`tui.screens.ApprovalPromptScreen` pair (mirroring `InputRelay`/
+`InputPromptScreen`'s issue #41 shape) and a fourth `ReviewApp` worker
+(`_relay_approval`); `tui/state.py`'s `Status` Literal gained `"parked"`/`"skipped"`, both
+overrides of an already-"completed" `StepEvent` (see `pipeline/AGENTS.md`'s and
+`tui/AGENTS.md`'s own sections on this design nuance), not a third state alongside
+pending/running/completed/failed. Proven against a synthetic parked `StepOutcome`
+(`tests/pipeline/test_executor.py`, `tests/tui/test_app.py`) and, end to end, against
+`steps/rebase.py`'s already-shipped issue #24 unpushed-local-default guard -- which, before
+#80, silently rebased anyway despite returning `needs_approval=True`
+(`tests/test_cli_review.py`'s `repo_with_unpushed_local_default_commits`). #81/#82 are not
+started: no auto-fix, no fix-round, no "fix" response beyond approve/skip/abort yet.
 
 A `code-review --version` flag (`cli.py`'s eager `--version` callback, reading
 `code_review.__version__`) and a version bump (`0.1.0` -> `0.2.0`, both `pyproject.toml`

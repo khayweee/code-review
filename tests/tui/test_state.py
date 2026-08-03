@@ -144,6 +144,123 @@ def test_backfill_a_completed_step_is_not_recolored_failed_even_if_named() -> No
     assert rows[0] == StepRow(name="IntentStep", status="completed", duration=0.2)
 
 
+# --- parked_step/skipped_steps (issue #80) -----------------------------------------------
+
+_PARK_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, findings=["a finding"])
+
+
+def test_backfill_marks_the_named_parked_step_as_parked_over_its_own_completed_event() -> None:
+    """The critical design nuance: `run_steps` already yields a step's "completed"
+    `StepEvent` before the park is even checked, so `parked_step` must override that
+    "completed" status, not merely apply to a step stuck "running"."""
+
+    events = [
+        StepEvent(
+            step_name="RebaseStep", status="running", outcome=None, started_at=5.0, duration=None
+        ),
+        StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_PARK_OUTCOME,
+            started_at=5.0,
+            duration=1.5,
+        ),
+    ]
+
+    rows = backfill(REGISTRY, events, now=99.0, parked_step="RebaseStep")
+
+    assert rows[1] == StepRow(name="RebaseStep", status="parked", duration=1.5)
+
+
+def test_backfill_parked_step_override_does_not_affect_other_completed_steps() -> None:
+    events = [
+        StepEvent(
+            step_name="IntentStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=1.0,
+            duration=0.1,
+        ),
+        StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_PARK_OUTCOME,
+            started_at=2.0,
+            duration=1.5,
+        ),
+    ]
+
+    rows = backfill(REGISTRY, events, now=99.0, parked_step="RebaseStep")
+
+    assert rows[0] == StepRow(name="IntentStep", status="completed", duration=0.1)
+    assert rows[1] == StepRow(name="RebaseStep", status="parked", duration=1.5)
+
+
+def test_backfill_marks_every_named_skipped_step_as_skipped() -> None:
+    events = [
+        StepEvent(
+            step_name="IntentStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=1.0,
+            duration=0.1,
+        ),
+        StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_PARK_OUTCOME,
+            started_at=2.0,
+            duration=1.5,
+        ),
+    ]
+
+    rows = backfill(REGISTRY, events, now=99.0, skipped_steps={"RebaseStep"})
+
+    assert rows[0] == StepRow(name="IntentStep", status="completed", duration=0.1)
+    assert rows[1] == StepRow(name="RebaseStep", status="skipped", duration=1.5)
+
+
+def test_backfill_parked_step_takes_precedence_over_skipped_steps_for_the_same_name() -> None:
+    """Not a state a real run can reach (a step is either currently parked, waiting on a
+    decision, or already resolved to "skip" -- never both at once), but `backfill` itself
+    has no way to know that, so pin a deterministic precedence rather than leaving it to
+    dict/set iteration order."""
+
+    events = [
+        StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_PARK_OUTCOME,
+            started_at=2.0,
+            duration=1.5,
+        ),
+    ]
+
+    rows = backfill(
+        REGISTRY, events, now=99.0, parked_step="RebaseStep", skipped_steps={"RebaseStep"}
+    )
+
+    assert rows[1] == StepRow(name="RebaseStep", status="parked", duration=1.5)
+
+
+def test_backfill_without_parked_step_or_skipped_steps_defaults_to_unchanged_completed_logic() -> (
+    None
+):
+    events = [
+        StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_PARK_OUTCOME,
+            started_at=2.0,
+            duration=1.5,
+        ),
+    ]
+
+    rows = backfill(REGISTRY, events, now=99.0)
+
+    assert rows[1] == StepRow(name="RebaseStep", status="completed", duration=1.5)
+
+
 # --- latest_findings ---------------------------------------------------------------------
 
 _FINDING = Finding(severity="warning", description="example finding", review_scope="source")

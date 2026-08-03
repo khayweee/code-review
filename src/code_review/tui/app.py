@@ -23,6 +23,19 @@ correlation, but not by tagging each received `ActivityEvent` with whichever ste
 found that design unsound (see `_tag_activity_events`'s docstring below) once a real
 producer (`ReviewStep`) existed to expose the race. Ownership is instead derived purely
 from timestamps, at render time.
+
+`approval_relay` (issue #80) is a fourth, independent seam, the same "optional, its own
+worker" shape as `input_relay`/`activity_relay`: an optional `tui.approval_relay.
+ApprovalRelay` this app polls, in a fourth worker (`_relay_approval`), for a parked step's
+approve/skip/abort request relayed via `StepContext.on_approval_needed` (called from
+`pipeline.executor.run_steps`, not from a step itself -- see that module's docstring's "The
+approval park" section). Like `activity_relay`, this does not add a new `StepEvent` status
+or change `run_steps`'s per-step yield shape at all: `self._parked_step`/
+`self._skipped_steps` are this app's own bookkeeping, learned entirely from the relay
+round-trip, and passed to `state.backfill` the same way `self._failed_step` already is --
+see `state.py`'s module docstring for why "parked"/"skipped" are overrides of a step already
+reported "completed", not a third possibility alongside pending/running/completed the way
+"failed" is.
 """
 
 from __future__ import annotations
@@ -35,8 +48,9 @@ from textual.timer import Timer
 
 from code_review.pipeline.step import StepEvent
 from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
-from code_review.tui.screens import InputPromptScreen
+from code_review.tui.screens import ApprovalPromptScreen, InputPromptScreen
 from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
 from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox
 
@@ -74,6 +88,7 @@ class ReviewApp(App[None]):
         events: AsyncIterator[StepEvent],
         input_relay: InputRelay | None = None,
         activity_relay: ActivityRelay | None = None,
+        approval_relay: ApprovalRelay | None = None,
     ) -> None:
         super().__init__()
         # Named `_step_registry`, not `_registry` -- `textual.app.App` already owns a
@@ -87,6 +102,9 @@ class ReviewApp(App[None]):
         # Same "None means no worker starts" shape as `_input_relay`, for the activity
         # stream (issue #66) -- see `activity.py`.
         self._activity_relay = activity_relay
+        # Same "None means no worker starts" shape again, for the approval-park seam
+        # (issue #80) -- see `approval_relay.py`.
+        self._approval_relay = approval_relay
         # Raw `ActivityEvent`s collected by `_consume_activities`, in receipt order -- NOT
         # tagged with an owning step at collection time (issue #65; see
         # `_tag_activity_events`). `_rows` tags them from `self._seen` immediately before
@@ -103,6 +121,17 @@ class ReviewApp(App[None]):
         # and the final render) so the Pipeline box keeps showing that step as failed for
         # the rest of the app's lifetime, not just in one render call right before exit.
         self._failed_step: str | None = None
+        # Name of the step currently parked (issue #80) -- set by `_relay_approval` for as
+        # long as it is waiting on a human's approve/skip/abort decision for that step, and
+        # cleared back to None the moment a decision comes back (regardless of which one).
+        # Read by every `_rows()` call, mirroring `_failed_step`'s own "caller-supplied
+        # override" role -- see `state.py`'s `backfill` docstring.
+        self._parked_step: str | None = None
+        # Names of every step a human has answered "skip" for so far (issue #80) --
+        # accumulated for the rest of the app's lifetime, the same "stays visible" rule
+        # `_failed_step`/reported activities already follow, not cleared once the run moves
+        # past that step.
+        self._skipped_steps: set[str] = set()
         # True once `events` is exhausted or raises -- the run itself has finished either
         # way. `action_exit_when_done` only acts once this is set; `_render_status` only
         # shows the Status box once this is set.
@@ -127,6 +156,9 @@ class ReviewApp(App[None]):
         if self._activity_relay is not None:
             # A third, independent worker group -- same reasoning as `input-relay` above.
             self.run_worker(self._consume_activities(), group="activity-relay")
+        if self._approval_relay is not None:
+            # A fourth, independent worker group -- same reasoning as `input-relay` above.
+            self.run_worker(self._relay_approval(), group="approval-relay")
 
     def action_exit_when_done(self) -> None:
         """Bound to "e" -- exits the app, but only once the run has actually finished."""
@@ -140,6 +172,8 @@ class ReviewApp(App[None]):
             self._seen,
             now=time.monotonic(),
             failed_step=self._failed_step,
+            parked_step=self._parked_step,
+            skipped_steps=self._skipped_steps,
             activity_events=_tag_activity_events(self._seen, self._activity_events),
         )
 
@@ -229,6 +263,35 @@ class ReviewApp(App[None]):
             event = await self._activity_relay.next_event()
             self._activity_events.append(event)
             self._render()
+
+    async def _relay_approval(self) -> None:
+        """Poll `self._approval_relay` for a parked step's approve/skip/abort request
+        (issue #80), relayed via `StepContext.on_approval_needed`/`pipeline.executor.
+        run_steps` (not by a step directly -- see that module's "The approval park"
+        section).
+
+        Runs for the app's whole lifetime (cancelled automatically on `self.exit()`, like
+        every other worker). Each iteration marks `self._parked_step`, re-renders so the
+        Pipeline box shows that row as "parked" right away, shows `ApprovalPromptScreen` to
+        collect a `Decision`, records a "skip" into `self._skipped_steps` (an "approve" and
+        an "abort" leave no further bookkeeping here -- "abort" is `run_steps`'s own job,
+        via `RunAbortedError`, once the resolved future lets it resume), clears
+        `self._parked_step` back to `None`, re-renders again, and only then resolves
+        `future` -- so by the time the parked `run_steps` call resumes, this app's own
+        rendered state already reflects the decision.
+        """
+
+        assert self._approval_relay is not None
+        while True:
+            step_name, outcome, future = await self._approval_relay.next_request()
+            self._parked_step = step_name
+            self._render()
+            decision = await self.push_screen_wait(ApprovalPromptScreen(step_name, outcome))
+            self._parked_step = None
+            if decision == "skip":
+                self._skipped_steps.add(step_name)
+            self._render()
+            future.set_result(decision)
 
 
 def _tag_activity_events(

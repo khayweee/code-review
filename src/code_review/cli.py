@@ -47,6 +47,7 @@ from code_review.steps.intent import Intent
 from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_REGISTRY
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
+from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
 
 app = typer.Typer(help="Agentic code-review/gating pipeline.")
@@ -231,6 +232,7 @@ async def _run_pipeline(
     agent: ClaudeCLI,
     relay: InputRelay,
     activity_relay: ActivityRelay | None = None,
+    approval_relay: ApprovalRelay | None = None,
 ) -> AsyncIterator[StepEvent]:
     """Build the events `ReviewApp` renders: fetch the diff, then run every implemented
     step against it, in order.
@@ -244,7 +246,9 @@ async def _run_pipeline(
     `activity_relay` (issue #66) becomes `ctx.activity_reporter` -- optional, defaulting to
     `None`, matching `StepContext.activity_reporter`'s own default so existing callers of
     this generator (e.g. `tests/test_cli_review.py`'s event-loop test) keep working
-    unchanged. `review` below always passes a real one.
+    unchanged. `approval_relay` (issue #80) is the same "optional, defaults to None" shape
+    again, becoming `ctx.on_approval_needed`. `review` below always passes a real one of
+    each.
     """
     diff = await asyncio.to_thread(_diff_against_head, branch)
     ctx = StepContext(
@@ -254,6 +258,7 @@ async def _run_pipeline(
         intent=intent,
         on_input_needed=relay.request_input,
         activity_reporter=activity_relay,
+        on_approval_needed=None if approval_relay is None else approval_relay.request_approval,
     )
     steps = [cls() for cls in IMPLEMENTED_STEPS]
     async for event in run_steps(steps, ctx):
@@ -282,17 +287,26 @@ def review(
     agent = ClaudeCLI()
     relay = InputRelay()
     activity_relay = ActivityRelay()
+    approval_relay = ApprovalRelay()
 
     tui_app = ReviewApp(
         STEP_REGISTRY,
-        _run_pipeline(branch, parsed_intent, agent, relay, activity_relay),
+        _run_pipeline(branch, parsed_intent, agent, relay, activity_relay, approval_relay),
         input_relay=relay,
         activity_relay=activity_relay,
+        approval_relay=approval_relay,
     )
     tui_app.run()
     asyncio.run(agent.close())
 
     if tui_app.error is not None:
+        # Reports any pipeline failure the same way, no dedicated branch per exception type
+        # -- including `pipeline.executor.RunAbortedError` (issue #80: a human chose
+        # "abort" in response to a parked step's approval request). `RunAbortedError`'s own
+        # message already names which step and that no further steps ran, so this generic
+        # path already gives a clear, specific, non-traceback error -- the same UX class as
+        # the bad-branch/no-TTY errors above, just surfaced once the TUI itself has exited
+        # cleanly rather than before it ever started.
         typer.echo(f"code-review review failed: {tui_app.error}", err=True)
         raise typer.Exit(code=1)
 

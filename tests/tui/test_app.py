@@ -17,14 +17,16 @@ from rich.console import Console
 from textual.pilot import Pilot
 from textual.widgets import Input, Static
 
+from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.activity import ActivityEvent, ActivityRelay
 from code_review.tui.app import ReviewApp, _tag_activity_events
+from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
-from code_review.tui.screens import InputPromptScreen
+from code_review.tui.screens import ApprovalPromptScreen, InputPromptScreen
 from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox, render_findings
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
@@ -292,6 +294,248 @@ def test_review_app_relays_a_queued_input_request_through_a_modal() -> None:
     answer = asyncio.run(scenario())
 
     assert answer == "yes"
+
+
+# --- The `ApprovalRelay` seam (issue #80) -----------------------------------------------
+
+_PARK_OUTCOME = StepOutcome(
+    needs_approval=True,
+    auto_fixable=False,
+    findings=[
+        Finding(severity="error", description="unpushed local commits", review_scope="source")
+    ],
+)
+
+
+def _rebase_step_parks_then_maybe_continues(relay: ApprovalRelay) -> AsyncIterator[StepEvent]:
+    """A synthetic events generator standing in for `pipeline.executor.run_steps`'s own
+    park/approve/skip/abort logic (see that module's docstring's "The approval park"
+    section) -- proves `ReviewApp`'s modal/relay independent of any real step or a real
+    `run_steps` call, per this issue's own explicit acceptance criterion (mirroring how
+    #41/#66 each first proved `InputRelay`/`ActivityRelay` against a hand-built fake before
+    any real producer existed).
+
+    `IntentStep` completes normally, then `RebaseStep` completes with a
+    `needs_approval=True` outcome and calls `relay.request_approval` itself -- exactly what
+    `run_steps` does once `StepContext.on_approval_needed` is wired to
+    `relay.request_approval` for real. "abort" raises `RunAbortedError`, matching
+    `run_steps`'s own behavior; any other decision ("approve" or "skip") lets a third step,
+    `ReviewStep`, run to completion -- proving later steps still run either way.
+    """
+
+    async def _events() -> AsyncIterator[StepEvent]:
+        started = time.monotonic()
+        yield StepEvent(
+            step_name="IntentStep",
+            status="running",
+            outcome=None,
+            started_at=started,
+            duration=None,
+        )
+        await asyncio.sleep(0)
+        yield StepEvent(
+            step_name="IntentStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=started,
+            duration=0.01,
+        )
+
+        rebase_started = time.monotonic()
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="running",
+            outcome=None,
+            started_at=rebase_started,
+            duration=None,
+        )
+        await asyncio.sleep(0)
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_PARK_OUTCOME,
+            started_at=rebase_started,
+            duration=0.01,
+        )
+
+        decision = await relay.request_approval("RebaseStep", _PARK_OUTCOME)
+        if decision == "abort":
+            raise RunAbortedError("RebaseStep")
+
+        review_started = time.monotonic()
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="running",
+            outcome=None,
+            started_at=review_started,
+            duration=None,
+        )
+        await asyncio.sleep(0)
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=review_started,
+            duration=0.01,
+        )
+
+    return _events()
+
+
+async def _wait_for_approval_prompt(pilot: Pilot[None], app: ReviewApp) -> None:
+    """Poll until `ApprovalPromptScreen` is not just pushed but has actually composed its
+    content -- `push_screen` sets `app.screen` synchronously, before the screen's own
+    `compose()`/mount has run (a separate, later message-queue turn), so an `isinstance`
+    check alone can observe the right screen type with no widgets mounted under it yet."""
+
+    for _ in range(20):
+        if isinstance(app.screen, ApprovalPromptScreen) and list(app.screen.query(Static)):
+            return
+        await pilot.pause()
+        await asyncio.sleep(0.01)
+    raise AssertionError("ApprovalPromptScreen never finished composing")
+
+
+def test_review_app_parks_on_a_synthetic_outcome_and_approve_continues_the_run() -> None:
+    async def scenario() -> None:
+        relay = ApprovalRelay()
+        app = ReviewApp(
+            REGISTRY, _rebase_step_parks_then_maybe_continues(relay), approval_relay=relay
+        )
+        async with app.run_test() as pilot:
+            await _wait_for_approval_prompt(pilot, app)
+
+            prompt_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
+            assert "RebaseStep needs approval" in prompt_text
+            assert "unpushed local commits" in prompt_text
+
+            # While parked, the Pipeline box shows RebaseStep as "parked" even though its
+            # own StepEvent already says "completed" -- the design nuance `state.py`'s
+            # module docstring documents.
+            parked_row = next(row for row in app._rows() if row.name == "RebaseStep")
+            assert parked_row.status == "parked"
+
+            await pilot.press("a")
+            await pilot.pause()
+            await _wait_until_done(pilot, app)
+
+        assert app.error is None
+        rebase_row = next(row for row in app._rows() if row.name == "RebaseStep")
+        assert rebase_row.status == "completed"
+        review_row = next(row for row in app._rows() if row.name == "ReviewStep")
+        assert review_row.status == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_review_app_choosing_skip_marks_the_step_skipped_and_the_run_continues() -> None:
+    async def scenario() -> None:
+        relay = ApprovalRelay()
+        app = ReviewApp(
+            REGISTRY, _rebase_step_parks_then_maybe_continues(relay), approval_relay=relay
+        )
+        async with app.run_test() as pilot:
+            await _wait_for_approval_prompt(pilot, app)
+
+            await pilot.press("s")
+            await pilot.pause()
+            await _wait_until_done(pilot, app)
+
+        assert app.error is None
+        rebase_row = next(row for row in app._rows() if row.name == "RebaseStep")
+        assert rebase_row.status == "skipped"
+        # Skip is not an error: the run continues to ReviewStep, which still completes.
+        review_row = next(row for row in app._rows() if row.name == "ReviewStep")
+        assert review_row.status == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_review_app_choosing_abort_stops_the_run_and_records_the_error() -> None:
+    async def scenario() -> None:
+        relay = ApprovalRelay()
+        app = ReviewApp(
+            REGISTRY, _rebase_step_parks_then_maybe_continues(relay), approval_relay=relay
+        )
+        async with app.run_test() as pilot:
+            await _wait_for_approval_prompt(pilot, app)
+
+            await pilot.press("x")
+            await pilot.pause()
+            await _wait_until_done(pilot, app)
+
+        assert isinstance(app.error, RunAbortedError)
+        assert "RebaseStep" in str(app.error)
+        # No further step ran: ReviewStep never even reached "running".
+        review_row = next(row for row in app._rows() if row.name == "ReviewStep")
+        assert review_row.status == "pending"
+
+    asyncio.run(scenario())
+
+
+def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_markup() -> None:
+    """Regression test: a real `ReviewStep`/`TestSufficiencyStep` park carries a
+    `ReviewOutput`/`TestSufficiencyOutput`, not a bare `list[Finding]` -- rendering it via
+    `str(...)` (an earlier version of `screens.py`'s `_format_outcome`) produces pydantic's
+    own repr, e.g. `ReviewOutput(findings=[Finding(...)], ...)`, whose `[...]` list syntax
+    Rich's default markup parsing tries to interpret as a style tag and raises
+    `MarkupError` on -- reproduced directly against a real end-to-end run while developing
+    this ticket. `ApprovalPromptScreen` now renders via `widgets.render_findings` for this
+    shape and disables markup parsing entirely (`Static(..., markup=False)`) as a second,
+    independent safety net, since a `Finding.description` is itself agent-produced,
+    untrusted text that can legitimately contain `[...]`-shaped substrings on its own."""
+
+    async def _events(relay: ApprovalRelay) -> AsyncIterator[StepEvent]:
+        started = time.monotonic()
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="running",
+            outcome=None,
+            started_at=started,
+            duration=None,
+        )
+        await asyncio.sleep(0)
+        outcome = StepOutcome(
+            needs_approval=True,
+            auto_fixable=False,
+            findings=ReviewOutput(
+                findings=[
+                    Finding(
+                        severity="error",
+                        description="drops error handling required by the caller's contract",
+                        action="ask-user",
+                        review_scope="source",
+                    )
+                ],
+                risk_level="high",
+                risk_rationale="drops error handling on a path the caller depends on",
+            ),
+        )
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=outcome,
+            started_at=started,
+            duration=0.01,
+        )
+        await relay.request_approval("ReviewStep", outcome)
+
+    async def scenario() -> None:
+        relay = ApprovalRelay()
+        app = ReviewApp(REGISTRY, _events(relay), approval_relay=relay)
+        async with app.run_test() as pilot:
+            await _wait_for_approval_prompt(pilot, app)
+
+            prompt_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
+            assert "drops error handling required by the caller's contract" in prompt_text
+
+            await pilot.press("a")
+            await pilot.pause()
+            await _wait_until_done(pilot, app)
+
+        assert app.error is None
+
+    asyncio.run(scenario())
 
 
 def _review_output(*findings: Finding) -> ReviewOutput:

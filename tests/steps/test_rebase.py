@@ -32,6 +32,7 @@ import asyncio
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -390,9 +391,27 @@ def test_rebase_step_default_branch_is_overridable_for_a_non_main_default(
 # --- Activity reporting (issue #64) -----------------------------------------------------
 
 
+async def _approve(step_name: str, outcome: StepOutcome) -> Literal["approve", "skip", "abort"]:
+    """A stub `on_approval_needed` (issue #80) that always answers "approve" -- attached to
+    every `_ctx_with_relay` context below so a scenario whose `RebaseStep` outcome parks
+    (a real conflict, or the issue #24 guard firing) doesn't make `run_steps` fail closed
+    (`executor.ApprovalNotAttachedError`) before this section's own assertions (about
+    activity reporting, not the park/approve/skip/abort flow itself -- that is `tests/
+    pipeline/test_executor.py`'s job) get to run. Harmless for the one test in this section
+    that calls `RebaseStep.run` directly instead of going through `run_steps` -- nothing
+    ever reads this field on that path."""
+
+    return "approve"
+
+
 def _ctx_with_relay(checkout: Path, agent: _SpyAgent, relay: ActivityRelay) -> StepContext:
     return StepContext(
-        cwd=checkout, agent=agent, diff="", intent=_STAND_IN_INTENT, activity_reporter=relay
+        cwd=checkout,
+        agent=agent,
+        diff="",
+        intent=_STAND_IN_INTENT,
+        activity_reporter=relay,
+        on_approval_needed=_approve,
     )
 
 
