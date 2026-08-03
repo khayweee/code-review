@@ -137,13 +137,17 @@ pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
 screenshot waits on Milestone 7's approval loop, which isn't specced yet, and stays
 documented in `docs/ROADMAP.md` rather than sliced into a ticket until then.
 
-Milestone 14 (`src/code_review/tui/`, `pipeline/`, `steps/gitutils.py`, see `docs/ROADMAP.md`
-milestone 14) is specced as #63, sliced into #64 (thread a new `StepEvent` "activity"
-status plus a `StepContext` callback through `gitutils.run_git`, so `RebaseStep`'s git
-calls render as nested, individually-timed lines under the Rebase row) and #65 (wire the
-same callback into `ReviewStep`'s one agent call as a single coarse activity span,
-deliberately not finer-grained per the `Agent` protocol's "no streaming" contract in
-`docs/GLOSSARY.md`; blocked by #64). Both are open, not yet started. Blocked on a
+Milestone 14 (`src/code_review/tui/activity.py`, `pipeline/step.py`, `steps/gitutils.py`,
+see `docs/ROADMAP.md` milestone 14) is specced as #63, sliced into #66 (a dedicated
+`tui/activity.py` `ActivityRelay` module plus a `pipeline.step.ActivityReporter` Protocol
+and `StepContext.report_activity` helper - a second event stream `ReviewApp` drains in its
+own worker, not a new `StepEvent` status; proven with a synthetic reporter before any real
+producer exists, mirroring #41's own precedent for `InputRelay`), #64 (wires
+`gitutils.run_git` through that helper, so `RebaseStep`'s git calls render as nested,
+individually-timed lines under the Rebase row; blocked by #66), and #65 (wires the same
+helper into `ReviewStep`'s one agent call as a single coarse activity span, deliberately
+not finer-grained per the `Agent` protocol's "no streaming" contract in `docs/GLOSSARY.md`;
+blocked by #66, independent of #64). All three are open, not yet started. Blocked on a
 prerequisite standalone bugfix, #62 (found incidentally while scoping this milestone, same
 pattern as #47 under Milestone 5): `gitutils.run_git` currently blocks the asyncio event
 loop for the duration of every git call, freezing the Pipeline box's elapsed-duration tick
