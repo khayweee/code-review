@@ -108,6 +108,20 @@ milestones' code doesn't share files. Both #26 and #27 are closed and merged to 
 in `steps/registry.py`'s `IMPLEMENTED_STEPS` or wired into `cli.py`; that wiring is a
 later ticket, not part of #27's own scope.
 
+Milestone 6 (`src/code_review/steps/test_sufficiency.py`, single-pass test-sufficiency
+assessment) is specced as #58, sliced into #59 (schema, prompt, `TestSufficiencyStep`
+itself), #60 (wiring into `steps/registry.py`'s `IMPLEMENTED_STEPS`/`cli.py`, blocked by
+#59), and #61 (TUI display, blocked by #59; most useful once #60 also lands). #59's
+`TestSufficiencyOutput`/`TestArtifact` (`steps/test_sufficiency.py`),
+`build_test_sufficiency_prompt` (`prompt/test_sufficiency.py`), and `TestSufficiencyStep`
+itself are implemented on branch `feature/59-test-sufficiency-schema-step`, not yet
+merged. Per #58's Implementation
+Decisions, `TestSufficiencyStep` reuses `has_blocking_finding`/`action_or_default`
+unmodified but does not call the Review-specific `filter_pipeline_owned_delivery_findings`,
+and a shared test-quality-rule constant across the two steps' prompts is explicitly
+deferred. Not yet registered in `IMPLEMENTED_STEPS` or wired into `cli.py` (#60) or shown
+in the TUI (#61).
+
 Issue #47 (unrelated to Milestone 5 - a bug in Milestone 12's `cli.py` `update` command,
 found incidentally while validating #26: `uv tool upgrade`'s stderr carries ANSI color
 codes even when piped, which broke the version-line regex) is closed and merged (PR #49).
@@ -137,19 +151,21 @@ pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
 screenshot waits on Milestone 7's approval loop, which isn't specced yet, and stays
 documented in `docs/ROADMAP.md` rather than sliced into a ticket until then.
 
-Milestone 6 (`src/code_review/steps/test_sufficiency.py`, single-pass test-sufficiency
-assessment) is specced as #58, sliced into #59 (schema, prompt, `TestSufficiencyStep`
-itself), #60 (wiring into `steps/registry.py`'s `IMPLEMENTED_STEPS`/`cli.py`, blocked by
-#59), and #61 (TUI display, blocked by #59; most useful once #60 also lands). #59's
-`TestSufficiencyOutput`/`TestArtifact` (`steps/test_sufficiency.py`),
-`build_test_sufficiency_prompt` (`prompt/test_sufficiency.py`), and `TestSufficiencyStep`
-itself are implemented on branch `feature/59-test-sufficiency-schema-step`, not yet
-merged. Per #58's Implementation
-Decisions, `TestSufficiencyStep` reuses `has_blocking_finding`/`action_or_default`
-unmodified but does not call the Review-specific `filter_pipeline_owned_delivery_findings`,
-and a shared test-quality-rule constant across the two steps' prompts is explicitly
-deferred. Not yet registered in `IMPLEMENTED_STEPS` or wired into `cli.py` (#60) or shown
-in the TUI (#61).
+Milestone 14 (`src/code_review/tui/activity.py`, `pipeline/step.py`, `steps/gitutils.py`,
+see `docs/ROADMAP.md` milestone 14) is specced as #63, sliced into #66 (a dedicated
+`tui/activity.py` `ActivityRelay` module plus a `pipeline.step.ActivityReporter` Protocol
+and `StepContext.report_activity` helper - a second event stream `ReviewApp` drains in its
+own worker, not a new `StepEvent` status; proven with a synthetic reporter before any real
+producer exists, mirroring #41's own precedent for `InputRelay`), #64 (wires
+`gitutils.run_git` through that helper, so `RebaseStep`'s git calls render as nested,
+individually-timed lines under the Rebase row; blocked by #66), and #65 (wires the same
+helper into `ReviewStep`'s one agent call as a single coarse activity span, deliberately
+not finer-grained per the `Agent` protocol's "no streaming" contract in `docs/GLOSSARY.md`;
+blocked by #66, independent of #64). All three are open, not yet started. Blocked on a
+prerequisite standalone bugfix, #62 (found incidentally while scoping this milestone, same
+pattern as #47 under Milestone 5): `gitutils.run_git` currently blocks the asyncio event
+loop for the duration of every git call, freezing the Pipeline box's elapsed-duration tick
+today.
 
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.

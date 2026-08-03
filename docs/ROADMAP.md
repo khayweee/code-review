@@ -94,6 +94,38 @@ on the milestones before it.
     specced yet, so that layer stays documented here and isn't sliced into a ticket until
     milestone 7 exists. Full PRD and ticket breakdown tracked as a GitHub issue (see
     `AGENTS.md`'s Current milestone line for the live issue numbers).
+14. **Sub-step activity streaming** (`src/code_review/tui/activity.py`, `pipeline/step.py`,
+    `steps/gitutils.py`). Milestone 13's Pipeline box shows only a step-level spinner while
+    a step runs — no signal of what it's actually doing. `no-mistakes` has the same gap in
+    its own TUI (a flat step list, current activity computed but never rendered) and
+    studying it surfaces the design lesson worth imitating here: a live sub-step feed, one
+    line per discrete operation, collapsing to a duration once it finishes. The API is not
+    transferable — `no-mistakes` would solve this with a new daemon IPC event type; this
+    project has no daemon (see `GATE-MODEL.md`). The mechanism here is a dedicated module,
+    `tui/activity.py`'s `ActivityRelay` — a second, independent event stream `ReviewApp`
+    drains in its own worker (mirroring the existing `InputRelay` split), not a new
+    `StepEvent` status, so `run_steps`'s already-shipped contract stays untouched. A step
+    (or the shared `gitutils.run_git` helper, generically — wrapping that one seam covers
+    every `RebaseStep` git call for free) reports through one helper,
+    `StepContext.report_activity(label)`, delegating to a structural `ActivityReporter`
+    Protocol defined in `pipeline/step.py` — `pipeline/`/`steps/` depend on that Protocol
+    and never import `tui/` directly, the same rule `on_input_needed` already follows.
+    Nesting is automatic (a `ContextVar` tracks the currently-open activity as the next
+    one's parent, no caller-side bookkeeping) but not rendered deeper than one level yet —
+    today's real steps have nothing to nest more than one level deep. Scoped down from
+    `no-mistakes` in one deliberate way: the `Agent` abstraction's contract is "one call
+    in, one result out... no streaming" (see `docs/GLOSSARY.md`) by design, so an
+    agent-backed step (`ReviewStep` today) can only report one coarse span ("Agent:
+    reviewing diff via claude") — no per-tool-call breakdown. Revisiting that invariant for
+    finer granularity is out of scope here, not forgotten. Blocked on a prerequisite,
+    independent bugfix (same pattern as issue #47 under Milestone 5): `gitutils.run_git` is
+    a blocking `subprocess.run` call made directly from inside an `async def Step.run`,
+    which freezes the whole Textual event loop — including the elapsed-duration tick — for
+    the duration of every git call today. Filed and tracked separately (#62) since it is a
+    real bug in already-shipped Milestone 4 code, not new scope, but sub-step ticks cannot
+    render live until it's fixed. Specced as #63, sliced into #66 (the `ActivityRelay`
+    module and `StepContext` seam), #64 (wires `gitutils.run_git`), and #65 (wires
+    `ReviewStep`) — #64 and #65 are independent of each other once #66 lands.
 
 ## Module sketch
 
