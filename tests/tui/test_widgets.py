@@ -14,6 +14,7 @@ from io import StringIO
 
 import pytest
 from rich.console import Console
+from rich.spinner import Spinner
 from textual.app import App, ComposeResult
 
 from code_review.pipeline.findings import Finding
@@ -23,10 +24,12 @@ from code_review.tui.widgets import (
     FindingsBox,
     PipelineBox,
     StatusBox,
+    _render_row,
     format_activity_row,
     format_duration,
     format_finding,
     format_row,
+    gradient_text,
     render_findings,
     render_rows,
 )
@@ -131,6 +134,83 @@ def test_render_rows_a_row_with_no_activities_gets_no_extra_lines() -> None:
     rows = [StepRow(name="IntentStep", status="completed", duration=0.1)]
 
     assert render_rows(rows) == "✔ IntentStep  0.1s"
+
+
+# --- gradient_text (animated running-step-name shimmer) ----------------------------------
+
+
+def test_gradient_text_preserves_the_labels_plain_text() -> None:
+    text = gradient_text("RebaseStep", phase=0.0)
+
+    assert text.plain == "RebaseStep"
+
+
+def test_gradient_text_gives_each_character_its_own_colored_span() -> None:
+    text = gradient_text("RebaseStep", phase=0.0)
+
+    assert len(text.spans) == len("RebaseStep")
+    # Not every character ends up the same color -- a real gradient, not a solid fill.
+    colors = {span.style for span in text.spans}
+    assert len(colors) > 1
+
+
+def test_gradient_text_is_phase_aware_so_consecutive_repaints_visibly_move() -> None:
+    """Two different phases must not render identically -- what proves the animation
+    actually depends on its `phase` argument (the caller passes `time.monotonic()`) rather
+    than being a static gradient recomputed for no reason on every repaint."""
+
+    first = gradient_text("RebaseStep", phase=0.0)
+    second = gradient_text("RebaseStep", phase=0.37)
+
+    first_colors = [span.style for span in first.spans]
+    second_colors = [span.style for span in second.spans]
+    assert first_colors != second_colors
+
+
+def test_gradient_text_handles_an_empty_label_without_dividing_by_zero() -> None:
+    text = gradient_text("", phase=0.2)
+
+    assert text.plain == ""
+    assert text.spans == []
+
+
+def test_render_row_gradients_the_name_of_a_running_step_only() -> None:
+    """Distinct from the plain text a pending/completed row gets -- checked directly via
+    `_render_row`'s returned `Text` (`.spans`), the same way `PipelineBox._spinners` is
+    checked directly elsewhere in this file, since a `color_system=None` console capture
+    (`_render_content`) is not a reliable signal for a color-only invariant."""
+
+    spinners: dict[str, Spinner] = {}
+
+    _, running_text = _render_row(
+        StepRow(name="RebaseStep", status="running", duration=1.2), spinners
+    )
+    _, pending_text = _render_row(
+        StepRow(name="RebaseStep", status="pending", duration=None), spinners
+    )
+    _, completed_text = _render_row(
+        StepRow(name="RebaseStep", status="completed", duration=1.2), spinners
+    )
+
+    # The running row's name portion carries per-character color spans...
+    assert len(running_text.spans) == len("RebaseStep")
+    # ...while pending/completed rows render as plain text with no color spans at all.
+    assert pending_text.spans == []
+    assert completed_text.spans == []
+
+
+def test_render_row_keeps_the_duration_suffix_plain_even_while_running() -> None:
+    spinners: dict[str, Spinner] = {}
+
+    _, running_text = _render_row(
+        StepRow(name="RebaseStep", status="running", duration=1.2), spinners
+    )
+
+    assert running_text.plain == "RebaseStep  1.2s"
+    # Every gradient span ends at or before the name/duration boundary -- only the name is
+    # gradiented, the duration suffix stays plain.
+    name_length = len("RebaseStep")
+    assert all(span.end <= name_length for span in running_text.spans)
 
 
 # --- PipelineBox, mounted and driven through Pilot --------------------------------------

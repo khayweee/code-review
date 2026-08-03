@@ -13,6 +13,8 @@ needing a live event stream either way.
 
 from __future__ import annotations
 
+import colorsys
+import time
 from collections.abc import Sequence
 
 from rich.spinner import Spinner
@@ -74,6 +76,31 @@ def render_rows(rows: Sequence[StepRow]) -> str:
     return "\n".join(lines)
 
 
+def gradient_text(label: str, phase: float) -> Text:
+    """Pure per-character gradient color computation for the running step's name -- a
+    "rendering..." shimmer distinct from the plain text a pending/completed row gets.
+    Factored out of `_render_row` so the actual color math is unit-testable without
+    Textual or timing flakiness (`tui/AGENTS.md`'s pure/impure split convention: this
+    module is otherwise impure, but the color computation itself doesn't need to be).
+
+    Each character gets its own hue stop, cycling once across the label
+    (`index / len(label)`), then the whole cycle is shifted by `phase` -- the caller passes
+    `time.monotonic()` so consecutive repaints visibly move (`PipelineBox` already
+    refreshes at 60fps, so no new timer is needed here, just a phase-aware render). Fixed,
+    high saturation/lightness (`colorsys.hls_to_rgb`) keeps every stop vividly colored
+    rather than washing out toward black or white at the ends of the hue wheel.
+    """
+
+    text = Text()
+    length = max(len(label), 1)
+    for index, char in enumerate(label):
+        hue = (index / length + phase) % 1.0
+        red, green, blue = colorsys.hls_to_rgb(hue, 0.6, 0.85)
+        color = f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
+        text.append(char, style=color)
+    return text
+
+
 def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | Text, Text]:
     """Render one row as Rich renderables, using a live spinner for running rows.
 
@@ -86,15 +113,21 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
     same instance across a step's whole "running" lifetime is what lets it actually spin.
     A row that is no longer running has its cached spinner evicted, so a later run of the
     same-named step starts its animation fresh rather than resuming a stale clock.
+
+    A running row's name renders via `gradient_text` (phased by `time.monotonic()` at
+    render time) instead of plain text -- the duration suffix stays plain, appended after,
+    so only the name itself shimmers.
     """
 
     if row.status != "running":
         spinners.pop(row.name, None)
         icon: Spinner | Text = Text(_STATUS_ICONS[row.status])
+        row_text = Text(row.name)
     else:
         icon = spinners.setdefault(row.name, Spinner("moon"))
+        row_text = gradient_text(row.name, phase=time.monotonic())
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
-    row_text = Text(f"{row.name}{duration}")
+    row_text.append(duration)
     return icon, row_text
 
 
