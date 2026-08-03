@@ -31,10 +31,39 @@ the function has grown beyond "pure data transform" and the new behavior belongs
 raises never gets a "completed" event, so nothing in `pipeline/` ever says "failed" (see
 `pipeline/step.py`'s own docstring). `ReviewApp` derives it: it tracks `_running_step`, the
 name of whichever step was last seen `"running"` with no matching `"completed"` yet, and
-passes that name as `backfill`'s `failed_step` only in the `except` branch of
-`_consume_events`, for the one final render before `self.exit()`. Do not add a "failed"
-status to `StepEvent` itself to "simplify" this — that would touch `pipeline/step.py`'s
-already-shipped (#39) contract for a purely presentational concern.
+copies that into `self._failed_step` in the `except` branch of `_consume_events`. Every
+`_rows()` call from then on (the timer tick, and the final render in `finally`) reads
+`self._failed_step`, not a per-call parameter — since the app now stays alive and keeps
+rendering after the run ends (see below), the failed step must stay marked failed for the
+rest of the app's lifetime, not just in one render right before an exit that no longer
+happens automatically. Do not add a "failed" status to `StepEvent` itself to "simplify"
+this — that would touch `pipeline/step.py`'s already-shipped (#39) contract for a purely
+presentational concern.
+
+## The app doesn't exit itself once the run ends — the Status box and "e"
+
+`ReviewApp` used to call `self.exit()` unconditionally in `_consume_events`'s `finally`
+the instant `events` was exhausted or raised. That was wrong in practice: today's pipeline
+is a single near-instant `IntentStep` (Rebase/Review/Test sufficiency/PR aren't wired into
+`IMPLEMENTED_STEPS` yet), so a real run flashed onto the terminal's alternate screen buffer
+and vanished in well under a second — indistinguishable, to a human, from nothing having
+happened at all (see `docs/ROADMAP.md`/this issue's own "stall that looks alive" framing,
+just the opposite failure mode: a *flash* that looks like nothing).
+
+Instead: the run's end (`self._done = True`) stops the tick timer
+(`self._tick_timer.stop()`) and mounts a Status box (`widgets.StatusBox`, driven by
+`state.final_status_message(self.error)`) naming the outcome — `"Pipeline ran
+successfully."` or `"Pipeline failed: <error>."` — plus a reminder that pressing "e" now
+closes the app. `action_exit_when_done` (bound to `BINDINGS = [("e", "exit_when_done",
+...)]`) is a no-op until `self._done`, so a stray "e" during a real run can't cut it short
+— only Textual's own default `ctrl+q`/`ctrl+c` bindings can abort mid-run. This applies
+identically on failure, not just success: seeing the broken step and the error message is
+at least as important as a clean exit, so the failure path was not left auto-exiting while
+only success waits for a keypress.
+
+`_render_status` mirrors `_render_findings`'s exact mount/update/remove pattern: the Status
+box does not exist at all until `self._done`, matching `FindingsBox`'s own "no box, not an
+empty one" rule for the same shape of reason.
 
 ## Don't shadow `App`'s own attributes
 
@@ -75,8 +104,10 @@ stdin waiting for a permission answer. See `agent/AGENTS.md`'s matching note.
 
 ## The Findings box (issue #42)
 
-`FindingsBox` (`widgets.py`) is a second `Static` widget, mirroring `PipelineBox`'s shape
-(`DEFAULT_CSS`, a bordered box, `update_findings`) but with a different mount lifecycle:
+`FindingsBox` (`widgets.py`) is a second `_BorderedBox` widget (the shared base that also
+backs `PipelineBox` and `StatusBox` — see its own docstring for why the border/padding CSS
+lives there once, not copy-pasted per box), mirroring `PipelineBox`'s shape (a bordered
+box, an `update_*` method) but with a different mount lifecycle:
 `PipelineBox` is always composed (empty registry entries render as pending placeholders),
 while `FindingsBox` is mounted/removed dynamically by `ReviewApp._render_findings` because
 "no findings" must show no box at all, not an empty one. `state.py`'s `latest_findings`

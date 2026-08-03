@@ -20,6 +20,7 @@ from code_review.tui.state import StepRow
 from code_review.tui.widgets import (
     FindingsBox,
     PipelineBox,
+    StatusBox,
     format_duration,
     format_finding,
     format_row,
@@ -248,5 +249,57 @@ def test_findings_box_has_a_findings_border_title() -> None:
             await pilot.pause()
             box = app.query_one(FindingsBox)
             assert box.border_title == "Findings"
+
+    asyncio.run(scenario())
+
+
+# --- StatusBox, mounted and driven through Pilot ------------------------------------------
+
+
+class _StatusHostApp(App[None]):
+    """Minimal host app: mounts one `StatusBox` so `Pilot` can drive it directly,
+    independent of `ReviewApp`'s event-consuming worker."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._initial_message = message
+
+    def compose(self) -> ComposeResult:
+        yield StatusBox(self._initial_message)
+
+
+def test_status_box_renders_its_initial_message_on_mount() -> None:
+    async def scenario() -> None:
+        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(StatusBox)
+            assert box.content == "Pipeline ran successfully.\n\nPress 'e' to exit."
+
+    asyncio.run(scenario())
+
+
+def test_status_box_update_status_replaces_the_rendered_content() -> None:
+    async def scenario() -> None:
+        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(StatusBox)
+
+            box.update_status("Pipeline failed: boom.\n\nPress 'e' to exit.")
+            await pilot.pause()
+
+            assert box.content == "Pipeline failed: boom.\n\nPress 'e' to exit."
+
+    asyncio.run(scenario())
+
+
+def test_status_box_has_a_status_border_title() -> None:
+    async def scenario() -> None:
+        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(StatusBox)
+            assert box.border_title == "Status"
 
     asyncio.run(scenario())

@@ -12,7 +12,7 @@ from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.review import ReviewOutput
-from code_review.tui.state import StepRow, backfill, latest_findings
+from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
 
@@ -224,3 +224,20 @@ def test_latest_findings_with_two_completed_steps_the_later_one_wins() -> None:
     ]
 
     assert latest_findings(events) is later
+
+
+# --- final_status_message -----------------------------------------------------------------
+
+
+def test_final_status_message_reports_success_when_error_is_none() -> None:
+    message = final_status_message(None)
+
+    assert message.startswith("Pipeline ran successfully.")
+    assert "Press 'e' to exit." in message
+
+
+def test_final_status_message_reports_the_error_when_present() -> None:
+    message = final_status_message(RuntimeError("rebase conflict"))
+
+    assert message.startswith("Pipeline failed: rebase conflict")
+    assert "Press 'e' to exit." in message
