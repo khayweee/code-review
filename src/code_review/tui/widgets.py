@@ -58,21 +58,40 @@ def render_rows(rows: Sequence[StepRow]) -> str:
     return "\n".join(format_row(row) for row in rows)
 
 
-def _render_row(row: StepRow):
-    """Render one row as Rich renderables, using a live spinner for running rows."""
+def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | Text, Text]:
+    """Render one row as Rich renderables, using a live spinner for running rows.
 
-    icon = Spinner("moon") if row.status == "running" else Text(_STATUS_ICONS[row.status])
+    `spinners` caches one `Spinner` instance per running step name, keyed by `row.name`,
+    and is shared across repeated calls (see `PipelineBox._spinners`). A `Spinner`'s
+    animation clock (`start_time`) is set lazily on its own first `render()` call and
+    never reset after that -- constructing a *fresh* `Spinner` on every re-render (as this
+    used to do) would reset that clock to "now" every time, so the frame never advances
+    far enough to look animated before being wiped out on the next render. Reusing the
+    same instance across a step's whole "running" lifetime is what lets it actually spin.
+    A row that is no longer running has its cached spinner evicted, so a later run of the
+    same-named step starts its animation fresh rather than resuming a stale clock.
+    """
+
+    if row.status != "running":
+        spinners.pop(row.name, None)
+        icon: Spinner | Text = Text(_STATUS_ICONS[row.status])
+    else:
+        icon = spinners.setdefault(row.name, Spinner("moon"))
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
     row_text = Text(f"{row.name}{duration}")
     return icon, row_text
 
 
-def render_rows_live(rows: Sequence[StepRow]):
-    """Render every row as Rich renderables so the running row can animate itself."""
+def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> Table:
+    """Render every row as Rich renderables so the running row can animate itself.
+
+    `spinners` is the caller's cache (see `_render_row`) -- passed in rather than created
+    here so it persists across repeated calls for the same `PipelineBox`.
+    """
 
     table = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
     for row in rows:
-        table.add_row(*_render_row(row))
+        table.add_row(*_render_row(row, spinners))
     return table
 
 
@@ -104,7 +123,11 @@ class PipelineBox(_BorderedBox):
         id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
-        super().__init__(render_rows_live(rows), id=id, classes=classes)
+        # One `Spinner` per currently-running step name, reused across `update_rows`
+        # calls for as long as that step stays running -- see `_render_row`'s docstring
+        # for why a fresh `Spinner` per render never animates.
+        self._spinners: dict[str, Spinner] = {}
+        super().__init__(render_rows_live(rows, self._spinners), id=id, classes=classes)
         self._rows = list(rows)
         self.border_title = "Pipeline"
 
@@ -115,7 +138,7 @@ class PipelineBox(_BorderedBox):
         """Replace the displayed rows with `rows`, re-rendered in order."""
 
         self._rows = list(rows)
-        self.update(render_rows_live(rows))
+        self.update(render_rows_live(rows, self._spinners))
 
 
 def format_finding(finding: Finding) -> str:

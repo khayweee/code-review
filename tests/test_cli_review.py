@@ -26,6 +26,7 @@ validation error) before the TUI ever starts.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shlex
@@ -39,7 +40,10 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from code_review.cli import _diff_against_head, app
+from code_review.agent import ClaudeCLI
+from code_review.cli import _diff_against_head, _run_pipeline, app
+from code_review.steps.intent import Intent
+from code_review.tui.input_relay import InputRelay
 
 runner = CliRunner()
 
@@ -210,6 +214,53 @@ def test_diff_against_head_reports_when_git_is_missing(
         _diff_against_head(branch)
 
     assert "git" in capsys.readouterr().err.lower()
+
+
+# --- _run_pipeline: the diff fetch must not block the TUI's own event loop -------------
+
+
+def test_run_pipeline_diff_fetch_does_not_block_the_event_loop(
+    repo_with_branch: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run_pipeline` (the `events` generator `review` hands `ReviewApp`) fetches the diff
+    via `asyncio.to_thread`, not a direct call -- so a slow `_diff_against_head` must not
+    stall the event loop `ReviewApp` itself relies on to paint. Proven here by running a
+    concurrent ticker alongside a `_diff_against_head` replaced with a one-second
+    `time.sleep`: if the diff fetch blocked the loop, the ticker would get zero ticks in
+    that second instead of many."""
+
+    repo, branch = repo_with_branch
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr("code_review.cli._diff_against_head", lambda _branch: _slow_diff())
+
+    tick_count = asyncio.run(_run_pipeline_first_event_while_ticking(branch))
+
+    assert tick_count > 10
+
+
+def _slow_diff() -> str:
+    time.sleep(1.0)
+    return "+world\n"
+
+
+async def _run_pipeline_first_event_while_ticking(branch: str) -> int:
+    ticks = 0
+
+    async def _tick() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.02)
+
+    agent = ClaudeCLI()
+    relay = InputRelay()
+    intent = Intent(summary="add world greeting", source="explicit", score=1.0)
+    events = _run_pipeline(branch, intent, agent, relay)
+
+    ticker = asyncio.create_task(_tick())
+    await events.__anext__()  # IntentStep's "running" event -- reached only after the diff
+    ticker.cancel()
+    return ticks
 
 
 # --- Full run under a real pty, no mocked isatty ----------------------------------------

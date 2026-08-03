@@ -37,6 +37,7 @@ def _render_content(renderable: object) -> str:
     console.print(renderable)
     return buffer.getvalue().rstrip()
 
+
 # --- pure formatting -------------------------------------------------------------------
 
 
@@ -127,7 +128,56 @@ def test_pipeline_box_update_rows_replaces_the_rendered_content() -> None:
 
             content = _render_content(box.content)
             assert "IntentStep" in content
-            assert any(frame in content for frame in ("🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"))
+            assert any(
+                frame in content for frame in ("🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘")
+            )
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_box_reuses_the_same_spinner_instance_while_a_step_keeps_running() -> None:
+    """Regression test: `update_rows` used to build a *fresh* `rich.spinner.Spinner` on
+    every call. A `Spinner`'s animation clock (`start_time`) is set lazily on its own
+    first `render()` call and never reset after that, so a fresh instance on every call
+    (as `ReviewApp`'s 0.25s tick timer would trigger) reset that clock back to "now" each
+    time and the frame never advanced far enough to look animated. `PipelineBox` must
+    reuse the *same* `Spinner` object for a running step across repeated `update_rows`
+    calls -- checked here directly via `PipelineBox._spinners`'s cache, rather than via
+    rendered frame content, since Rich's own render-time jitter makes frame content an
+    unreliable signal for this specific invariant.
+    """
+
+    async def scenario() -> None:
+        app = _HostApp([StepRow(name="IntentStep", status="running", duration=0.0)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+            first_spinner = box._spinners["IntentStep"]
+
+            box.update_rows([StepRow(name="IntentStep", status="running", duration=0.3)])
+            await pilot.pause()
+
+            assert box._spinners["IntentStep"] is first_spinner
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_box_evicts_a_step_s_spinner_once_it_stops_running() -> None:
+    async def scenario() -> None:
+        app = _HostApp([StepRow(name="IntentStep", status="running", duration=0.0)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+            assert "IntentStep" in box._spinners
+
+            box.update_rows([StepRow(name="IntentStep", status="completed", duration=0.3)])
+            await pilot.pause()
+
+            assert "IntentStep" not in box._spinners
+
+    asyncio.run(scenario())
+
+    asyncio.run(scenario())
 
     asyncio.run(scenario())
 
