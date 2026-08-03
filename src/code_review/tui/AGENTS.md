@@ -262,10 +262,40 @@ multi-second wait could be silently dropped, since `PipelineBox`'s own repaint t
 fill the pty's output buffer and block the child's single-threaded event loop, including its
 own stdin-reading task) -- see that helper's own docstring.
 
+## The "fix" response and its `InputPromptScreen` follow-up (issue #81)
+
+`ApprovalPromptScreen` (`screens.py`) gained a fourth choice, "fix" (single-key binding
+"f", alongside "a"/"s"/"x"), dismissing with just the `ApprovalDecision` string -- this
+screen has no way to collect free-text instructions itself; `pipeline.step.ApprovalDecision`/
+`ApprovalResponse` are imported from `pipeline/step.py` directly (this module's own,
+narrower `Decision` Literal it used to define is gone -- the approval seam's type is no
+longer a bare Literal once "fix" needs to carry instructions alongside it).
+
+`ReviewApp._relay_approval` (`app.py`), on seeing "fix" come back from
+`ApprovalPromptScreen`, immediately pushes `InputPromptScreen` (already imported there,
+reusing its existing text-input shape per the issue body -- no new screen class) to collect
+the human's instructions, in the same worker iteration, before ever resolving the pending
+`ApprovalRelay` future -- the executor only ever awaits one future per park, so the whole
+two-screen round-trip must complete first. The future then resolves with
+`ApprovalResponse(decision="fix", instructions=<what was typed>)`; every other decision
+resolves with `instructions=None`. Because each fix-round re-run gets its own fresh
+"running"/"completed" `StepEvent` pair (`pipeline/executor.py`'s own design, see that
+module's AGENTS.md), the Findings box shows the fresh round's findings for free -- no new
+`tui/` rendering logic was needed for that half of the acceptance criteria.
+
+First proven with a hand-built, synthetic parked outcome and relay
+(`tests/tui/test_app.py`'s "The 'fix' response (issue #81)" section, mirroring how #80's
+own approve/skip/abort flow was first proven), asserting the full round-trip: pressing "f"
+pushes `InputPromptScreen`, typing text and pressing enter resolves the pending
+`ApprovalRelay.request_approval` call with the exact `ApprovalResponse` expected.
+
 ## Non-goals landed in later issues, not here
 
-- The bounded auto-fix-before-park round (issue #81, blocked by #80) and its mirror for
-  `TestSufficiencyStep` (issue #82, blocked by #81) are not built here -- #80 only makes an
-  already-`needs_approval=True` outcome stop the run; nothing here runs a fix attempt before
-  parking, or resumes the *same* step after a "fix" response (there is no "fix" response
-  yet, only approve/skip/abort).
+- `TestSufficiencyStep`'s own fix-mode prompt (issue #82, blocked by #81) is not built here
+  or anywhere in this ticket -- `steps/test_sufficiency.py`/`prompt/test_sufficiency.py`
+  are untouched; that step still only ever reaches the plain approve/skip/fix/abort park
+  (never the automatic round) since it leaves `Step.supports_fix_round` at its `False`
+  default (see `pipeline/AGENTS.md`'s "The fix-round loop" section for why that gate
+  exists).
+- Suggestion-selection/`EditStep`/yolo-mode (issue #78) and head continuity (Milestone 9)
+  remain out of scope, unaffected by this ticket.

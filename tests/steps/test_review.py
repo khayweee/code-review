@@ -16,12 +16,18 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Literal
 
 import pytest
 
 from code_review.agent import Agent, ClaudeCLI, ProcessExitError
-from code_review.pipeline import Step, StepContext, StepEvent, StepOutcome, run_steps
+from code_review.pipeline import (
+    ApprovalResponse,
+    Step,
+    StepContext,
+    StepEvent,
+    StepOutcome,
+    run_steps,
+)
 from code_review.steps.intent import Intent
 from code_review.steps.review import ReviewOutput, ReviewStep
 from code_review.tui.activity import ActivityEvent, ActivityRelay
@@ -86,6 +92,7 @@ _FAKES = Path(__file__).parent.parent / "pipeline" / "fakes"
 CLEAN_FAKE_CLI = _FAKES / "review_output_clean.py"
 BLOCKING_FAKE_CLI = _FAKES / "review_output_blocking.py"
 PROMPT_PROBE_FAKE_CLI = _FAKES / "review_prompt_probe.py"
+AUTO_FIX_ROUND_FAKE_CLI = _FAKES / "review_output_auto_fix_round.py"
 # Reused directly from `tests/agent/` rather than copied into `pipeline/fakes/` -- it is a
 # generic "start, then exit non-zero" double with no `ReviewOutput`-specific behavior, and
 # `tests/agent/test_claude_cli.py`'s own `test_nonzero_exit_raises_process_exit_error_with_
@@ -130,15 +137,16 @@ async def _collect(steps: list[Step], ctx: StepContext) -> list[StepEvent]:
     return [event async for event in run_steps(steps, ctx)]
 
 
-async def _approve(step_name: str, outcome: StepOutcome) -> Literal["approve", "skip", "abort"]:
-    """A stub `on_approval_needed` (issue #80) that always answers "approve" -- attached
-    only by the one test below whose `ReviewStep` outcome parks (`needs_approval=True`), so
-    `run_steps` doesn't fail closed (`executor.ApprovalNotAttachedError`) before this file's
-    shared `_collect`/`_only_outcome` helpers can inspect that outcome. This file's own
-    tests are about `ReviewStep`'s outcome construction, not about the park/approve/skip/
-    abort flow itself -- that is `tests/pipeline/test_executor.py`'s job."""
+async def _approve(step_name: str, outcome: StepOutcome) -> ApprovalResponse:
+    """A stub `on_approval_needed` (issue #80, updated for issue #81's `ApprovalResponse`)
+    that always answers "approve" -- attached only by the one test below whose `ReviewStep`
+    outcome parks (`needs_approval=True`), so `run_steps` doesn't fail closed (`executor.
+    ApprovalNotAttachedError`) before this file's shared `_collect`/`_only_outcome` helpers
+    can inspect that outcome. This file's own tests are about `ReviewStep`'s outcome
+    construction, not about the park/approve/skip/fix/abort flow itself -- that is `tests/
+    pipeline/test_executor.py`'s job."""
 
-    return "approve"
+    return ApprovalResponse(decision="approve")
 
 
 def _only_outcome(events: list[StepEvent]) -> StepOutcome:
@@ -157,14 +165,22 @@ def test_review_step_outcome_is_clean_and_auto_fixable_after_scope_filtering(
     filtering, the "ask-user" finding would make this outcome need approval; proving
     `needs_approval` comes back `False` here proves the scope filter ran before the
     blocking-findings gate did, and `StepOutcome.findings` carries the already-filtered
-    `ReviewOutput`, not the raw agent answer."""
+    `ReviewOutput`, not the raw agent answer.
+
+    Calls `step.run(ctx)` directly, not via `run_steps`/`_collect`: this outcome is
+    genuinely `auto_fixable=True` (issue #27's own point), and since #81 `ReviewStep`
+    (`supports_fix_round=True`) now gets automatically re-run by `pipeline/executor.py`'s
+    round loop whenever `run_steps` sees that -- this test is about `ReviewStep.run`'s own
+    single-round output shape, not the round loop (that belongs to
+    `tests/pipeline/test_executor.py` and this file's own "Fix mode (issue #81)" section
+    below), so it deliberately bypasses `run_steps` to stay decoupled from it."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
     ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
     step: Step = ReviewStep(executable=CLEAN_FAKE_CLI)
 
-    outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
+    outcome = asyncio.run(step.run(ctx))
     asyncio.run(agent.close())
 
     findings = outcome.findings
@@ -243,17 +259,24 @@ def test_review_step_prompt_omits_intent_conformance_clause_for_non_explicit_int
     assert findings.risk_rationale == "did not see intent-conformance clause"
 
 
-def test_review_step_calls_agent_exactly_once(tmp_path: Path) -> None:
+def test_review_step_calls_agent_exactly_once_per_round(tmp_path: Path) -> None:
     """Issue #27: `run_steps` yields exactly one "running"/"completed" event pair for a
-    single `ReviewStep`, and `ReviewStep.run` (see `steps/review.py`) contains exactly one
-    `await ctx.agent.run(...)` call -- together, a single correct outcome from one
-    fake-CLI invocation is sufficient proof there is no retry or re-review, without needing
-    a fake CLI script rigged to fail on a second call."""
+    single `ReviewStep` round, and `ReviewStep.run` (see `steps/review.py`) contains
+    exactly one `await ctx.agent.run(...)` call -- together, a single correct outcome from
+    one fake-CLI invocation is sufficient proof there is no retry or re-review *within one
+    round*, without needing a fake CLI script rigged to fail on a second call.
+
+    Uses `PROMPT_PROBE_FAKE_CLI` (empty findings, so `auto_fixable=False`), not
+    `CLEAN_FAKE_CLI` -- since issue #81, `ReviewStep`'s `supports_fix_round=True` means a
+    genuinely `auto_fixable=True` outcome (what `CLEAN_FAKE_CLI` returns) gets
+    automatically re-run by `pipeline/executor.py`'s round loop, which is a *different*,
+    intentional multi-round behavior this test is not about -- see this file's own "Fix
+    mode (issue #81)" section for that behavior's own test."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
     ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
-    step: Step = ReviewStep(executable=CLEAN_FAKE_CLI)
+    step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     events = asyncio.run(_collect([step], ctx))
     asyncio.run(agent.close())
@@ -262,6 +285,71 @@ def test_review_step_calls_agent_exactly_once(tmp_path: Path) -> None:
     completed = [e for e in events if e.status == "completed"]
     assert len(running) == 1
     assert len(completed) == 1
+    outcome = completed[0].outcome
+    assert outcome is not None
+    assert outcome.auto_fixable is False  # sanity: no round loop was even eligible to fire
+
+
+# --- Fix mode (issue #81) -----------------------------------------------------------------
+
+
+def test_review_step_supports_fix_round_is_true() -> None:
+    assert ReviewStep.supports_fix_round is True
+
+
+def test_review_step_automatic_fix_round_edits_the_tree_and_returns_a_fresh_review_output(
+    tmp_path: Path,
+) -> None:
+    """End-to-end proof of issue #81's headline behavior, driven through the real
+    `run_steps`/`pipeline/executor.py` round loop against a real `ReviewStep`: an outcome
+    with one auto-fix finding and no ask-user finding triggers exactly one automatic
+    re-run before any park, the fake agent's own edit to the working tree really lands on
+    disk (proving `ReviewStep`'s fix-mode prompt, `build_review_fix_prompt`, grants real
+    edit access rather than just re-requesting the same schema), the fix round's prompt
+    actually carried the auto-fix finding's own description (`FixRound.instructions`, via
+    `pipeline/findings.py`'s `describe_auto_fix_findings`), and the returned `ReviewOutput`
+    from that round is a fresh verdict -- new findings, new risk_level/risk_rationale --
+    not an echo of the finding that triggered it."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    original_greeting = (repo / "greeting.txt").read_text()
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    step: Step = ReviewStep(executable=AUTO_FIX_ROUND_FAKE_CLI)
+
+    events = asyncio.run(_collect([step], ctx))
+    asyncio.run(agent.close())
+
+    completed = [e for e in events if e.status == "completed"]
+    assert len(completed) == 2  # exactly one automatic re-run, then the run reaches "clean"
+
+    first_outcome, second_outcome = completed[0].outcome, completed[1].outcome
+    assert first_outcome is not None
+    assert second_outcome is not None
+
+    assert first_outcome.auto_fixable is True
+    assert first_outcome.needs_approval is False
+    first_findings = first_outcome.findings
+    assert isinstance(first_findings, ReviewOutput)
+    assert len(first_findings.findings) == 1
+    assert first_findings.risk_rationale == "initial pass: one auto-fixable style finding"
+
+    assert second_outcome.auto_fixable is False
+    assert second_outcome.needs_approval is False
+    second_findings = second_outcome.findings
+    assert isinstance(second_findings, ReviewOutput)
+    # A fresh verdict, not an echo of round 1's finding.
+    assert second_findings.findings == []
+    assert second_findings.risk_rationale != first_findings.risk_rationale
+    assert second_findings.risk_rationale.startswith("fix round: clean after edits")
+    # The fix-round prompt actually carried round 1's finding description forward.
+    assert "saw_instructions=True" in second_findings.risk_rationale
+
+    # The fake agent's own edit really landed on the working tree.
+    updated_greeting = (repo / "greeting.txt").read_text()
+    assert updated_greeting != original_greeting
+    assert updated_greeting.endswith("fixed\n")
 
 
 # --- Activity reporting (issue #65) --------------------------------------------------------
@@ -286,7 +374,13 @@ def test_review_step_reports_exactly_one_activity_span_for_the_agent_call(
     ("started" then "finished") spanning the call, with a real elapsed duration on the
     "finished" event -- proven with a real `StepContext.activity_reporter` (a real
     `ActivityRelay`, satisfying `pipeline/step.py`'s `ActivityReporter` Protocol purely
-    structurally, per that module's own design note), not a mock."""
+    structurally, per that module's own design note), not a mock.
+
+    Uses `PROMPT_PROBE_FAKE_CLI`, not `CLEAN_FAKE_CLI` -- for the same reason
+    `test_review_step_calls_agent_exactly_once_per_round` above does (issue #81:
+    `CLEAN_FAKE_CLI`'s outcome is genuinely `auto_fixable=True`, which would trigger a
+    second, automatic round -- and so a second activity span -- that this single-round test
+    is not about)."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
@@ -294,7 +388,7 @@ def test_review_step_reports_exactly_one_activity_span_for_the_agent_call(
     ctx = StepContext(
         cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
     )
-    step: Step = ReviewStep(executable=CLEAN_FAKE_CLI)
+    step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     async def scenario() -> list[ActivityEvent]:
         drain_task = asyncio.ensure_future(_drain_activity_events(relay, 2))

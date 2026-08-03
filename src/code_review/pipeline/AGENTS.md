@@ -82,12 +82,44 @@ Proven both with a synthetic parked `StepOutcome` (`tests/pipeline/test_executor
 "The approval park" section) and end to end against `steps/rebase.py`'s already-shipped
 issue #24 guard (`tests/test_cli_review.py`'s `repo_with_unpushed_local_default_commits`).
 
-Still open for #81 (blocked by #80, not started): the fix-round mechanism itself -- a
-`dataclasses.replace`-based round-state extension to `StepContext`, the auto-fix-before-park
-ordering with a bounded round cap, and the human "fix" response's own uncapped round. #81
-also owns `ReviewStep`'s fix-mode prompt; #82 mirrors that for `TestSufficiencyStep`. The
-fail-safe-default rule itself (`Finding.action` unset/null/unrecognized always resolves to
-`"ask-user"`, never `"no-op"`/`"auto-fix"`) is already pinned by `tests/pipeline/
+**The fix-round loop (Milestone 7's second ticket, issue #81)** is landed: `pipeline/step.py`
+extends `StepContext` immutably with a `fix_round: FixRound | None` field (`FixRound` is a
+frozen dataclass wrapping one `instructions: str`, collapsing the automatic and human-typed
+paths to a single shape) and extends the approval seam from a bare `Decision` string to
+`ApprovalResponse(decision: ApprovalDecision, instructions: str | None)`, where
+`ApprovalDecision` gains a fourth value, `"fix"`, alongside issue #80's `"approve"`/
+`"skip"`/`"abort"`. `executor.py`'s per-step body is now an inner `while True` loop
+(`dataclasses.replace`-ing an evolving `round_ctx`, never mutating the caller's own `ctx`)
+nested inside the outer `for step in steps:` loop -- see that module's own docstring's "The
+fix-round loop" section for the full shape. Gated entirely on a new `Step.supports_fix_round:
+ClassVar[bool]` (default `False`, overridden `True` only by `steps/review.py`'s `ReviewStep`)
+so that `outcome.auto_fixable` alone never drives the loop -- this is what keeps
+`steps/test_sufficiency.py`'s `TestSufficiencyStep` (which already computes a genuine
+`auto_fixable=True` today but doesn't yet consume `fix_round`, that's #82) on exactly its
+pre-#81 park-only path; see this file's root sibling for the reasoning that led to that
+mechanism. `pipeline/findings.py`'s `describe_auto_fix_findings` renders the automatic
+path's `FixRound.instructions` from whichever auto-fix findings triggered the round. The
+automatic path is capped by a small module-level constant in `executor.py`
+(`_MAX_AUTO_FIX_ROUNDS`, a plain code constant, not a config field -- Milestone 10 owns
+making the round cap configurable); the human "fix" response at a park is uncapped by
+design -- a person can choose it as many times in a row as they want. Once the automatic
+cap is exhausted on a still-`auto_fixable` outcome, or a step's outcome is `needs_approval`
+in the first place, the loop parks exactly as issue #80 already does (`needs_approval`/
+cap-exhausted-`auto_fixable` are the only two conditions that ever park; they are otherwise
+mutually exclusive by construction, per `steps/review.py`'s own comment on that invariant).
+Proven with a synthetic `supports_fix_round=True` step (`tests/pipeline/test_executor.py`'s
+"The fix-round loop" section: exactly-one-automatic-round, cap exhaustion parks, the
+fail-safe-default regression through the full loop, `supports_fix_round=False` staying
+inert to `auto_fixable`, and the human "fix" response's own uncapped repeat) and, end to
+end, against a real `ReviewStep` (`tests/steps/test_review.py`'s "Fix mode (issue #81)"
+section: a real fake-CLI round-trip whose fix round makes a genuine on-disk edit and
+returns a fresh `ReviewOutput`) and a real `code-review review` run (`tests/test_cli_review.
+py`'s `test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park`).
+
+The fail-safe-default rule itself (`Finding.action` unset/null/unrecognized always resolves
+to `"ask-user"`, never `"no-op"`/`"auto-fix"`) is already pinned by `tests/pipeline/
 test_findings.py`, from Milestone 5 -- #81 does not change it, only adds a bounded auto-fix
-path that runs *before* a finding would otherwise reach this park. Milestone 9 owns the
-head-continuity guard's exact comparison rule.
+path that runs *before* a finding would otherwise reach this park (and a dedicated
+regression test proves the two compose correctly -- see above). #82 (mirroring this
+mechanism for `TestSufficiencyStep`) and #78 (suggestion-selection/`EditStep`/yolo-mode) are
+both still open. Milestone 9 owns the head-continuity guard's exact comparison rule.

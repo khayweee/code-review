@@ -10,8 +10,9 @@ in Milestone 3, see `src/code_review/steps/intent.py`.
 the command line. `Intent` is fully known before the pipeline starts -- it's a CLI flag,
 not something discovered mid-run -- so `cli.py` constructs it once and every step gets it
 off the same immutable `ctx`, rather than the first step handing it forward through its
-`StepOutcome`. It is not the place fix-loop or approval state lives -- Milestone 7 extends
-this type once that loop exists.
+`StepOutcome`. Milestone 7 extends this type with the fix-loop and approval-park state it
+needs (`on_approval_needed`, `fix_round`) -- see those fields' own comments below and
+`executor.py`'s module docstring for how the loop that drives them is built.
 
 `StepContext.on_input_needed` (issue #41) carries the same interactive-input relay
 `RunOpts.on_input_needed` (see `agent/base.py`) is shaped for, so a future step can pass
@@ -50,21 +51,23 @@ leading underscore, unlike that one -- this needs to be read from a different pa
 nullcontext-when-absent branch both `StepContext.report_activity` (explicit reporter) and
 `run_git` (ambient reporter) need, so that branch has exactly one implementation.
 
-`StepOutcome` carries `needs_approval`/`auto_fixable` -- Milestone 7's own ticket 1 (issue
-#80) is what first acts on `needs_approval`: `executor.run_steps` now stops the run right
-after yielding a step's "completed" `StepEvent` when that step's `StepOutcome.needs_approval`
-is True, calling `StepContext.on_approval_needed` (see that field's own comment above) and
-blocking until it resolves to "approve"/"skip"/"abort" -- "approve" and "skip" both let the
-loop continue exactly as before (skip vs. approve is a presentational distinction the
-consuming `tui/` side draws, not one `run_steps` itself branches on), "abort" raises
-`executor.RunAbortedError` to unwind the whole run with no further step executed. `Step`
-implementations themselves are unaffected: nothing about park/approve/skip/abort belongs
-inside a `Step.run` method, matching Milestone 7's own auto-fix ticket (#81, still
-unimplemented) design intent of layering all of this on top of the same fixed `step.run(ctx)`
-call shape. `auto_fixable` still has no consumer -- that is #81's job. `findings` is typed
-as `object` rather than the Milestone 5 `Finding`/`Findings` schema (`pipeline/findings.py`)
--- a step's own code narrows it back to whatever schema that step validated its agent call
-against.
+`StepOutcome` carries `needs_approval`/`auto_fixable`. Milestone 7's ticket 1 (issue #80) is
+what first acts on `needs_approval`: `executor.run_steps` stops the run right after yielding
+a step's "completed" `StepEvent` when that step's `StepOutcome.needs_approval` is True,
+calling `StepContext.on_approval_needed` (see that field's own comment above) and blocking
+until it resolves to an `ApprovalResponse`. Milestone 7's ticket 2 (issue #81) is what first
+acts on `auto_fixable`: a step that opts in via `Step.supports_fix_round = True` gets a
+bounded number of automatic re-runs (a fixed round cap, `executor.py`'s own module-level
+constant) with an evolving `StepContext.fix_round` before the run ever parks on that
+outcome, and a park's fourth response ("fix", alongside issue #80's "approve"/"skip"/
+"abort") lets a human re-run the step with their own typed instructions, uncapped -- see
+`executor.py`'s own module docstring for the full round-loop shape. `Step` implementations
+themselves are otherwise unaffected: nothing about park/fix-round/approve/skip/abort belongs
+inside a `Step.run` method beyond reading `ctx.fix_round` to build a fix-mode prompt (see
+`steps/review.py`'s `ReviewStep.run`) -- all of this is layered on top of the same fixed
+`step.run(ctx)` call shape, called once per round. `findings` is typed as `object` rather
+than the Milestone 5 `Finding`/`Findings` schema (`pipeline/findings.py`) -- a step's own
+code narrows it back to whatever schema that step validated its agent call against.
 
 `StepEvent` (Milestone 13, issue #39) is `executor.run_steps`'s progress unit: one per
 "running" and one per "completed" per step. It gets `step_name` by calling `step.get_name()`
@@ -85,7 +88,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
 
 from code_review.agent import Agent
 
@@ -141,6 +144,49 @@ def activity_or_nullcontext(
 
 
 @dataclass(frozen=True, slots=True)
+class FixRound:
+    """Round-state for a step re-run in fix mode (issue #81): what to fix, as text.
+
+    Carries either the auto-fix findings' descriptions (the automatic path, rendered by
+    `pipeline/findings.py`'s `describe_auto_fix_findings`) or a human's own typed
+    instructions (the "fix" approval response, see `ApprovalResponse` below) -- both
+    collapsed to this one `instructions: str` shape so a step's fix-mode prompt only ever
+    branches on one field (`ctx.fix_round is not None`), never on which of the two paths
+    produced it. Attached to a new `StepContext` via `dataclasses.replace` for each re-run
+    (`executor.run_steps` never mutates `ctx`) -- see that module's own docstring for the
+    round loop this drives. Consumer: `steps/review.py`'s `ReviewStep.run` (issue #81);
+    `steps/test_sufficiency.py` does not consume this yet (issue #82).
+    """
+
+    instructions: str
+
+
+# The fourth approval-park response (issue #81), alongside issue #80's "approve"/"skip"/
+# "abort". Kept as a standalone alias (not inlined into `ApprovalResponse.decision`'s
+# annotation) so `tui/approval_relay.py`/`tui/screens.py` can import and re-export the
+# exact same type rather than each defining their own overlapping `Literal`.
+ApprovalDecision = Literal["approve", "skip", "abort", "fix"]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalResponse:
+    """A human's answer to a parked step's approval request (issue #81, extending issue
+    #80's bare `Decision` string).
+
+    `instructions` is set only when `decision == "fix"` -- the free-text instructions a
+    human typed in response to `tui.screens.InputPromptScreen`'s follow-up prompt after
+    choosing "fix" on `tui.screens.ApprovalPromptScreen` -- and is `None` for every other
+    decision. `executor.run_steps` turns a "fix" response into a `FixRound(instructions=
+    response.instructions)` and re-runs the parked step; "approve"/"skip" let the run
+    continue to the next step exactly as issue #80 already does; "abort" raises
+    `executor.RunAbortedError`, unchanged.
+    """
+
+    decision: ApprovalDecision
+    instructions: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class StepContext:
     """Per-run dependencies and state a Step needs in order to run."""
 
@@ -166,25 +212,36 @@ class StepContext:
     # (issue #64)" section. `cli.py` wires this field to a real `tui.activity.ActivityRelay`
     # instance for interactive runs.
     activity_reporter: ActivityReporter | None = None
-    # The approval-park seam (issue #80): `executor.run_steps` calls this, passing the
-    # parking step's own name and its full `StepOutcome`, whenever that `StepOutcome.
-    # needs_approval` is True -- and blocks until it resolves to one of "approve"/"skip"/
-    # "abort". Shaped like `on_input_needed` above (a structural callable, `None` by
-    # default so every existing test constructing `StepContext` directly keeps passing
-    # unchanged), but takes `(step_name, outcome)` rather than a single prompt string: the
-    # park logic in `pipeline/` must not itself format `StepOutcome.findings` (typed as
-    # bare `object`, see below) into display text -- that is the relay/modal's job, on the
-    # `tui/` side of the boundary this field exists to preserve. Unlike `on_input_needed`,
-    # this field already has a real consumer as of this same change: `executor.run_steps`'s
-    # own park/approve/skip/abort logic, not a step. `None` (the default, and every test
+    # The approval-park seam (issue #80, extended by issue #81): `executor.run_steps` calls
+    # this, passing the parking step's own name and its full `StepOutcome`, whenever that
+    # `StepOutcome.needs_approval` is True (or, once a step opts into fix rounds via `Step.
+    # supports_fix_round`, whenever its `auto_fixable` outcome has exhausted the automatic
+    # round cap -- see `executor.py`'s module docstring) -- and blocks until it resolves to
+    # an `ApprovalResponse`. Shaped like `on_input_needed` above (a structural callable,
+    # `None` by default so every existing test constructing `StepContext` directly keeps
+    # passing unchanged), but takes `(step_name, outcome)` rather than a single prompt
+    # string: the park logic in `pipeline/` must not itself format `StepOutcome.findings`
+    # (typed as bare `object`, see below) into display text -- that is the relay/modal's
+    # job, on the `tui/` side of the boundary this field exists to preserve. Unlike
+    # `on_input_needed`, this field already has a real consumer as of issue #80:
+    # `executor.run_steps`'s own park loop, not a step. `None` (the default, and every test
     # that doesn't park a step) means `run_steps` fails closed with `executor.
     # ApprovalNotAttachedError` rather than hanging or silently treating the park as
     # approved -- mirroring `agent/errors.py`'s `StdinBlockedError`/`RunOpts.
     # on_input_needed`'s own "`None` means fail closed" rule. `cli.py` wires this to
     # `tui.approval_relay.ApprovalRelay.request_approval` for interactive runs.
-    on_approval_needed: (
-        Callable[[str, StepOutcome], Awaitable[Literal["approve", "skip", "abort"]]] | None
-    ) = None
+    on_approval_needed: Callable[[str, StepOutcome], Awaitable[ApprovalResponse]] | None = None
+    # Round-state for a fix-mode re-run of the step currently executing (issue #81) -- see
+    # `FixRound`'s own docstring above for the exact shape and why automatic and
+    # human-typed fix instructions collapse to one field. `None` (the default, and every
+    # existing test constructing `StepContext` directly) means "this is a normal run, not a
+    # fix round" -- the same "`None` means normal run" precedent `on_input_needed`/
+    # `activity_reporter`/`on_approval_needed` already set. `executor.run_steps` is the
+    # sole writer: it never mutates `ctx` itself, instead building a new `StepContext` via
+    # `dataclasses.replace(ctx, fix_round=FixRound(...))` for each re-run round and passing
+    # that forward. Consumer: `steps/review.py`'s `ReviewStep.run` (issue #81), which
+    # branches its prompt on `ctx.fix_round is not None`.
+    fix_round: FixRound | None = None
 
     def report_activity(self, label: str) -> AbstractAsyncContextManager[None]:
         """Single-line call site for a step to report one nested unit of work named
@@ -212,6 +269,20 @@ class Step(ABC):
     # would give every `@dataclass(slots=True)` implementation a `__dict__` back, silently
     # defeating the memory-layout guarantee `slots=True` exists for.
     __slots__ = ()
+
+    # Per-step opt-in to `executor.run_steps`'s fix-round loop (issue #81). `False` by
+    # default -- deliberately -- so a step's `StepOutcome.auto_fixable` is inert to the
+    # executor unless that step explicitly declares it knows how to consume `StepContext.
+    # fix_round`. This matters concretely for `steps/test_sufficiency.py`'s
+    # `TestSufficiencyStep`: it already computes a genuine `auto_fixable=True` the same way
+    # `ReviewStep` does (see that step's own `run`), but does not yet build a fix-mode
+    # prompt (issue #82) -- gating the round loop on `outcome.auto_fixable` alone would
+    # bounce it through capped re-runs that blindly resubmit the same prompt and get the
+    # same outcome back, a real behavior change this ticket must not introduce. When this
+    # is `False`, `executor.run_steps` behaves exactly as it did before issue #81: only
+    # `outcome.needs_approval` parks, `outcome.auto_fixable` is never consulted. Only
+    # `steps/review.py`'s `ReviewStep` overrides this to `True`.
+    supports_fix_round: ClassVar[bool] = False
 
     @abstractmethod
     async def run(self, ctx: StepContext) -> StepOutcome:

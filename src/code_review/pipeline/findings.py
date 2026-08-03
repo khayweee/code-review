@@ -1,7 +1,8 @@
 """Finding schema, the fail-safe action default, the blocking-findings gate, and the
 deterministic pipeline-owned-delivery scope filter -- Milestone 5 (schema, issue #26).
-Milestone 7 (fix-loop helpers such as override-merging) is out of scope for this module
-today; nothing here builds a fix/approval state machine.
+Milestone 7's fix-round mechanism (issue #81) adds one more pure helper here,
+`describe_auto_fix_findings` -- see its own docstring; the fix/approval state machine
+itself (the round loop, the park) lives in `pipeline/executor.py`, not this module.
 
 `Finding` is a pydantic `BaseModel`, not this repo's usual frozen/slotted dataclass (see
 `steps/intent.py`'s `Intent`), because it is passed as `RunOpts.output_schema` to an
@@ -192,3 +193,42 @@ def filter_pipeline_owned_delivery_findings(output: ReviewOutput) -> ReviewOutpu
         )
 
     return output.model_copy(update={"findings": remaining})
+
+
+# --- describe_auto_fix_findings (issue #81) ----------------------------------------------
+
+
+def describe_auto_fix_findings(findings: object) -> str:
+    """Render every finding in `findings` whose resolved action is "auto-fix" as fix-round
+    instructions text (`pipeline.step.FixRound.instructions`) for the automatic path of
+    Milestone 7's fix-round loop (`pipeline/executor.py`).
+
+    `findings` is `StepOutcome.findings: object` (see `pipeline/step.py`), which in
+    practice is either a `ReviewOutput`/`TestSufficiencyOutput`-shaped object with a
+    `.findings` attribute or already a bare `list[Finding]` -- duck-typed the same way
+    `filter_pipeline_owned_delivery_findings` above handles the same ambiguity (see that
+    function's own docstring). Anything else (an unrecognized shape) yields no lines,
+    matching this module's "pure function, no exceptions on a shape it doesn't recognize"
+    style elsewhere (e.g. `action_or_default`'s own fail-safe fallback).
+
+    One line per matching finding, in list order: `"- [severity] description (location)"`,
+    with the `(location)` suffix omitted when `Finding.location` is `None`. This is a
+    deliberately simple, human-readable rendering -- there is no schema contract on this
+    text (it becomes free-form prompt text via `FixRound.instructions`), so the exact
+    wording is this function's own call, not a fixed format other code parses back.
+    """
+
+    raw = getattr(findings, "findings", findings)
+    if not isinstance(raw, list):
+        return ""
+
+    lines = []
+    for finding in raw:
+        if not isinstance(finding, Finding):
+            continue
+        if action_or_default(finding.action) != "auto-fix":
+            continue
+        location = f" ({finding.location})" if finding.location else ""
+        lines.append(f"- [{finding.severity}] {finding.description}{location}")
+
+    return "\n".join(lines)

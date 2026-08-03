@@ -29,6 +29,19 @@ sanitization runs -- see the module docstring for the regression this pins again
 prompt assembly used by `ReviewStep`. `build_review_prompt` calls `wrap_intent` from
 `intent.py` above and appends the clause only when it is non-empty.
 
+`build_review_fix_prompt(ctx)` (Milestone 7, issue #81): the fix-mode counterpart,
+`ReviewStep.run` calls this instead whenever `ctx.fix_round is not None`. It instructs the
+agent to actually edit the affected files to address `ctx.fix_round.instructions`, then
+re-review its own result from scratch -- a fresh `ReviewOutput`, never an echo of the
+findings that triggered the round. Its own docstring documents the one nontrivial design
+decision here: `ctx.diff` is captured once, before the pipeline starts, and does not
+reflect edits a fix round's own agent call makes to the working tree in a later round, so
+this prompt includes `ctx.diff` only as originating context (explicitly flagged as
+possibly-stale, by name) and tells the agent to re-inspect the live working tree itself
+(e.g. via its own `git diff`) rather than trusting that string -- the agent already has
+full tool/shell access via `RunOpts`'s existing permission defaults, so this is a
+prompt-wording-only decision, no `RunOpts`/`agent/` change.
+
 ## `test_sufficiency.py`
 
 `build_test_sufficiency_prompt(ctx)` and its guardrail-clause constants (Milestone 6,

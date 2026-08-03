@@ -32,7 +32,6 @@ import asyncio
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import pytest
 
@@ -40,7 +39,7 @@ from code_review.agent import RunOpts
 from code_review.agent.base import OutputT, Result
 from code_review.pipeline.executor import run_steps
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import StepContext, StepOutcome
+from code_review.pipeline.step import ApprovalResponse, StepContext, StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.rebase import RebaseStep
 from code_review.tui.activity import ActivityEvent, ActivityRelay
@@ -391,17 +390,18 @@ def test_rebase_step_default_branch_is_overridable_for_a_non_main_default(
 # --- Activity reporting (issue #64) -----------------------------------------------------
 
 
-async def _approve(step_name: str, outcome: StepOutcome) -> Literal["approve", "skip", "abort"]:
-    """A stub `on_approval_needed` (issue #80) that always answers "approve" -- attached to
-    every `_ctx_with_relay` context below so a scenario whose `RebaseStep` outcome parks
-    (a real conflict, or the issue #24 guard firing) doesn't make `run_steps` fail closed
-    (`executor.ApprovalNotAttachedError`) before this section's own assertions (about
-    activity reporting, not the park/approve/skip/abort flow itself -- that is `tests/
-    pipeline/test_executor.py`'s job) get to run. Harmless for the one test in this section
-    that calls `RebaseStep.run` directly instead of going through `run_steps` -- nothing
-    ever reads this field on that path."""
+async def _approve(step_name: str, outcome: StepOutcome) -> ApprovalResponse:
+    """A stub `on_approval_needed` (issue #80, updated for issue #81's `ApprovalResponse`)
+    that always answers "approve" -- attached to every `_ctx_with_relay` context below so a
+    scenario whose `RebaseStep` outcome parks (a real conflict, or the issue #24 guard
+    firing) doesn't make `run_steps` fail closed (`executor.ApprovalNotAttachedError`)
+    before this section's own assertions (about activity reporting, not the
+    park/approve/skip/fix/abort flow itself -- that is `tests/pipeline/test_executor.py`'s
+    job) get to run. Harmless for the one test in this section that calls `RebaseStep.run`
+    directly instead of going through `run_steps` -- nothing ever reads this field on that
+    path."""
 
-    return "approve"
+    return ApprovalResponse(decision="approve")
 
 
 def _ctx_with_relay(checkout: Path, agent: _SpyAgent, relay: ActivityRelay) -> StepContext:

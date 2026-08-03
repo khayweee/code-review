@@ -14,13 +14,19 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Literal
 
 import pytest
 from pydantic import ValidationError
 
 from code_review.agent import Agent, ClaudeCLI
-from code_review.pipeline import Step, StepContext, StepEvent, StepOutcome, run_steps
+from code_review.pipeline import (
+    ApprovalResponse,
+    Step,
+    StepContext,
+    StepEvent,
+    StepOutcome,
+    run_steps,
+)
 from code_review.steps.intent import Intent
 from code_review.steps.test_sufficiency import TestSufficiencyOutput, TestSufficiencyStep
 
@@ -119,16 +125,20 @@ async def _collect(steps: list[Step], ctx: StepContext) -> list[StepEvent]:
     return [event async for event in run_steps(steps, ctx)]
 
 
-async def _approve(step_name: str, outcome: StepOutcome) -> Literal["approve", "skip", "abort"]:
-    """A stub `on_approval_needed` (issue #80) that always answers "approve" -- attached
-    only by the one test below whose `TestSufficiencyStep` outcome parks
-    (`needs_approval=True`), so `run_steps` doesn't fail closed (`executor.
-    ApprovalNotAttachedError`) before this file's shared `_collect`/`_only_outcome` helpers
-    can inspect that outcome. This file's own tests are about `TestSufficiencyStep`'s
-    outcome construction, not about the park/approve/skip/abort flow itself -- that is
-    `tests/pipeline/test_executor.py`'s job."""
+async def _approve(step_name: str, outcome: StepOutcome) -> ApprovalResponse:
+    """A stub `on_approval_needed` (issue #80, updated for issue #81's `ApprovalResponse`)
+    that always answers "approve" -- attached only by the one test below whose
+    `TestSufficiencyStep` outcome parks (`needs_approval=True`), so `run_steps` doesn't
+    fail closed (`executor.ApprovalNotAttachedError`) before this file's shared
+    `_collect`/`_only_outcome` helpers can inspect that outcome. This file's own tests are
+    about `TestSufficiencyStep`'s outcome construction, not about the park/approve/skip/
+    fix/abort flow itself -- that is `tests/pipeline/test_executor.py`'s job (see that
+    file's "The fix-round loop" section, in particular the `supports_fix_round=False`
+    regression test, for the proof that `TestSufficiencyStep`-shaped outcomes are never
+    bounced through an auto-fix round or parked on `auto_fixable` alone, issue #81's own
+    acceptance criterion for this step)."""
 
-    return "approve"
+    return ApprovalResponse(decision="approve")
 
 
 def _only_outcome(events: list[StepEvent]) -> StepOutcome:

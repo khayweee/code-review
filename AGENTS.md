@@ -150,7 +150,8 @@ pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
 4 sub-issues complete. The interactive approve/skip/abort layer from the reference
 screenshot landed as Milestone 7's #80 (see that milestone's own paragraph below); the
 "fix" half of that reference screenshot (auto-fix, and a human "fix" response beyond
-approve/skip/abort) is still #81/#82, not started.
+approve/skip/abort) landed for `ReviewStep` as #81; its mirror for `TestSufficiencyStep`
+(#82) is still not started.
 
 Milestone 14 (`src/code_review/tui/activity.py`, `pipeline/step.py`, `steps/gitutils.py`,
 see `docs/ROADMAP.md` milestone 14) is specced as #63, sliced into #66 (a dedicated
@@ -216,8 +217,33 @@ pending/running/completed/failed. Proven against a synthetic parked `StepOutcome
 (`tests/pipeline/test_executor.py`, `tests/tui/test_app.py`) and, end to end, against
 `steps/rebase.py`'s already-shipped issue #24 unpushed-local-default guard -- which, before
 #80, silently rebased anyway despite returning `needs_approval=True`
-(`tests/test_cli_review.py`'s `repo_with_unpushed_local_default_commits`). #81/#82 are not
-started: no auto-fix, no fix-round, no "fix" response beyond approve/skip/abort yet.
+(`tests/test_cli_review.py`'s `repo_with_unpushed_local_default_commits`).
+
+#81 is closed: `pipeline/step.py` gained `FixRound` (a frozen dataclass wrapping one
+`instructions: str`) and `StepContext.fix_round`, plus `ApprovalDecision`/`ApprovalResponse`
+(extending #80's bare `Decision` string with a fourth choice, "fix", and optional
+free-text `instructions`) and `Step.supports_fix_round: ClassVar[bool]` (default `False`).
+`pipeline/executor.py`'s per-step body is now an inner round loop, gated on
+`step.supports_fix_round` so `outcome.auto_fixable` alone never drives it (this is what
+keeps `TestSufficiencyStep` on its pre-#81 park-only path, since it computes a genuine
+`auto_fixable=True` today but doesn't consume `fix_round` yet -- that's #82): an eligible
+step with an `auto_fixable` outcome gets re-run automatically, up to a small module-level
+`_MAX_AUTO_FIX_ROUNDS` cap, before any park; once that cap is exhausted (or the step never
+supported fix rounds), it falls through to #80's park, whose fourth response, "fix",
+re-runs the step with a human's own typed instructions -- uncapped, unlike the automatic
+path. `steps/review.py`'s `ReviewStep` is the first (only, until #82) step to opt in
+(`supports_fix_round = True`), with a new fix-mode prompt
+(`prompt/review.py`'s `build_review_fix_prompt`) that tells the agent to edit the working
+tree and re-review from scratch, steering it at the live tree rather than the stale
+`ctx.diff` a prior round's own edits invalidate. `tui/screens.py`'s `ApprovalPromptScreen`
+gained a "fix" keybinding/button, and `tui/app.py`'s `ReviewApp._relay_approval` follows it
+with `InputPromptScreen` to collect instructions before resolving the pending approval.
+Proven with a synthetic `supports_fix_round` step (`tests/pipeline/test_executor.py`),
+a real `ReviewStep` fix round that makes a genuine on-disk edit
+(`tests/steps/test_review.py`), the "fix" modal round-trip (`tests/tui/test_app.py`), and a
+real `code-review review` run reaching success purely via the automatic path with no human
+interaction (`tests/test_cli_review.py`). #82 (the same mechanism's second application to
+`TestSufficiencyStep`) is not started.
 
 A `code-review --version` flag (`cli.py`'s eager `--version` callback, reading
 `code_review.__version__`) and a version bump (`0.1.0` -> `0.2.0`, both `pyproject.toml`

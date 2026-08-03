@@ -19,7 +19,7 @@ from textual.widgets import Input, Static
 
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import StepEvent, StepOutcome
+from code_review.pipeline.step import ApprovalResponse, StepEvent, StepOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.activity import ActivityEvent, ActivityRelay
@@ -358,8 +358,8 @@ def _rebase_step_parks_then_maybe_continues(relay: ApprovalRelay) -> AsyncIterat
             duration=0.01,
         )
 
-        decision = await relay.request_approval("RebaseStep", _PARK_OUTCOME)
-        if decision == "abort":
+        response = await relay.request_approval("RebaseStep", _PARK_OUTCOME)
+        if response.decision == "abort":
             raise RunAbortedError("RebaseStep")
 
         review_started = time.monotonic()
@@ -471,6 +471,86 @@ def test_review_app_choosing_abort_stops_the_run_and_records_the_error() -> None
         assert review_row.status == "pending"
 
     asyncio.run(scenario())
+
+
+# --- The "fix" response (issue #81) ------------------------------------------------------
+
+
+def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_them() -> None:
+    """Issue #81's TUI-side acceptance criterion: choosing "fix" on `ApprovalPromptScreen`
+    immediately pushes a second modal, `InputPromptScreen`, to collect the human's free-text
+    fix instructions (reusing its existing text-input shape, per the issue body), and
+    `ReviewApp._relay_approval` only resolves the pending `ApprovalRelay.request_approval`
+    future -- with the full `ApprovalResponse(decision="fix", instructions=...)`, not just
+    the bare decision -- once that second screen is answered."""
+
+    async def scenario() -> ApprovalResponse:
+        relay = ApprovalRelay()
+        captured: list[ApprovalResponse] = []
+
+        async def _events() -> AsyncIterator[StepEvent]:
+            started = time.monotonic()
+            yield StepEvent(
+                step_name="RebaseStep",
+                status="running",
+                outcome=None,
+                started_at=started,
+                duration=None,
+            )
+            await asyncio.sleep(0)
+            yield StepEvent(
+                step_name="RebaseStep",
+                status="completed",
+                outcome=_PARK_OUTCOME,
+                started_at=started,
+                duration=0.01,
+            )
+
+            response = await relay.request_approval("RebaseStep", _PARK_OUTCOME)
+            captured.append(response)
+            # Keep the app alive until the test tears it down itself (mirrors
+            # `test_review_app_relays_a_queued_input_request_through_a_modal`'s own
+            # `hangs_until_cancelled` pattern) -- this test is about the relay round-trip,
+            # not about the run reaching a Status box.
+            await asyncio.Future()
+            yield  # pragma: no cover - unreachable, only makes this an async generator
+
+        app = ReviewApp(REGISTRY, _events(), approval_relay=relay)
+        async with app.run_test() as pilot:
+            await _wait_for_approval_prompt(pilot, app)
+
+            prompt_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
+            assert "[f] Fix" in prompt_text
+
+            await pilot.press("f")
+            await pilot.pause()
+
+            for _ in range(20):
+                if isinstance(app.screen, InputPromptScreen):
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            assert isinstance(app.screen, InputPromptScreen)
+            follow_up_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
+            assert "RebaseStep" in follow_up_text
+
+            await pilot.click(Input)
+            await pilot.press(*"rename the helper", "enter")
+            await pilot.pause()
+
+            for _ in range(20):
+                if captured:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            app.exit()
+
+        return captured[0]
+
+    response = asyncio.run(scenario())
+
+    assert response == ApprovalResponse(decision="fix", instructions="rename the helper")
 
 
 def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_markup() -> None:

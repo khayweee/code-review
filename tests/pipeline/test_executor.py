@@ -22,14 +22,25 @@ The approval-park tests below (issue #80) use a minimal synthetic `_ParkingStep`
 `git`/agent call needed to prove park/approve/skip/abort semantics) rather than the fake-CLI
 `Step`s above -- `steps/rebase.py`'s own `RebaseStep` is proven separately, end to end
 against a real repo, in `tests/steps/test_rebase.py` and `tests/test_cli_review.py`.
+
+The fix-round loop tests (issue #81) use a second minimal synthetic step, `_FixableStep`,
+mirroring `_ParkingStep`'s "no real git/agent call" shape but with `supports_fix_round =
+True` and a caller-supplied sequence of outcomes to return, one per round -- cheaper and
+more deterministic than a real fake-CLI round-trip for proving the round-loop/cap/park
+wiring itself; `steps/test_review.py` separately proves a real `ReviewStep` fix round
+against a real fake-CLI backend (round 1 returns an auto-fix finding, round 2 returns
+clean), per this ticket's own testing decision to prefer a real end-to-end round-trip
+wherever it's cheap and reserve a synthetic step for the executor-level loop mechanics that
+would be needlessly expensive to prove against a real subprocess every time.
 """
 
 from __future__ import annotations
 
 import asyncio
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from pydantic import BaseModel
@@ -37,6 +48,7 @@ from pydantic import BaseModel
 from code_review.agent import Agent, ClaudeCLI, RunOpts
 from code_review.pipeline import (
     ApprovalNotAttachedError,
+    ApprovalResponse,
     RunAbortedError,
     Step,
     StepContext,
@@ -44,6 +56,8 @@ from code_review.pipeline import (
     StepOutcome,
     run_steps,
 )
+from code_review.pipeline.executor import _MAX_AUTO_FIX_ROUNDS
+from code_review.pipeline.findings import Finding, action_or_default, has_blocking_finding
 from code_review.steps.intent import Intent, IntentStep
 from code_review.tui.activity import ActivityRelay
 
@@ -367,15 +381,16 @@ class _MarkerStep(Step):
 _PARKING_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, findings=["a finding"])
 
 
-def _fixed_decision(decision: str) -> object:
-    """An `on_approval_needed`-shaped callable that always answers `decision`, and records
-    every `(step_name, outcome)` call it received for the caller to assert on."""
+def _fixed_response(decision: str, instructions: str | None = None) -> object:
+    """An `on_approval_needed`-shaped callable that always answers
+    `ApprovalResponse(decision, instructions)`, and records every `(step_name, outcome)`
+    call it received for the caller to assert on."""
 
     calls: list[tuple[str, StepOutcome]] = []
 
-    async def _answer(step_name: str, outcome: StepOutcome) -> str:
+    async def _answer(step_name: str, outcome: StepOutcome) -> ApprovalResponse:
         calls.append((step_name, outcome))
-        return decision
+        return ApprovalResponse(decision=decision, instructions=instructions)  # type: ignore[arg-type]
 
     _answer.calls = calls  # type: ignore[attr-defined]
     return _answer
@@ -385,7 +400,7 @@ def test_run_steps_continues_to_the_next_step_when_the_decision_is_approve(
     tmp_path: Path,
 ) -> None:
     repo, diff = _real_repo_with_diff(tmp_path)
-    answer = _fixed_decision("approve")
+    answer = _fixed_response("approve")
 
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
@@ -413,7 +428,7 @@ def test_run_steps_continues_to_the_next_step_when_the_decision_is_skip(tmp_path
     module docstring's "The approval park" section)."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
-    answer = _fixed_decision("skip")
+    answer = _fixed_response("skip")
 
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
@@ -437,7 +452,7 @@ def test_run_steps_raises_run_aborted_error_and_runs_no_further_step_on_abort(
     tmp_path: Path,
 ) -> None:
     repo, diff = _real_repo_with_diff(tmp_path)
-    answer = _fixed_decision("abort")
+    answer = _fixed_response("abort")
 
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
@@ -468,7 +483,7 @@ def test_run_steps_only_yields_the_parked_steps_own_running_and_completed_events
     ever reaches the caller once the human aborts."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
-    answer = _fixed_decision("abort")
+    answer = _fixed_response("abort")
 
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
@@ -524,7 +539,7 @@ def test_run_steps_does_not_park_and_never_calls_on_approval_needed_when_needs_a
     tmp_path: Path,
 ) -> None:
     repo, diff = _real_repo_with_diff(tmp_path)
-    answer = _fixed_decision("abort")  # would blow up the run if this were ever called
+    answer = _fixed_response("abort")  # would blow up the run if this were ever called
 
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
@@ -542,3 +557,264 @@ def test_run_steps_does_not_park_and_never_calls_on_approval_needed_when_needs_a
     outcomes = _completed_outcomes(events)
     assert len(outcomes) == 2
     assert answer.calls == []  # type: ignore[attr-defined]
+
+
+# --- The fix-round loop (issue #81) ------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _FixableStep(Step):
+    """Minimal real `Step` opting into the fix-round loop via `supports_fix_round = True`
+    (mirroring `steps/review.py`'s `ReviewStep`), returning outcomes from a caller-supplied
+    sequence -- one outcome per round, with the final entry repeated for any round beyond
+    the sequence's length (so a test proving the round cap can supply a single
+    always-auto-fixable outcome without predicting the exact round count itself). Records
+    every `ctx.fix_round` it was called with, in call order, so a test can assert the
+    fix-round instructions actually carried across each re-run."""
+
+    outcomes: list[StepOutcome]
+    seen_fix_rounds: list[object] = field(default_factory=list)
+
+    supports_fix_round: ClassVar[bool] = True
+
+    async def run(self, ctx: StepContext) -> StepOutcome:
+        self.seen_fix_rounds.append(ctx.fix_round)
+        index = min(len(self.seen_fix_rounds) - 1, len(self.outcomes) - 1)
+        return self.outcomes[index]
+
+
+@dataclass(frozen=True, slots=True)
+class _NonFixableStep(Step):
+    """Minimal real `Step` standing in for `steps/test_sufficiency.py`'s
+    `TestSufficiencyStep` -- issue #82's own territory, not touched by this ticket -- which
+    already computes a genuine `auto_fixable=True` the same way `ReviewStep` does but
+    leaves `supports_fix_round` at `Step`'s own `False` default. Proves `executor.run_steps`
+    never bounces a step like this through an automatic re-run or parks it on
+    `auto_fixable` alone."""
+
+    outcome: StepOutcome
+
+    async def run(self, ctx: StepContext) -> StepOutcome:
+        return self.outcome
+
+
+def test_run_steps_auto_fix_round_re_runs_exactly_once_with_fix_round_context_before_park(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion: a `ReviewStep`-shaped outcome (here, `_FixableStep`) with at
+    least one auto-fix finding and no ask-user finding triggers exactly one automatic
+    re-run before any park is offered, and the re-run's `StepContext` actually carries
+    `fix_round` with instructions describing the auto-fix finding."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    auto_fix_finding = Finding(
+        severity="warning",
+        description="extract a helper function",
+        action="auto-fix",
+        review_scope="source",
+    )
+    round_one = StepOutcome(needs_approval=False, auto_fixable=True, findings=[auto_fix_finding])
+    round_two = StepOutcome(needs_approval=False, auto_fixable=False, findings=[])
+    step = _FixableStep(outcomes=[round_one, round_two])
+    answer = _fixed_response("abort")  # would blow up the run if this were ever called
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo,
+        agent=agent,
+        diff=diff,
+        intent=_STAND_IN_INTENT,
+        on_approval_needed=answer,  # type: ignore[arg-type]
+    )
+
+    events = asyncio.run(_collect([step], ctx))
+    asyncio.run(agent.close())
+
+    outcomes = _completed_outcomes(events)
+    assert len(outcomes) == 2  # exactly one automatic re-run, no more
+    assert outcomes[0] is round_one
+    assert outcomes[1] is round_two
+    assert answer.calls == []  # type: ignore[attr-defined]  -- never parked
+
+    assert step.seen_fix_rounds[0] is None  # the first round is a normal run
+    second_round_fix = step.seen_fix_rounds[1]
+    assert second_round_fix is not None
+    assert "extract a helper function" in second_round_fix.instructions  # type: ignore[attr-defined]
+    assert "warning" in second_round_fix.instructions  # type: ignore[attr-defined]
+
+
+def test_run_steps_stops_automatic_fix_rounds_once_the_cap_is_exhausted_and_parks(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion: once the round cap is exhausted, a still-`auto_fixable`
+    outcome falls through to Ticket 1's park path rather than looping forever."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    auto_fix_finding = Finding(
+        severity="info", description="keep fixing forever", action="auto-fix", review_scope="source"
+    )
+    always_auto_fixable = StepOutcome(
+        needs_approval=False, auto_fixable=True, findings=[auto_fix_finding]
+    )
+    # More outcomes than the cap could ever consume -- proves the loop actually stops
+    # rather than merely running out of a short sequence.
+    step = _FixableStep(outcomes=[always_auto_fixable] * (_MAX_AUTO_FIX_ROUNDS + 5))
+    answer = _fixed_response("approve")
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo,
+        agent=agent,
+        diff=diff,
+        intent=_STAND_IN_INTENT,
+        on_approval_needed=answer,  # type: ignore[arg-type]
+    )
+
+    events = asyncio.run(_collect([step], ctx))
+    asyncio.run(agent.close())
+
+    outcomes = _completed_outcomes(events)
+    # One initial round plus `_MAX_AUTO_FIX_ROUNDS` automatic re-runs, then it parks.
+    assert len(outcomes) == _MAX_AUTO_FIX_ROUNDS + 1
+    assert all(outcome is always_auto_fixable for outcome in outcomes)
+    assert len(answer.calls) == 1  # type: ignore[attr-defined]  -- parked exactly once
+
+
+def test_run_steps_never_auto_fixes_a_finding_with_unset_action_even_on_a_fix_round_step(
+    tmp_path: Path,
+) -> None:
+    """Regression pinning the fail-safe default (`pipeline/findings.py`'s
+    `action_or_default`) through the full executor loop, not just the pure-function tests
+    in `tests/pipeline/test_findings.py`: a finding whose `action` is unset must never
+    resolve to "auto-fix", so it can only ever reach the park path -- never the automatic
+    fix-round path -- even on a step that has opted into fix rounds
+    (`supports_fix_round=True`)."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    unset_action_finding = Finding(
+        severity="warning", description="no action set", review_scope="source"
+    )
+    assert unset_action_finding.action is None
+
+    # Computed exactly the way `steps/review.py`'s `ReviewStep.run` computes its own
+    # `StepOutcome` from a list of findings -- see that step's own comment on the
+    # "needs_approval xor auto_fixable" invariant.
+    blocking = has_blocking_finding([unset_action_finding])
+    has_auto_fix = any(action_or_default(f.action) == "auto-fix" for f in [unset_action_finding])
+    outcome = StepOutcome(
+        needs_approval=blocking,
+        auto_fixable=has_auto_fix and not blocking,
+        findings=[unset_action_finding],
+    )
+    # The fail-safe default: unset action resolves to "ask-user", never "auto-fix".
+    assert outcome.needs_approval is True
+    assert outcome.auto_fixable is False
+
+    step = _FixableStep(outcomes=[outcome])
+    answer = _fixed_response("approve")
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo,
+        agent=agent,
+        diff=diff,
+        intent=_STAND_IN_INTENT,
+        on_approval_needed=answer,  # type: ignore[arg-type]
+    )
+
+    events = asyncio.run(_collect([step], ctx))
+    asyncio.run(agent.close())
+
+    outcomes = _completed_outcomes(events)
+    assert len(outcomes) == 1  # no automatic re-run ever happened
+    assert step.seen_fix_rounds == [None]  # the step never entered fix-round mode
+    assert answer.calls == [("_FixableStep", outcome)]  # type: ignore[attr-defined]  -- parked
+
+
+def test_run_steps_does_not_round_or_park_a_step_that_does_not_support_fix_rounds(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion: `TestSufficiencyStep` (mirrored here by `_NonFixableStep`, a
+    synthetic `supports_fix_round=False` step with a genuine `auto_fixable=True` outcome,
+    exactly as `TestSufficiencyStep.run` already computes today) is NOT bounced through any
+    auto-fix round and does NOT park on `auto_fixable` alone -- only `needs_approval` parks
+    it, exactly as before this ticket. This is the regression this ticket's design brief
+    most wanted pinned: gating the round loop off `outcome.auto_fixable` alone (instead of
+    `step.supports_fix_round`) would have made this test fail."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    always_auto_fixable_no_approval = StepOutcome(
+        needs_approval=False, auto_fixable=True, findings=["would be auto-fixable"]
+    )
+    step = _NonFixableStep(always_auto_fixable_no_approval)
+    assert step.supports_fix_round is False
+    answer = _fixed_response("abort")  # would blow up the run if this were ever called
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo,
+        agent=agent,
+        diff=diff,
+        intent=_STAND_IN_INTENT,
+        on_approval_needed=answer,  # type: ignore[arg-type]
+    )
+    steps: list[Step] = [step, _MarkerStep()]
+
+    events = asyncio.run(_collect(steps, ctx))
+    asyncio.run(agent.close())
+
+    outcomes = _completed_outcomes(events)
+    # Exactly one round for the auto-fixable-but-non-opted-in step, then the next step ran
+    # -- no automatic re-run, no park.
+    assert len(outcomes) == 2
+    assert outcomes[0] is always_auto_fixable_no_approval
+    assert outcomes[1].findings == "ran"
+    assert answer.calls == []  # type: ignore[attr-defined]
+
+
+def test_run_steps_fix_approval_response_re_runs_with_instructions_and_is_never_capped(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criteria: a "fix" `ApprovalResponse` causes a re-run with a `FixRound`
+    carrying the human's own typed instructions, and choosing "fix" repeatedly (here, more
+    times than `_MAX_AUTO_FIX_ROUNDS`) is never capped -- only the automatic path is."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    parking_outcome = StepOutcome(
+        needs_approval=True, auto_fixable=False, findings=["needs a human"]
+    )
+    # `_MAX_AUTO_FIX_ROUNDS + 2` fix rounds, well past the automatic path's own cap, to
+    # prove this path is genuinely uncapped rather than merely under-tested against it.
+    step = _FixableStep(outcomes=[parking_outcome] * (_MAX_AUTO_FIX_ROUNDS + 3))
+
+    typed_instructions = [f"fix attempt {i}" for i in range(_MAX_AUTO_FIX_ROUNDS + 2)]
+    responses = iter(
+        [ApprovalResponse(decision="fix", instructions=text) for text in typed_instructions]
+        + [ApprovalResponse(decision="approve")]
+    )
+    calls: list[tuple[str, StepOutcome]] = []
+
+    async def _answer(step_name: str, outcome: StepOutcome) -> ApprovalResponse:
+        calls.append((step_name, outcome))
+        return next(responses)
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo,
+        agent=agent,
+        diff=diff,
+        intent=_STAND_IN_INTENT,
+        on_approval_needed=_answer,
+    )
+
+    events = asyncio.run(_collect([step], ctx))
+    asyncio.run(agent.close())
+
+    outcomes = _completed_outcomes(events)
+    # One round per typed "fix" plus the final "approve" round.
+    assert len(outcomes) == len(typed_instructions) + 1
+    assert len(calls) == len(typed_instructions) + 1
+
+    assert step.seen_fix_rounds[0] is None
+    carried_instructions = [fr.instructions for fr in step.seen_fix_rounds[1:]]  # type: ignore[union-attr]
+    assert carried_instructions == typed_instructions
