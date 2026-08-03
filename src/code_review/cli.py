@@ -39,6 +39,7 @@ from pathlib import Path
 
 import typer
 
+from code_review import __version__
 from code_review.agent import ClaudeCLI
 from code_review.install_state import state_dir
 from code_review.pipeline import StepContext, StepEvent, run_steps
@@ -51,6 +52,35 @@ from code_review.tui.input_relay import InputRelay
 app = typer.Typer(help="Agentic code-review/gating pipeline.")
 
 PACKAGE_NAME = "code-review"
+
+
+def _version_callback(show_version: bool) -> None:
+    """Eager `--version` handler: print and exit before any other option/command
+    resolves. Reads `code_review.__version__` directly (kept in sync with
+    `pyproject.toml`'s own `version` by hand -- this project has no automated
+    version-bumping, issue #28) rather than `importlib.metadata`, so it reports correctly
+    even against an editable/`uv run` checkout with no installed distribution metadata.
+    Added to make a stale vs. freshly rebuilt `code-review` install trivially
+    distinguishable at a glance (`uv tool install` reinstalls in place with no
+    version-mismatch warning of its own)."""
+
+    if show_version:
+        typer.echo(f"{PACKAGE_NAME} {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the installed code-review version and exit.",
+    ),
+) -> None:
+    """Agentic code-review/gating pipeline."""
+
 
 _UV_NOT_FOUND_MESSAGE = (
     "error: 'uv' is not installed or not on PATH.\n"
