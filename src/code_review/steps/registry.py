@@ -23,6 +23,9 @@ from __future__ import annotations
 
 from code_review.pipeline.step import Step
 from code_review.steps.intent import IntentStep
+from code_review.steps.rebase import RebaseStep
+from code_review.steps.review import ReviewStep
+from code_review.steps.test_sufficiency import TestSufficiencyStep
 
 # Ordered, canonical display-identity list: every step this pipeline will ever run, present
 # or not-yet-written, in the fixed order `docs/ROADMAP.md`'s milestones define. Adding a
@@ -38,4 +41,11 @@ STEP_REGISTRY: tuple[str, ...] = (
 # Ordered prefix of `STEP_REGISTRY` that actually has a class today. `cli.py` builds the
 # real step list as `[cls() for cls in IMPLEMENTED_STEPS]`. Each entry's `get_name()` must
 # match the corresponding position in `STEP_REGISTRY` -- see `tests/steps/test_registry.py`.
-IMPLEMENTED_STEPS: tuple[type[Step], ...] = (IntentStep,)
+# `PRStep` (Milestone 8) has no class yet, so it stays a pending placeholder in
+# `STEP_REGISTRY` above without a corresponding entry here.
+IMPLEMENTED_STEPS: tuple[type[Step], ...] = (
+    IntentStep,
+    RebaseStep,
+    ReviewStep,
+    TestSufficiencyStep,
+)

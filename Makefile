@@ -19,4 +19,5 @@ run:
 	uv run code-review --help
 
 install-dev:
-	CODE_REVIEW_INSTALL_SOURCE="git+file://$(CURDIR)" ./scripts/install.sh
+	-uv tool uninstall code-review
+	CODE_REVIEW_INSTALL_SOURCE="$(CURDIR)" ./scripts/install.sh

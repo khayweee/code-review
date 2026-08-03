@@ -15,21 +15,23 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from rich.spinner import Spinner
+from rich.table import Table
+from rich.text import Text
 from textual.widgets import Static
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
 from code_review.tui.state import Status, StepRow
 
-# One glyph per status, chosen to be unambiguous at a glance in a live-updating terminal:
-# a human reads this while it changes, so legibility beats cleverness. Kept as its own
-# small table (rather than inline in the format function) so the mapping is easy to eyeball
-# and to unit-test on its own.
+# One glyph per status in the deterministic text fallback. The live pipeline view uses
+# a Rich spinner renderable for the running state so it can animate without any manual
+# frame cycling in this module.
 _STATUS_ICONS: dict[Status, str] = {
-    "pending": "○",  # ○ hollow circle: not started yet
-    "running": "◐",  # ◐ half-filled circle: in progress
-    "completed": "✓",  # ✓ check mark: finished successfully
-    "failed": "✗",  # ✗ cross mark: raised before it could complete
+    "pending": "◌",  # ◌ hollow ring: not started yet
+    "running": "◔",  # ◔ quarter-filled glyph: fallback only; live view uses Spinner
+    "completed": "✔",  # ✔ check mark: finished successfully
+    "failed": "✘",  # ✘ cross mark: raised before it could complete
 }
 
 
@@ -43,7 +45,7 @@ def format_duration(duration: float) -> str:
 
 
 def format_row(row: StepRow) -> str:
-    """Render one `StepRow` as `<icon> <name>  <duration>` (duration omitted while pending)."""
+    """Render one `StepRow` as plain text for tests and non-animated fallbacks."""
 
     icon = _STATUS_ICONS[row.status]
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
@@ -54,6 +56,43 @@ def render_rows(rows: Sequence[StepRow]) -> str:
     """Render every row as one line each, in the order given."""
 
     return "\n".join(format_row(row) for row in rows)
+
+
+def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | Text, Text]:
+    """Render one row as Rich renderables, using a live spinner for running rows.
+
+    `spinners` caches one `Spinner` instance per running step name, keyed by `row.name`,
+    and is shared across repeated calls (see `PipelineBox._spinners`). A `Spinner`'s
+    animation clock (`start_time`) is set lazily on its own first `render()` call and
+    never reset after that -- constructing a *fresh* `Spinner` on every re-render (as this
+    used to do) would reset that clock to "now" every time, so the frame never advances
+    far enough to look animated before being wiped out on the next render. Reusing the
+    same instance across a step's whole "running" lifetime is what lets it actually spin.
+    A row that is no longer running has its cached spinner evicted, so a later run of the
+    same-named step starts its animation fresh rather than resuming a stale clock.
+    """
+
+    if row.status != "running":
+        spinners.pop(row.name, None)
+        icon: Spinner | Text = Text(_STATUS_ICONS[row.status])
+    else:
+        icon = spinners.setdefault(row.name, Spinner("moon"))
+    duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
+    row_text = Text(f"{row.name}{duration}")
+    return icon, row_text
+
+
+def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> Table:
+    """Render every row as Rich renderables so the running row can animate itself.
+
+    `spinners` is the caller's cache (see `_render_row`) -- passed in rather than created
+    here so it persists across repeated calls for the same `PipelineBox`.
+    """
+
+    table = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
+    for row in rows:
+        table.add_row(*_render_row(row, spinners))
+    return table
 
 
 class _BorderedBox(Static):
@@ -84,13 +123,22 @@ class PipelineBox(_BorderedBox):
         id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
-        super().__init__(render_rows(rows), id=id, classes=classes)
+        # One `Spinner` per currently-running step name, reused across `update_rows`
+        # calls for as long as that step stays running -- see `_render_row`'s docstring
+        # for why a fresh `Spinner` per render never animates.
+        self._spinners: dict[str, Spinner] = {}
+        super().__init__(render_rows_live(rows, self._spinners), id=id, classes=classes)
+        self._rows = list(rows)
         self.border_title = "Pipeline"
+
+    def on_mount(self) -> None:
+        self.set_interval(1 / 60, self.refresh)
 
     def update_rows(self, rows: Sequence[StepRow]) -> None:
         """Replace the displayed rows with `rows`, re-rendered in order."""
 
-        self.update(render_rows(rows))
+        self._rows = list(rows)
+        self.update(render_rows_live(rows, self._spinners))
 
 
 def format_finding(finding: Finding) -> str:

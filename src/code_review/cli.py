@@ -16,11 +16,15 @@ environment management, or binary replacement is reimplemented here; `uv` alread
 all of that.
 
 Milestone 13's #40 wires `review` up for real: it requires a real TTY on both stdin and
-stdout (the live progress view cannot render into a pipe or redirect), builds `StepContext`
-from a `git diff HEAD...<branch>` against the current checkout, runs the fixed prefix of
-implemented steps (`steps.registry.IMPLEMENTED_STEPS`) through `run_steps`, and renders
-that event stream live via `tui.app.ReviewApp`. See `docs/ROADMAP.md` milestone 13 and
-`tui/AGENTS.md` for the design; this docstring only tracks what's wired where.
+stdout (the live progress view cannot render into a pipe or redirect), then starts
+`tui.app.ReviewApp` immediately off `_run_pipeline` -- an async generator that builds
+`StepContext` from a `git diff HEAD...<branch>` against the current checkout (fetched in a
+worker thread, off the TUI's own event loop, so a slow diff can't delay the TUI's first
+paint) and runs the fixed prefix of implemented steps (`steps.registry.IMPLEMENTED_STEPS`)
+through `run_steps`. Only the cheap `git rev-parse --verify` ref check
+(`_verify_branch_exists`) runs synchronously before the TUI starts, so a bad BRANCH still
+fails fast with no TUI flash. See `docs/ROADMAP.md` milestone 13 and `tui/AGENTS.md` for
+the design; this docstring only tracks what's wired where.
 """
 
 from __future__ import annotations
@@ -30,13 +34,14 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import typer
 
 from code_review.agent import ClaudeCLI
 from code_review.install_state import state_dir
-from code_review.pipeline import StepContext, run_steps
+from code_review.pipeline import StepContext, StepEvent, run_steps
 from code_review.steps.intent import Intent
 from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_REGISTRY
 from code_review.tui.app import ReviewApp
@@ -136,20 +141,21 @@ _NOT_A_TTY_MESSAGE = (
 )
 
 
-def _diff_against_head(branch: str) -> str:
-    """Return `git diff HEAD...<branch>`: BRANCH's changes since its merge-base with the
-    current HEAD. Diff-base semantics beyond "against current HEAD" (e.g. against a
-    configured default branch instead) are explicitly out of scope here - Rebase/Review own
-    that once they land (see docs/ROADMAP.md milestones 4-5)."""
+def _require_git() -> str:
     git = shutil.which("git")
     if git is None:
         typer.echo("error: 'git' is not installed or not on PATH.", err=True)
         raise typer.Exit(code=1)
+    return git
 
-    # Checked separately from the `diff` call below so a bad BRANCH gets a clear,
-    # code-review-specific message instead of `git diff`'s own "ambiguous argument"
-    # phrasing, which talks about revision/path syntax that has nothing to do with this
-    # CLI's own arguments.
+
+def _verify_branch(git: str, branch: str) -> None:
+    """Raise a clear, code-review-specific error if BRANCH isn't a valid ref in this repo.
+
+    Checked separately from the `diff` call in `_diff_against_head` so a bad BRANCH gets
+    this message instead of `git diff`'s own "ambiguous argument" phrasing, which talks
+    about revision/path syntax that has nothing to do with this CLI's own arguments.
+    """
     verify = subprocess.run(
         [git, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"],
         cwd=Path.cwd(),
@@ -160,6 +166,25 @@ def _diff_against_head(branch: str) -> str:
         typer.echo(f"error: '{branch}' is not a valid branch or ref in this repository.", err=True)
         raise typer.Exit(code=1)
 
+
+def _verify_branch_exists(branch: str) -> None:
+    """Fast, synchronous pre-flight check `review` runs before starting the TUI: only
+    `git rev-parse --verify` (cheap), not the full `git diff` capture (`_diff_against_head`
+    below) -- that one can be slow on a large diff and is deferred until after the TUI's
+    own event loop is running (see `_run_pipeline`), so a bad BRANCH still fails instantly
+    with no TUI flash, while a large diff no longer blocks the TUI from appearing at all.
+    """
+    _verify_branch(_require_git(), branch)
+
+
+def _diff_against_head(branch: str) -> str:
+    """Return `git diff HEAD...<branch>`: BRANCH's changes since its merge-base with the
+    current HEAD. Diff-base semantics beyond "against current HEAD" (e.g. against a
+    configured default branch instead) are explicitly out of scope here - Rebase/Review own
+    that once they land (see docs/ROADMAP.md milestones 4-5)."""
+    git = _require_git()
+    _verify_branch(git, branch)
+
     result = subprocess.run(
         [git, "diff", f"HEAD...{branch}"], cwd=Path.cwd(), capture_output=True, text=True
     )
@@ -167,6 +192,31 @@ def _diff_against_head(branch: str) -> str:
         typer.echo(result.stderr.strip(), err=True)
         raise typer.Exit(code=result.returncode)
     return result.stdout
+
+
+async def _run_pipeline(
+    branch: str, intent: Intent, agent: ClaudeCLI, relay: InputRelay
+) -> AsyncIterator[StepEvent]:
+    """Build the events `ReviewApp` renders: fetch the diff, then run every implemented
+    step against it, in order.
+
+    `_diff_against_head` runs in a worker thread (`asyncio.to_thread`), not on the main
+    thread -- by the time this generator's first iteration reaches it, `ReviewApp.run()`
+    (`review` below) is already driving the terminal, so a slow `git diff` capture no
+    longer delays the TUI's own first paint (all steps "pending"); it only delays that
+    first paint from progressing to `IntentStep` actually starting.
+    """
+    diff = await asyncio.to_thread(_diff_against_head, branch)
+    ctx = StepContext(
+        cwd=Path.cwd(),
+        agent=agent,
+        diff=diff,
+        intent=intent,
+        on_input_needed=relay.request_input,
+    )
+    steps = [cls() for cls in IMPLEMENTED_STEPS]
+    async for event in run_steps(steps, ctx):
+        yield event
 
 
 @app.command()
@@ -186,20 +236,14 @@ def review(
         raise typer.BadParameter("must be non-empty and not just whitespace", param_hint="--intent")
 
     parsed_intent = Intent(summary=stripped_intent, source="explicit", score=1.0)
-    diff = _diff_against_head(branch)
+    _verify_branch_exists(branch)
 
     agent = ClaudeCLI()
     relay = InputRelay()
-    ctx = StepContext(
-        cwd=Path.cwd(),
-        agent=agent,
-        diff=diff,
-        intent=parsed_intent,
-        on_input_needed=relay.request_input,
-    )
-    steps = [cls() for cls in IMPLEMENTED_STEPS]
 
-    tui_app = ReviewApp(STEP_REGISTRY, run_steps(steps, ctx), input_relay=relay)
+    tui_app = ReviewApp(
+        STEP_REGISTRY, _run_pipeline(branch, parsed_intent, agent, relay), input_relay=relay
+    )
     tui_app.run()
     asyncio.run(agent.close())
 
