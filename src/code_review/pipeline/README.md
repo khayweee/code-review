@@ -8,7 +8,7 @@ does not contain review policy or GitHub-specific behavior; those belong in
 ## Subunits
 
 | Subunit | Purpose | Input | Output |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `Step` | Abstract base class subclassed by one unit of pipeline work. Its only abstract operation is asynchronous `run(ctx)`; it also provides a concrete `get_name()`. | `StepContext` | `StepOutcome` |
 | `StepContext` | Immutable per-run data shared by every step. | `cwd`, `agent`, `diff`, and `intent` | Read by steps; it is not itself transformed |
 | `StepOutcome` | A step's report to the executor. | Values chosen by the step | `needs_approval`, `auto_fixable`, and step-specific `findings` |
@@ -70,5 +70,43 @@ The package therefore has one pipeline-level input and output boundary:
 - Output: typed-by-convention reports in the same order. Outcomes are process-local; no
   persistence or resume mechanism exists.
 
-See the project [glossary](../../../docs/GLOSSARY.md) for the precise meanings of Step,
-finding, park, and approval gate.
+## Execution flow (today)
+
+This section is the shortest end-to-end mental model of object creation and control flow.
+
+1. `cli.py` builds the shared run objects.
+   - `Intent(...)` from `--intent`.
+   - `ClaudeCLI()` as the `Agent` implementation.
+   - `InputRelay()` so backend prompts can be relayed to the TUI when needed.
+   - `StepContext(cwd, agent, diff, intent, on_input_needed=relay.request_input)`.
+   - `steps = [cls() for cls in IMPLEMENTED_STEPS]`.
+
+2. `cli.py` starts orchestration by creating `run_steps(steps, ctx)`.
+   - This returns an async event stream (`AsyncIterator[StepEvent]`).
+   - The TUI consumes this stream live.
+
+3. The executor runs each step in fixed order.
+   - For each step: emit `StepEvent(status="running")`.
+   - Call `await step.run(ctx)`.
+   - Emit `StepEvent(status="completed", outcome=StepOutcome(...))`.
+   - Current behavior: every supplied step runs unconditionally; no branching yet.
+
+4. Inside each step, control is step-local.
+   - Agent-dependent step: constructs its own `RunOpts(...)` (including `output_schema`) and
+     calls `await ctx.agent.run(opts)`.
+   - Non-agent step: executes local logic directly (for example intent passthrough or git
+     orchestration).
+
+5. Each step returns one `StepOutcome`.
+   - `findings`: step-specific output payload.
+   - `needs_approval` and `auto_fixable`: flags reported now for later milestones.
+
+6. Findings influence step flags, not executor branching (yet).
+   - Example: a step can map a finding action like `ask-user` to
+     `StepOutcome.needs_approval = True`.
+   - Current executor does not pause/park on this flag yet; that logic is a later milestone.
+
+7. Permission prompts are backend-level I/O, not finding-level control flow.
+   - If a call runs with skip-permissions, no interactive prompt path is used.
+   - If a call opts into permission handling and the backend needs input, `on_input_needed`
+     relays the prompt through `InputRelay` to the TUI, and the step waits for the answer.

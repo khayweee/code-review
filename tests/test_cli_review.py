@@ -159,6 +159,22 @@ def test_diff_against_head_reports_when_git_is_missing(
 # --- Full run under a real pty, no mocked isatty ----------------------------------------
 
 
+def _script_argv(args: list[str]) -> list[str]:
+    """Build a `script` invocation that runs `args` under a real pty and reports the
+    child's own exit code (`-e`), on either the util-linux `script` (Linux CI) or the BSD
+    `script` shipped with macOS. The two take the wrapped command differently: util-linux
+    wants a single shell string after `-c`, BSD takes the argument vector directly as
+    trailing positional args (after the mandatory typescript file) and execs it without a
+    shell."""
+
+    script_bin = shutil.which("script")
+    assert script_bin is not None, "the 'script' command is required for this test"
+
+    if sys.platform == "darwin":
+        return [script_bin, "-qe", "/dev/null", *args]
+    return [script_bin, "-qec", shlex.join(args), "/dev/null"]
+
+
 def _run_in_real_pty(
     args: list[str], cwd: Path, timeout: float = 30.0
 ) -> subprocess.CompletedProcess[str]:
@@ -166,12 +182,8 @@ def _run_in_real_pty(
     (`-e`) -- the only way to observe `review`'s behavior past the TTY check without faking
     `isatty`."""
 
-    script_bin = shutil.which("script")
-    assert script_bin is not None, "the 'script' command (util-linux) is required for this test"
-
-    command = shlex.join(args)
     return subprocess.run(
-        [script_bin, "-qec", command, "/dev/null"],
+        _script_argv(args),
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -197,12 +209,8 @@ def _run_review_and_press_e_to_exit(
     real duration (well under a second, observed), not a tight one, since this is a real
     subprocess and terminal, not a mock."""
 
-    script_bin = shutil.which("script")
-    assert script_bin is not None, "the 'script' command (util-linux) is required for this test"
-
-    command = shlex.join(args)
     process = subprocess.Popen(
-        [script_bin, "-qec", command, "/dev/null"],
+        _script_argv(args),
         cwd=cwd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

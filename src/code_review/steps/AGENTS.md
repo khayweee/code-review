@@ -24,7 +24,17 @@ pipeline-owned-delivery scope filter (`filter_pipeline_owned_delivery_findings`)
 of `review.py` too, into `pipeline/findings.py`, alongside its `Finding`-processing
 siblings -- see that package's own `AGENTS.md`.
 
-`review.py` is implemented (Milestone 5, issues #26/#27); `test_sufficiency.py` and `pr.py`
-remain unimplemented (Milestones 6 and 8, see
-[docs/ROADMAP.md](../../../docs/ROADMAP.md)). Once their real prompts/schemas land, record
-here: the blocking-findings gate's definition and any PR-body byte-budget/truncation rules.
+`review.py` is implemented (Milestone 5, issues #26/#27); `pr.py` remains unimplemented
+(Milestone 8, see [docs/ROADMAP.md](../../../docs/ROADMAP.md)). Once its real prompt/schema
+lands, record here any PR-body byte-budget/truncation rules.
+
+`test_sufficiency.py` is implemented (Milestone 6, issue #59): `TestSufficiencyOutput`/
+`TestArtifact` and `TestSufficiencyStep`, mirroring `review.py`'s split of schema/
+orchestration from prompt construction (`build_test_sufficiency_prompt` lives in
+`code_review.prompt.test_sufficiency`). `TestSufficiencyStep.run` reuses
+`has_blocking_finding`/`action_or_default` (`pipeline/findings.py`) unmodified -- the same
+shared blocking-findings gate `ReviewStep` uses -- but does NOT call
+`filter_pipeline_owned_delivery_findings`; that scope filter is Review-specific (it resets
+a `ReviewOutput`-only `risk_level` field `TestSufficiencyOutput` deliberately does not
+have). Not yet registered in `STEP_REGISTRY`'s `IMPLEMENTED_STEPS` or wired into `cli.py`
+(issue #60) or the TUI (issue #61).
