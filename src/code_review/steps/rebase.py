@@ -108,7 +108,7 @@ from code_review.steps.gitutils import (
 )
 
 
-def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding | None:
+async def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding | None:
     """Build the issue #24 guard's `Finding` if it fires, else `None` -- see module
     docstring's "The unpushed-local-default guard" section for the full scenario and the
     exact two conditions checked below. Must run after a successful `git fetch origin
@@ -116,14 +116,14 @@ def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding |
     current.
     """
 
-    local_tip = ref_sha(f"refs/heads/{default_branch}", cwd)
+    local_tip = await ref_sha(f"refs/heads/{default_branch}", cwd)
     if local_tip is None:
         # No local branch literally named `default_branch` exists here -- nothing to
         # compare, so the guard cannot fire. Not an error: most checkouts, including this
         # module's own test fixture, never create one.
         return None
 
-    origin_tip = ref_sha(f"refs/remotes/origin/{default_branch}", cwd)
+    origin_tip = await ref_sha(f"refs/remotes/origin/{default_branch}", cwd)
     if origin_tip is None:
         # The fetch immediately before this call succeeded, so this should always
         # resolve; treat an unexpected miss the same as "nothing to compare" rather than
@@ -136,24 +136,21 @@ def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding |
         # trivially false.
         return None
 
-    if not is_ancestor(origin_tip, local_tip, cwd):
+    if not await is_ancestor(origin_tip, local_tip, cwd):
         # Local `default_branch` has diverged from (or fallen behind) origin rather than
         # being genuinely ahead of it -- condition 1 fails.
         return None
 
-    if not is_ancestor(local_tip, "HEAD", cwd):
+    if not await is_ancestor(local_tip, "HEAD", cwd):
         # The local tip exists but never made it into HEAD's own history -- condition 2
         # fails. The unpushed commits sit on local `default_branch` only; the branch under
         # review never incorporated them, so there is nothing riding along to warn about.
         return None
 
     commit_range = f"{origin_tip}..{local_tip}"
-    commits = run_git(["log", "--oneline", commit_range], cwd).stdout.strip()
-    files = sorted(
-        line
-        for line in run_git(["diff", "--name-only", commit_range], cwd).stdout.splitlines()
-        if line
-    )
+    commits = (await run_git(["log", "--oneline", commit_range], cwd)).stdout.strip()
+    diff_result = await run_git(["diff", "--name-only", commit_range], cwd)
+    files = sorted(line for line in diff_result.stdout.splitlines() if line)
 
     return Finding(
         severity="error",
@@ -184,7 +181,7 @@ class RebaseStep(Step):
     default_branch: str = "main"
 
     async def run(self, ctx: StepContext) -> StepOutcome:
-        fetch = run_git(["fetch", "origin", self.default_branch], ctx.cwd)
+        fetch = await run_git(["fetch", "origin", self.default_branch], ctx.cwd)
         if fetch.returncode != 0:
             raise RuntimeError(
                 f"git fetch origin {self.default_branch} failed in {ctx.cwd}: "
@@ -194,13 +191,13 @@ class RebaseStep(Step):
         # Issue #24 guard -- must run after fetch (needs a current origin/<default_branch>)
         # and before rebase (must stop cold, no rebase attempted, if it fires). See module
         # docstring's "The unpushed-local-default guard" section.
-        unpushed_finding = _unpushed_local_default_finding(ctx.cwd, self.default_branch)
+        unpushed_finding = await _unpushed_local_default_finding(ctx.cwd, self.default_branch)
         if unpushed_finding is not None:
             return StepOutcome(needs_approval=True, auto_fixable=False, findings=[unpushed_finding])
 
         # One-argument form: rebases current HEAD onto origin/<default_branch> in place.
         # Deliberately not the two-argument form -- see module docstring.
-        rebase = run_git(["rebase", f"origin/{self.default_branch}"], ctx.cwd)
+        rebase = await run_git(["rebase", f"origin/{self.default_branch}"], ctx.cwd)
         if rebase.returncode == 0:
             # Already up to date, or a clean fast-forward/rebase -- no findings, nothing
             # for a human to review here.
@@ -218,11 +215,11 @@ class RebaseStep(Step):
 
         # Read the conflicted paths before aborting -- the unmerged state this reads is
         # gone once `git rebase --abort` completes.
-        conflicts = conflicted_files(ctx.cwd)
+        conflicts = await conflicted_files(ctx.cwd)
 
         # Non-negotiable: the repo must never be left mid-rebase, regardless of what the
         # caller does with the returned findings.
-        abort = run_git(["rebase", "--abort"], ctx.cwd)
+        abort = await run_git(["rebase", "--abort"], ctx.cwd)
         if abort.returncode != 0:
             raise RuntimeError(f"git rebase --abort failed in {ctx.cwd}: {abort.stderr.strip()}")
 
