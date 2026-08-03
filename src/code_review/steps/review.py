@@ -96,6 +96,12 @@ class ReviewStep(Step):
     docs/GLOSSARY.md's "Agent": one call in, one result out; a step that needs more calls
     makes more calls, this one needs exactly one). The fix/approval loop that would act on
     a parked run is Milestone 7's, not this step's.
+
+    The one agent call is wrapped in `ctx.report_activity(...)` (Milestone 14, issue #65)
+    as a single coarse span -- deliberately not finer-grained, since the `Agent` protocol
+    has no progress channel to source anything more granular from (see `run`'s own
+    comment). This is orthogonal to this step's findings/output behavior above; it changes
+    only what the TUI renders while the call is in flight, never what `StepOutcome` carries.
     """
 
     # Subprocess test seam threaded through to `RunOpts.executable` (see `agent/base.py`'s
@@ -109,14 +115,25 @@ class ReviewStep(Step):
     executable: str | Path = "claude"
 
     async def run(self, ctx: StepContext) -> StepOutcome:
-        result = await ctx.agent.run(
-            RunOpts(
-                prompt=build_review_prompt(ctx),
-                cwd=ctx.cwd,
-                output_schema=ReviewOutput,
-                executable=self.executable,
+        # One coarse activity span for the whole call (issue #65) -- not per-tool-call,
+        # per the `Agent` protocol's "one call in, one result out... no streaming"
+        # contract (docs/GLOSSARY.md; see also `docs/ROADMAP.md` milestone 14). The label
+        # is a static "via claude", not `self.executable` interpolated in: that field is a
+        # subprocess test seam (see its own field comment above) that points at a fake CLI
+        # script path in tests, and this label names the production backend the pipeline
+        # actually drives, matching the roadmap's own worked example verbatim. The `async
+        # with` block reports "finished" on every exit path, including `ctx.agent.run`
+        # raising -- see `ActivityRelay.activity`'s docstring -- so a failed call still
+        # leaves its nested line showing a duration instead of stuck mid-tick.
+        async with ctx.report_activity("Agent: reviewing diff via claude"):
+            result = await ctx.agent.run(
+                RunOpts(
+                    prompt=build_review_prompt(ctx),
+                    cwd=ctx.cwd,
+                    output_schema=ReviewOutput,
+                    executable=self.executable,
+                )
             )
-        )
 
         filtered = filter_pipeline_owned_delivery_findings(result.output)
 

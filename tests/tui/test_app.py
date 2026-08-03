@@ -20,8 +20,8 @@ from textual.widgets import Input, Static
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.review import ReviewOutput
-from code_review.tui.activity import ActivityRelay
-from code_review.tui.app import ReviewApp
+from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.app import ReviewApp, _tag_activity_events
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox, render_findings
@@ -492,6 +492,60 @@ def test_review_app_shows_synthetic_activity_events_nested_under_the_running_ste
             app.exit()
 
     asyncio.run(scenario())
+
+
+def test_tag_activity_events_keeps_a_span_with_the_step_that_completed_before_it() -> None:
+    """Issue #65 regression: a real producer (`ReviewStep`) closes its activity right at
+    the tail of `run`, with no further `await` before the next step starts -- so the
+    "finished" `ActivityEvent`'s own timestamp can land *after* its owning step's
+    "completed" `StepEvent` and even after the next step's "running" `StepEvent`, exactly
+    the ordering `run_steps` produces when the executor advances the instant `ReviewStep.
+    run` returns. The old design (tagging each `ActivityEvent` with whichever step
+    `_consume_activities` saw as `self._running_step` live, at dequeue time) mis-attributed
+    that "finished" event to the *next* step, splitting one span's "started"/"finished"
+    pair across two different owners and crashing `state.backfill_activities`' duration
+    lookup (`KeyError`) -- see this module's own docstring paragraph on `activity_relay`.
+    `_tag_activity_events` fixes this by attributing purely from timestamps against each
+    step's own running window, computed fresh from `StepEvent`s already seen."""
+
+    review_started = 10.0
+    review_completed = 10.03  # ReviewStep's "completed" StepEvent.
+    test_sufficiency_started = 10.03  # The very next step starts immediately after.
+
+    seen = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="running",
+            outcome=None,
+            started_at=review_started,
+            duration=None,
+        ),
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=review_started,
+            duration=review_completed - review_started,
+        ),
+        StepEvent(
+            step_name="TestSufficiencyStep",
+            status="running",
+            outcome=None,
+            started_at=test_sufficiency_started,
+            duration=None,
+        ),
+    ]
+    activity_events = [
+        ActivityEvent(1, None, "Agent: reviewing diff via claude", "started", 10.01),
+        # Queued (and would be dequeued) after ReviewStep's own "completed" StepEvent --
+        # the exact ordering that broke the old live-tag design.
+        ActivityEvent(1, None, "Agent: reviewing diff via claude", "finished", 10.031),
+    ]
+
+    tagged = _tag_activity_events(seen, activity_events)
+
+    owners = [owner for owner, _event in tagged]
+    assert owners == ["ReviewStep", "ReviewStep"]
 
 
 def test_review_app_final_render_on_failure_shows_the_broken_step_as_failed() -> None:
