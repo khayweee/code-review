@@ -12,6 +12,12 @@ def test_version_is_set() -> None:
     assert __version__
 
 
+def test_cli_version_flag_prints_version_and_exits_zero() -> None:
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.stdout
+
+
 def test_cli_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0

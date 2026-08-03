@@ -194,6 +194,14 @@ why this design, not the simpler "record the owner once, on `started`" one, was 
 ctx.report_activity("Agent: reviewing diff via claude")`. Milestone 14 (issue #63) is
 closed -- all three sub-issues (#64, #65, #66) and prerequisite #62 are done.
 
+A `code-review --version` flag (`cli.py`'s eager `--version` callback, reading
+`code_review.__version__`) and a version bump (`0.1.0` -> `0.2.0`, both `pyproject.toml`
+and `src/code_review/__init__.py`) were added right after, prompted by a real debugging
+session where a user's `uv tool install`-managed binary kept behaving like a stale build
+after `make install-dev` with no way to confirm which version was actually running --
+`code-review --version` now makes that a one-command check instead of grepping installed
+site-packages for a known-new symbol.
+
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.
 
