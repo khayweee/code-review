@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from io import StringIO
 
+from rich.console import Console
 from textual.pilot import Pilot
 from textual.widgets import Input, Static
 
@@ -24,6 +26,16 @@ from code_review.tui.screens import InputPromptScreen
 from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox, render_findings
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
+
+
+def _pipeline_box_content(box: PipelineBox) -> str:
+    """Render `PipelineBox.content` (a Rich `Table`, see `widgets.py`'s `render_rows_live`)
+    to plain text the same way a real terminal would, so assertions here can keep
+    comparing readable strings instead of a `Table` object."""
+
+    buffer = StringIO()
+    Console(file=buffer, force_terminal=True, width=80, color_system=None).print(box.content)
+    return buffer.getvalue().rstrip()
 
 
 async def _wait_until_done(pilot: Pilot[None], app: ReviewApp) -> None:
@@ -92,7 +104,7 @@ def test_review_app_renders_every_registered_step_as_pending_before_any_event() 
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
-            assert box.content == "○ IntentStep\n○ RebaseStep\n○ ReviewStep"
+            assert _pipeline_box_content(box) == "◌ IntentStep\n◌ RebaseStep\n◌ ReviewStep"
             app.exit()
 
     asyncio.run(scenario())
@@ -106,8 +118,9 @@ def test_review_app_shows_not_yet_implemented_steps_as_pending_throughout_the_ru
             box = app.query_one(PipelineBox)
             # RebaseStep and ReviewStep have no class yet -- they stay pending placeholders
             # for the whole run, even once IntentStep has finished.
-            assert "○ RebaseStep" in box.content
-            assert "○ ReviewStep" in box.content
+            content = _pipeline_box_content(box)
+            assert "◌ RebaseStep" in content
+            assert "◌ ReviewStep" in content
 
     asyncio.run(scenario())
 
@@ -159,7 +172,7 @@ def test_review_app_final_render_shows_intent_step_completed() -> None:
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
             box = app.query_one(PipelineBox)
-            assert "✓ IntentStep" in box.content
+            assert "✔ IntentStep" in _pipeline_box_content(box)
 
     asyncio.run(scenario())
 
@@ -404,9 +417,10 @@ def test_review_app_final_render_on_failure_shows_the_broken_step_as_failed() ->
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
             box = app.query_one(PipelineBox)
-            assert "✓ IntentStep" in box.content
-            assert "✗ RebaseStep" in box.content
+            content = _pipeline_box_content(box)
+            assert "✔ IntentStep" in content
+            assert "✘ RebaseStep" in content
             # ReviewStep never ran -- still a pending placeholder even after the failure.
-            assert "○ ReviewStep" in box.content
+            assert "◌ ReviewStep" in content
 
     asyncio.run(scenario())
