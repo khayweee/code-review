@@ -11,16 +11,6 @@ Takes `registry` and `events` as constructor arguments rather than importing
 backend subprocess relayed via `StepContext.on_input_needed`. See `input_relay.py`'s
 module docstring for why the relay object -- not a live reference to `ReviewApp` itself --
 is what `cli.py` hands to both sides of that seam.
-
-**The app no longer exits itself once `events` is exhausted or raises.** It used to --
-but with today's pipeline being a single near-instant `IntentStep` (Rebase/Review/Test
-sufficiency/PR aren't wired in yet), a real run flashes onto the alternate screen buffer
-and is gone in well under a second, indistinguishable from nothing having happened at all.
-Instead, the run's end (success or failure) is marked `self._done = True`, a Status box
-appears (`widgets.StatusBox`, driven by `state.final_status_message`) naming the outcome,
-and the app waits for the user to press "e" (`action_exit_when_done`, a no-op until
-`self._done`) before actually exiting. This applies equally to a failed run: seeing the
-broken step and the error message on screen matters at least as much as a clean exit does.
 """
 
 from __future__ import annotations
