@@ -20,7 +20,8 @@ from textual.widgets import Input, Static
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.review import ReviewOutput
-from code_review.tui.app import ReviewApp
+from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.app import ReviewApp, _tag_activity_events
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox, render_findings
@@ -407,6 +408,240 @@ def test_review_app_findings_box_shows_the_later_of_two_completed_findings() -> 
             box = app.query_one(FindingsBox)
             assert "second pass finding" in box.content
             assert "first pass finding" not in box.content
+
+    asyncio.run(scenario())
+
+
+def test_review_app_shows_synthetic_activity_events_nested_under_the_running_step() -> None:
+    """Issue #66 end-to-end proof, mirroring `test_review_app_relays_a_queued_input_
+    request_through_a_modal`'s own shape for `InputRelay`: a real `ActivityRelay` fed
+    synthetic `ActivityEvent`s the same way #41 proved `InputRelay`'s queueing contract
+    before any real producer existed -- no `gitutils`/`ReviewStep` involved here, just a
+    hand-built `relay.activity(...)` call standing in for a future real one (#64/#65).
+
+    Proves: the reported activity renders as a nested (indented) line under `RebaseStep`
+    -- the step `ReviewApp._running_step` names at the moment the event arrives -- ticks
+    live while open, and collapses to a completed icon once the `async with` block exits.
+    """
+
+    async def rebase_step_running_forever() -> AsyncIterator[StepEvent]:
+        started = time.monotonic()
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="running",
+            outcome=None,
+            started_at=started,
+            duration=None,
+        )
+        # Never completes -- keeps RebaseStep "running" (and thus the activity's owner)
+        # for the whole test; the test calls `app.exit()` itself once done.
+        await asyncio.Future()
+        yield  # pragma: no cover - unreachable, only makes this an async generator
+
+    async def _fetch_line(pilot: Pilot[None], app: ReviewApp) -> str | None:
+        content = _pipeline_box_content(app.query_one(PipelineBox))
+        return next((line for line in content.splitlines() if "fetch" in line), None)
+
+    async def scenario() -> None:
+        relay = ActivityRelay()
+        app = ReviewApp(REGISTRY, rebase_step_running_forever(), activity_relay=relay)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            async with relay.activity("fetch"):
+                fetch_line: str | None = None
+                for _ in range(20):
+                    fetch_line = await _fetch_line(pilot, app)
+                    if fetch_line is not None:
+                        break
+                    await pilot.pause()
+                    await asyncio.sleep(0.01)
+
+                assert fetch_line is not None
+                # Nested: indented beneath RebaseStep's own line, not a flush-left row of
+                # its own.
+                assert fetch_line.startswith(" ")
+                assert "RebaseStep" in _pipeline_box_content(app.query_one(PipelineBox))
+
+                # Live-ticking: let at least one real 0.25s tick interval pass (see
+                # `app.py`'s `_TICK_INTERVAL`) and confirm the rendered line actually
+                # changed, i.e. the duration is advancing, not frozen.
+                ticked_line = fetch_line
+                for _ in range(60):
+                    await pilot.pause()
+                    await asyncio.sleep(0.02)
+                    ticked_line = await _fetch_line(pilot, app)
+                    if ticked_line != fetch_line:
+                        break
+                assert ticked_line != fetch_line
+
+            # Once the `async with` exits, the activity's "finished" event collapses the
+            # line to a final, completed-status duration.
+            final_line: str | None = None
+            for _ in range(20):
+                final_line = await _fetch_line(pilot, app)
+                if final_line is not None and "✔" in final_line:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+
+            assert final_line is not None
+            assert "✔" in final_line
+            assert final_line.startswith(" ")
+
+            app.exit()
+
+    asyncio.run(scenario())
+
+
+def test_tag_activity_events_keeps_a_span_with_the_step_that_completed_before_it() -> None:
+    """Issue #65 regression: a real producer (`ReviewStep`) closes its activity right at
+    the tail of `run`, with no further `await` before the next step starts -- so the
+    "finished" `ActivityEvent`'s own timestamp can land *after* its owning step's
+    "completed" `StepEvent` and even after the next step's "running" `StepEvent`, exactly
+    the ordering `run_steps` produces when the executor advances the instant `ReviewStep.
+    run` returns. The old design (tagging each `ActivityEvent` with whichever step
+    `_consume_activities` saw as `self._running_step` live, at dequeue time) mis-attributed
+    that "finished" event to the *next* step, splitting one span's "started"/"finished"
+    pair across two different owners and crashing `state.backfill_activities`' duration
+    lookup (`KeyError`) -- see this module's own docstring paragraph on `activity_relay`.
+    `_tag_activity_events` fixes this by attributing purely from timestamps against each
+    step's own running window, computed fresh from `StepEvent`s already seen."""
+
+    review_started = 10.0
+    review_completed = 10.03  # ReviewStep's "completed" StepEvent.
+    test_sufficiency_started = 10.03  # The very next step starts immediately after.
+
+    seen = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="running",
+            outcome=None,
+            started_at=review_started,
+            duration=None,
+        ),
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=review_started,
+            duration=review_completed - review_started,
+        ),
+        StepEvent(
+            step_name="TestSufficiencyStep",
+            status="running",
+            outcome=None,
+            started_at=test_sufficiency_started,
+            duration=None,
+        ),
+    ]
+    activity_events = [
+        ActivityEvent(1, None, "Agent: reviewing diff via claude", "started", 10.01),
+        # Queued (and would be dequeued) after ReviewStep's own "completed" StepEvent --
+        # the exact ordering that broke the old live-tag design.
+        ActivityEvent(1, None, "Agent: reviewing diff via claude", "finished", 10.031),
+    ]
+
+    tagged = _tag_activity_events(seen, activity_events)
+
+    owners = [owner for owner, _event in tagged]
+    assert owners == ["ReviewStep", "ReviewStep"]
+
+
+def test_review_app_keeps_a_finished_activity_under_its_starting_step_across_a_fast_handoff() -> (
+    None
+):
+    """Regression for a real bug issue #64's real `RebaseStep` producer exposed in `#66`'s
+    own consuming code: the app used to tag an `ActivityEvent` with `self._running_step` at
+    receipt time, which -- unlike `_tag_activity_events` (see the test above and `app.py`'s
+    module docstring) -- is not sound, since `_consume_events` and the activity worker are
+    two independently scheduled tasks with no ordering guarantee between them.
+
+    `_consume_events` (driving the `StepEvent` stream) and the activity worker are two
+    independently scheduled tasks. Entering/exiting `relay.activity(...)` never itself
+    suspends (`asyncio.Queue.put` on an unbounded queue returns without a real checkpoint),
+    so both an activity's "started" and "finished" `ActivityEvent`s get queued perfectly
+    synchronously with whatever code enclosed them -- the activity worker only gets a
+    chance to actually drain the queue at the *next* genuine checkpoint (a real `await` that
+    suspends) anywhere in the app. This scenario reproduces the exact gap that bit
+    `RebaseStep` in production: one checkpoint inside the activity's own body (standing in
+    for `run_git`'s real subprocess spawn) lets the worker dequeue "started" while RebaseStep
+    is still the running step, then -- with no further checkpoint -- RebaseStep's "completed"
+    and ReviewStep's "running" `StepEvent`s render before the worker ever gets scheduled
+    again, so by the time it dequeues "finished", `self._running_step` has already become
+    "ReviewStep". `_tag_activity_events`'s timestamp-window attribution (not tied to live
+    scheduling order at all) keeps both halves under RebaseStep regardless.
+    """
+
+    relay = ActivityRelay()
+
+    async def events() -> AsyncIterator[StepEvent]:
+        started = time.monotonic()
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="running",
+            outcome=None,
+            started_at=started,
+            duration=None,
+        )
+
+        async with relay.activity("git rebase origin/main"):
+            # A real checkpoint (stands in for `run_git`'s real subprocess spawn) -- gives
+            # the activity worker its one chance to dequeue "started" while RebaseStep is
+            # still `self._running_step`.
+            await asyncio.sleep(0)
+
+        # Deliberately no checkpoint here, matching production: "finished" was just queued
+        # synchronously, and nothing suspends again until the render calls below return and
+        # this generator is asked for its next item.
+        yield StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=started,
+            duration=0.01,
+        )
+        review_started = time.monotonic()
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="running",
+            outcome=None,
+            started_at=review_started,
+            duration=None,
+        )
+
+        # First real checkpoint since "finished" was queued -- this is where the activity
+        # worker finally gets to run, with `self._running_step` already "ReviewStep".
+        await asyncio.sleep(0.05)
+        yield StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=_OUTCOME,
+            started_at=review_started,
+            duration=0.01,
+        )
+
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, events(), activity_relay=relay)
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+
+            content = _pipeline_box_content(app.query_one(PipelineBox))
+            lines = content.splitlines()
+            rebase_idx = next(i for i, line in enumerate(lines) if "RebaseStep" in line)
+            review_idx = next(i for i, line in enumerate(lines) if "ReviewStep" in line)
+            activity_idx = next(
+                i for i, line in enumerate(lines) if "git rebase origin/main" in line
+            )
+
+            # The activity's line sits under RebaseStep's own row, not ReviewStep's, and
+            # appears exactly once -- not split across both.
+            assert rebase_idx < activity_idx < review_idx
+            assert sum(1 for line in lines if "git rebase origin/main" in line) == 1
+            # Nested and shows a final, completed duration -- not stuck "running" forever
+            # (the old bug's other failure shape, when the split landed the other way).
+            assert lines[activity_idx].startswith(" ")
+            assert "✔" in lines[activity_idx]
 
     asyncio.run(scenario())
 

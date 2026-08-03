@@ -38,3 +38,15 @@ shared blocking-findings gate `ReviewStep` uses -- but does NOT call
 a `ReviewOutput`-only `risk_level` field `TestSufficiencyOutput` deliberately does not
 have). Not yet registered in `STEP_REGISTRY`'s `IMPLEMENTED_STEPS` or wired into `cli.py`
 (issue #60) or the TUI (issue #61).
+
+`gitutils.py`'s `run_git` reports itself as a timed activity (Milestone 14, issue #64) for
+every call it makes, with zero changes at any of `rebase.py`'s own call sites -- it reaches
+the running step's `ActivityReporter` ambiently (`pipeline.step.current_activity_reporter`),
+not through a parameter, since `run_git` has no `StepContext`. Any *new* function added
+here that shells out to `git` inherits this for free by calling `run_git` internally, the
+same way `ref_sha`/`is_ancestor`/`conflicted_files` do now -- do not add a second, parallel
+subprocess-spawning path that bypasses `run_git` (e.g. a raw `asyncio.create_subprocess_exec`
+call elsewhere in this package), or it silently loses both the non-blocking (#62) and
+activity-reporting (#64) guarantees this module exists to centralize. See
+`pipeline/AGENTS.md`'s "Ambient reporting (issue #64)" section for the ContextVar's own
+contract and lifetime.

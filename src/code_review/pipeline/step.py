@@ -21,6 +21,35 @@ thing that makes a backend subprocess reach for it. `cli.py` wires it to a real
 `tui.input_relay.InputRelay.request_input`; tests that don't exercise it can leave it at
 its default `None`.
 
+`ActivityReporter` (issue #66) is the same kind of narrow seam, mirroring the
+`on_input_needed` rule: `pipeline/`/`steps/` depend only on this structural `Protocol`,
+never on `tui/` directly, "without needing a live reference to the TUI itself". It is
+satisfied by `tui.activity.ActivityRelay` (Textual-import-free, see that module's
+docstring) purely structurally -- nothing here imports `tui/`. `StepContext.activity_reporter`
+carries an optional instance of it, and `StepContext.report_activity(label)` is the
+single-line call site a step uses regardless of whether one is attached: `async with
+ctx.report_activity("fetch"): ...`. It reports a second, independent event stream from
+`StepEvent`'s own "running"/"completed" pair -- `StepEvent`/`run_steps` are unchanged by
+this. Issue #65 (`ReviewStep`'s agent call) consumes it explicitly, exactly this way.
+`cli.py` wires it to a real `tui.activity.ActivityRelay` instance.
+
+**Ambient reporting (issue #64)**: `steps/gitutils.py`'s `run_git` also needs to report
+through an `ActivityReporter`, but it takes only `args`/`cwd` -- no `StepContext`, and
+`steps/rebase.py`'s existing call sites (`run_git(["fetch", ...], ctx.cwd)`) must not
+change to thread one through. `current_activity_reporter` below is a module-level
+`contextvars.ContextVar` that carries whichever reporter is in scope for the *currently
+running step*, read directly via `.get()` by any caller that has no `StepContext` of its
+own -- `run_git` is the first, and as of #64 the only, such caller. `executor.run_steps` is
+the sole writer: it `.set()`s this from `ctx.activity_reporter` immediately before each
+`step.run(ctx)` call and `.reset()`s it immediately after, so the ambient value is scoped
+exactly to that one step's execution and never leaks into the next step or a sibling
+`asyncio.Task` (contextvars already copy-on-task-creation; see `tui/activity.py`'s own
+`_current_activity_id` for the analogous nesting mechanism, one layer further in). No
+leading underscore, unlike that one -- this needs to be read from a different package
+(`steps/`), not just within this module. `activity_or_nullcontext` factors out the single
+nullcontext-when-absent branch both `StepContext.report_activity` (explicit reporter) and
+`run_git` (ambient reporter) need, so that branch has exactly one implementation.
+
 `StepOutcome` carries `needs_approval`/`auto_fixable` now so Milestone 7 can act on them
 without a breaking schema change, even though nothing branches on them yet. `findings` is
 typed as `object` rather than the not-yet-built Milestone 5 `Finding`/`Findings` schema
@@ -40,11 +69,13 @@ elapsed time within this process.
 
 from __future__ import annotations
 
+import contextvars
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from code_review.agent import Agent
 
@@ -56,6 +87,47 @@ if TYPE_CHECKING:
     # Intent` field annotation below is a lazy string dataclass never evaluates at
     # runtime -- a type-checking-only import is sufficient and avoids the cycle.
     from code_review.steps.intent import Intent
+
+
+class ActivityReporter(Protocol):
+    """Structural, one-method contract for reporting nested sub-step activity (issue #66).
+
+    Satisfied by `tui.activity.ActivityRelay` purely structurally -- nothing here imports
+    `tui/` (mirrors `on_input_needed`'s own rule; see this module's docstring). A step
+    never calls this directly; it goes through `StepContext.report_activity`, which
+    delegates here when a reporter is attached.
+    """
+
+    def activity(self, label: str) -> AbstractAsyncContextManager[None]:
+        """Report one nested unit of work named `label`, open for as long as the returned
+        async context manager's body runs."""
+        ...
+
+
+# Ambient carrier for the `ActivityReporter` in scope for the currently running step (issue
+# #64) -- see the module docstring's "Ambient reporting (issue #64)" section for the full
+# rationale. `executor.run_steps` is the sole writer; `steps/gitutils.py`'s `run_git` is the
+# sole reader outside this module, via `.get()` directly (it has no `StepContext` to read
+# `activity_reporter` off of).
+current_activity_reporter: contextvars.ContextVar[ActivityReporter | None] = contextvars.ContextVar(
+    "current_activity_reporter", default=None
+)
+
+
+def activity_or_nullcontext(
+    reporter: ActivityReporter | None, label: str
+) -> AbstractAsyncContextManager[None]:
+    """The one nullcontext-when-absent branch shared by every call site that reports an
+    activity through a possibly-absent reporter: `StepContext.report_activity` (explicit,
+    per-step reporter) and `steps/gitutils.py`'s `run_git` (ambient, via the ContextVar
+    above). `reporter.activity(label)` when `reporter` is given, else
+    `contextlib.nullcontext()` -- factored here once so neither call site duplicates the
+    branch.
+    """
+
+    if reporter is None:
+        return nullcontext()
+    return reporter.activity(label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +144,27 @@ class StepContext:
     # consumes this yet -- see the module docstring. `cli.py` wires it to
     # `tui.input_relay.InputRelay.request_input` for interactive runs.
     on_input_needed: Callable[[str], Awaitable[str]] | None = None
+    # Reports nested sub-step activity (issue #66) -- e.g. one `git fetch` call, or one
+    # agent call -- as a second, independent event stream from this run's `StepEvent`
+    # "running"/"completed" pair. `None` (the default, and every test that doesn't
+    # exercise it) means no reporter is attached; a step calls `self.report_activity(label)`
+    # regardless -- see that method below -- so no call site ever needs an `if` branch on
+    # whether one is present. Two consumers: issue #65's `ReviewStep` reads this field
+    # directly (it has a `ctx` in hand); issue #64's `steps/gitutils.py` `run_git` cannot
+    # (no `StepContext` parameter) and instead reads whatever `executor.run_steps` bound
+    # ambiently from this same field -- see the module docstring's "Ambient reporting
+    # (issue #64)" section. `cli.py` wires this field to a real `tui.activity.ActivityRelay`
+    # instance for interactive runs.
+    activity_reporter: ActivityReporter | None = None
+
+    def report_activity(self, label: str) -> AbstractAsyncContextManager[None]:
+        """Single-line call site for a step to report one nested unit of work named
+        `label`: `async with ctx.report_activity("fetch"): ...`. Delegates to
+        `activity_or_nullcontext`, so every call site is this one line with no branching
+        needed regardless of whether a reporter is present.
+        """
+
+        return activity_or_nullcontext(self.activity_reporter, label)
 
 
 @dataclass(frozen=True, slots=True)

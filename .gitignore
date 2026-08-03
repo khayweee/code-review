@@ -28,3 +28,6 @@ htmlcov/
 # Env files
 .env
 .env.*
+
+# Claude Code agent worktrees (session-local, not repo content)
+.claude/worktrees/

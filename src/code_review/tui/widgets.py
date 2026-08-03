@@ -13,6 +13,8 @@ needing a live event stream either way.
 
 from __future__ import annotations
 
+import colorsys
+import time
 from collections.abc import Sequence
 
 from rich.spinner import Spinner
@@ -22,7 +24,7 @@ from textual.widgets import Static
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
-from code_review.tui.state import Status, StepRow
+from code_review.tui.state import ActivityRow, Status, StepRow
 
 # One glyph per status in the deterministic text fallback. The live pipeline view uses
 # a Rich spinner renderable for the running state so it can animate without any manual
@@ -52,10 +54,51 @@ def format_row(row: StepRow) -> str:
     return f"{icon} {row.name}{duration}"
 
 
-def render_rows(rows: Sequence[StepRow]) -> str:
-    """Render every row as one line each, in the order given."""
+def format_activity_row(activity: ActivityRow) -> str:
+    """Render one `ActivityRow` as an indented plain-text line, mirroring `format_row`'s
+    icon/duration conventions -- the two-space indent is what reads as "nested under its
+    owning step" in the plain-text fallback (`render_rows`); `render_rows_live`'s Rich
+    rendering (`_render_activity_row`) achieves the same nesting visually instead."""
 
-    return "\n".join(format_row(row) for row in rows)
+    icon = _STATUS_ICONS[activity.status]
+    duration = "" if activity.duration is None else f"  {format_duration(activity.duration)}"
+    return f"  {icon} {activity.label}{duration}"
+
+
+def render_rows(rows: Sequence[StepRow]) -> str:
+    """Render every row as one line each, in order, with each row's own `activities` (issue
+    #66) rendered as indented lines immediately beneath it."""
+
+    lines = []
+    for row in rows:
+        lines.append(format_row(row))
+        lines.extend(format_activity_row(activity) for activity in row.activities)
+    return "\n".join(lines)
+
+
+def gradient_text(label: str, phase: float) -> Text:
+    """Pure per-character gradient color computation for the running step's name -- a
+    "rendering..." shimmer distinct from the plain text a pending/completed row gets.
+    Factored out of `_render_row` so the actual color math is unit-testable without
+    Textual or timing flakiness (`tui/AGENTS.md`'s pure/impure split convention: this
+    module is otherwise impure, but the color computation itself doesn't need to be).
+
+    Each character gets its own hue stop, cycling once across the label
+    (`index / len(label)`), then the whole cycle is shifted by `phase` -- the caller passes
+    `time.monotonic()` so consecutive repaints visibly move (`PipelineBox` already
+    refreshes at 60fps, so no new timer is needed here, just a phase-aware render). Fixed,
+    high saturation/lightness (`colorsys.hls_to_rgb`) keeps every stop vividly colored
+    rather than washing out toward black or white at the ends of the hue wheel.
+    """
+
+    text = Text()
+    length = max(len(label), 1)
+    for index, char in enumerate(label):
+        hue = (index / length + phase) % 1.0
+        red, green, blue = colorsys.hls_to_rgb(hue, 0.6, 0.85)
+        color = f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
+        text.append(char, style=color)
+    return text
 
 
 def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | Text, Text]:
@@ -70,20 +113,44 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
     same instance across a step's whole "running" lifetime is what lets it actually spin.
     A row that is no longer running has its cached spinner evicted, so a later run of the
     same-named step starts its animation fresh rather than resuming a stale clock.
+
+    A running row's name renders via `gradient_text` (phased by `time.monotonic()` at
+    render time) instead of plain text -- the duration suffix stays plain, appended after,
+    so only the name itself shimmers.
     """
 
     if row.status != "running":
         spinners.pop(row.name, None)
         icon: Spinner | Text = Text(_STATUS_ICONS[row.status])
+        row_text = Text(row.name)
     else:
         icon = spinners.setdefault(row.name, Spinner("moon"))
+        row_text = gradient_text(row.name, phase=time.monotonic())
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
-    row_text = Text(f"{row.name}{duration}")
+    row_text.append(duration)
     return icon, row_text
 
 
+def _render_activity_row(activity: ActivityRow) -> tuple[Text, Text]:
+    """Render one `ActivityRow` as an indented Rich line under its owning step's row.
+
+    Unlike `_render_row`, this never uses a live `Spinner` for a running activity --
+    reusing the plain `_STATUS_ICONS`/`format_duration` conventions (per issue #66's own
+    acceptance criteria) keeps this simple and avoids growing a second per-activity
+    spinner cache; "live" here comes from the duration number itself ticking on
+    `PipelineBox`'s existing 60fps refresh, the same way a `StepRow`'s duration does before
+    this method's icon distinction even matters.
+    """
+
+    icon = Text(f"  {_STATUS_ICONS[activity.status]}")
+    duration = "" if activity.duration is None else f"  {format_duration(activity.duration)}"
+    return icon, Text(f"{activity.label}{duration}")
+
+
 def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> Table:
-    """Render every row as Rich renderables so the running row can animate itself.
+    """Render every row as Rich renderables so the running row can animate itself, with
+    each row's own `activities` (issue #66) rendered as indented lines immediately
+    beneath it via `_render_activity_row`.
 
     `spinners` is the caller's cache (see `_render_row`) -- passed in rather than created
     here so it persists across repeated calls for the same `PipelineBox`.
@@ -92,6 +159,8 @@ def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> T
     table = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
     for row in rows:
         table.add_row(*_render_row(row, spinners))
+        for activity in row.activities:
+            table.add_row(*_render_activity_row(activity))
     return table
 
 

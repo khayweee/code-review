@@ -14,18 +14,22 @@ from io import StringIO
 
 import pytest
 from rich.console import Console
+from rich.spinner import Spinner
 from textual.app import App, ComposeResult
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
-from code_review.tui.state import StepRow
+from code_review.tui.state import ActivityRow, StepRow
 from code_review.tui.widgets import (
     FindingsBox,
     PipelineBox,
     StatusBox,
+    _render_row,
+    format_activity_row,
     format_duration,
     format_finding,
     format_row,
+    gradient_text,
     render_findings,
     render_rows,
 )
@@ -88,6 +92,125 @@ def test_render_rows_renders_one_line_per_row_in_order() -> None:
     ]
 
     assert render_rows(rows) == "✔ IntentStep  0.1s\n◌ RebaseStep"
+
+
+# --- ActivityRow rendering (issue #66) ---------------------------------------------------
+
+
+def test_format_activity_row_is_indented_and_uses_the_same_status_icons() -> None:
+    running = ActivityRow(label="fetch", status="running", duration=1.2)
+    completed = ActivityRow(label="rebase", status="completed", duration=3.4)
+
+    assert format_activity_row(running) == "  ◔ fetch  1.2s"
+    assert format_activity_row(completed) == "  ✔ rebase  3.4s"
+
+
+def test_format_activity_row_omits_duration_when_none() -> None:
+    activity = ActivityRow(label="fetch", status="running", duration=None)
+
+    assert format_activity_row(activity) == "  ◔ fetch"
+
+
+def test_render_rows_nests_each_rows_activities_beneath_it() -> None:
+    rows = [
+        StepRow(
+            name="RebaseStep",
+            status="running",
+            duration=1.5,
+            activities=(
+                ActivityRow(label="fetch", status="completed", duration=0.2),
+                ActivityRow(label="rebase", status="running", duration=1.1),
+            ),
+        ),
+        StepRow(name="ReviewStep", status="pending", duration=None),
+    ]
+
+    assert render_rows(rows) == (
+        "◔ RebaseStep  1.5s\n  ✔ fetch  0.2s\n  ◔ rebase  1.1s\n◌ ReviewStep"
+    )
+
+
+def test_render_rows_a_row_with_no_activities_gets_no_extra_lines() -> None:
+    rows = [StepRow(name="IntentStep", status="completed", duration=0.1)]
+
+    assert render_rows(rows) == "✔ IntentStep  0.1s"
+
+
+# --- gradient_text (animated running-step-name shimmer) ----------------------------------
+
+
+def test_gradient_text_preserves_the_labels_plain_text() -> None:
+    text = gradient_text("RebaseStep", phase=0.0)
+
+    assert text.plain == "RebaseStep"
+
+
+def test_gradient_text_gives_each_character_its_own_colored_span() -> None:
+    text = gradient_text("RebaseStep", phase=0.0)
+
+    assert len(text.spans) == len("RebaseStep")
+    # Not every character ends up the same color -- a real gradient, not a solid fill.
+    colors = {span.style for span in text.spans}
+    assert len(colors) > 1
+
+
+def test_gradient_text_is_phase_aware_so_consecutive_repaints_visibly_move() -> None:
+    """Two different phases must not render identically -- what proves the animation
+    actually depends on its `phase` argument (the caller passes `time.monotonic()`) rather
+    than being a static gradient recomputed for no reason on every repaint."""
+
+    first = gradient_text("RebaseStep", phase=0.0)
+    second = gradient_text("RebaseStep", phase=0.37)
+
+    first_colors = [span.style for span in first.spans]
+    second_colors = [span.style for span in second.spans]
+    assert first_colors != second_colors
+
+
+def test_gradient_text_handles_an_empty_label_without_dividing_by_zero() -> None:
+    text = gradient_text("", phase=0.2)
+
+    assert text.plain == ""
+    assert text.spans == []
+
+
+def test_render_row_gradients_the_name_of_a_running_step_only() -> None:
+    """Distinct from the plain text a pending/completed row gets -- checked directly via
+    `_render_row`'s returned `Text` (`.spans`), the same way `PipelineBox._spinners` is
+    checked directly elsewhere in this file, since a `color_system=None` console capture
+    (`_render_content`) is not a reliable signal for a color-only invariant."""
+
+    spinners: dict[str, Spinner] = {}
+
+    _, running_text = _render_row(
+        StepRow(name="RebaseStep", status="running", duration=1.2), spinners
+    )
+    _, pending_text = _render_row(
+        StepRow(name="RebaseStep", status="pending", duration=None), spinners
+    )
+    _, completed_text = _render_row(
+        StepRow(name="RebaseStep", status="completed", duration=1.2), spinners
+    )
+
+    # The running row's name portion carries per-character color spans...
+    assert len(running_text.spans) == len("RebaseStep")
+    # ...while pending/completed rows render as plain text with no color spans at all.
+    assert pending_text.spans == []
+    assert completed_text.spans == []
+
+
+def test_render_row_keeps_the_duration_suffix_plain_even_while_running() -> None:
+    spinners: dict[str, Spinner] = {}
+
+    _, running_text = _render_row(
+        StepRow(name="RebaseStep", status="running", duration=1.2), spinners
+    )
+
+    assert running_text.plain == "RebaseStep  1.2s"
+    # Every gradient span ends at or before the name/duration boundary -- only the name is
+    # gradiented, the duration suffix stays plain.
+    name_length = len("RebaseStep")
+    assert all(span.end <= name_length for span in running_text.spans)
 
 
 # --- PipelineBox, mounted and driven through Pilot --------------------------------------
@@ -178,6 +301,94 @@ def test_pipeline_box_evicts_a_step_s_spinner_once_it_stops_running() -> None:
     asyncio.run(scenario())
 
     asyncio.run(scenario())
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_box_renders_nested_activity_lines_under_their_owning_row() -> None:
+    async def scenario() -> None:
+        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=1.0)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=1.0,
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.4),),
+                    )
+                ]
+            )
+            await pilot.pause()
+
+            content = _render_content(box.content)
+            lines = content.splitlines()
+            assert any("RebaseStep" in line for line in lines)
+            assert any("fetch" in line and "0.4s" in line for line in lines)
+            # The activity line is indented (nested) beneath the step's own line, not a
+            # flush-left top-level row.
+            fetch_line = next(line for line in lines if "fetch" in line)
+            assert fetch_line.startswith(" ")
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duration() -> None:
+    """Mirrors `test_pipeline_box_update_rows_replaces_the_rendered_content`'s own
+    live-then-final shape, for a nested activity line: a still-running activity's duration
+    changes as `update_rows` is called with a later `now`, and once it reports
+    `status="completed"` the duration stops moving and reflects the activity's own final
+    span -- matching a `StepRow`'s own "elapsed-so-far, then frozen" duration rule."""
+
+    async def scenario() -> None:
+        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=0.0)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=0.2,
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.2),),
+                    )
+                ]
+            )
+            await pilot.pause()
+            assert "0.2s" in _render_content(box.content)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=0.6,
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.6),),
+                    )
+                ]
+            )
+            await pilot.pause()
+            assert "0.6s" in _render_content(box.content)
+
+            box.update_rows(
+                [
+                    StepRow(
+                        name="RebaseStep",
+                        status="running",
+                        duration=5.0,
+                        activities=(ActivityRow(label="fetch", status="completed", duration=0.63),),
+                    )
+                ]
+            )
+            await pilot.pause()
+            content = _render_content(box.content)
+            assert "0.6s" in content
+            assert "✔" in content
 
     asyncio.run(scenario())
 

@@ -161,11 +161,38 @@ producer exists, mirroring #41's own precedent for `InputRelay`), #64 (wires
 individually-timed lines under the Rebase row; blocked by #66), and #65 (wires the same
 helper into `ReviewStep`'s one agent call as a single coarse activity span, deliberately
 not finer-grained per the `Agent` protocol's "no streaming" contract in `docs/GLOSSARY.md`;
-blocked by #66, independent of #64). All three are open, not yet started. Blocked on a
-prerequisite standalone bugfix, #62 (found incidentally while scoping this milestone, same
-pattern as #47 under Milestone 5): `gitutils.run_git` currently blocks the asyncio event
-loop for the duration of every git call, freezing the Pipeline box's elapsed-duration tick
-today.
+blocked by #66, independent of #64). Its prerequisite standalone bugfix, #62 (found
+incidentally while scoping this milestone, same pattern as #47 under Milestone 5) -
+`gitutils.run_git` blocked the asyncio event loop for the duration of every git call,
+freezing the Pipeline box's elapsed-duration tick - is closed: `run_git`/`ref_sha`/
+`is_ancestor`/`conflicted_files` are `async def` via `asyncio.create_subprocess_exec`
+(matching `agent/claude_cli.py`'s own precedent), `rebase_in_progress` stays sync (no
+subprocess call), and `RebaseStep` awaits every call, mechanically. #66 is also closed:
+`tui/activity.py`'s `ActivityRelay`/`ActivityEvent` (Textual-import-free, automatic
+contextvar-based nesting), `pipeline/step.py`'s `ActivityReporter` Protocol and
+`StepContext.activity_reporter`/`report_activity`, `tui/state.py`'s `ActivityRow`/
+`backfill_activities` (folded into `StepRow.activities`/`backfill`), `tui/widgets.py`'s
+nested-line rendering in `PipelineBox`, and the third `_consume_activities` worker plus
+`activity_relay` wiring in `tui/app.py`/`cli.py` are all in place, proven end to end with a
+synthetic reporter (`tests/tui/test_app.py`) exactly as #41 proved `InputRelay`. #64 is
+closed: `steps/gitutils.py`'s `run_git` reports itself as a timed activity for every call it
+makes, with zero changes at `steps/rebase.py`'s own call sites -- it reaches the reporter
+ambiently via `pipeline.step.current_activity_reporter`, a `contextvars.ContextVar`
+`executor.run_steps` binds from `ctx.activity_reporter` around each `step.run(ctx)` call
+(see `pipeline/AGENTS.md`'s "Ambient reporting (issue #64)" section for the full design).
+Wiring in real, fast-finishing producers for the first time also exposed a genuine bug in
+#66's own consumer, `tui/app.py`'s `_consume_activities`: it tagged an activity's
+"started"/"finished" halves independently with `self._running_step` at receipt time, which
+crashed with a `KeyError` (seen against both a real `RebaseStep` run and, independently,
+`ReviewStep`'s own call shape) since that worker and the `StepEvent` worker are separately
+scheduled tasks with no ordering guarantee between them -- fixed by `app.py`'s
+`_tag_activity_events`, which derives ownership purely from `StepEvent` timestamp windows at
+render time rather than from live worker state, so it carries no dependency on scheduling
+order at all (see `tui/AGENTS.md`'s "The `ActivityRelay` seam" section for the full race and
+why this design, not the simpler "record the owner once, on `started`" one, was adopted).
+#65 is also closed: `ReviewStep.run` wraps its one `ctx.agent.run(...)` call in `async with
+ctx.report_activity("Agent: reviewing diff via claude")`. Milestone 14 (issue #63) is
+closed -- all three sub-issues (#64, #65, #66) and prerequisite #62 are done.
 
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.

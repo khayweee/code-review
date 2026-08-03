@@ -44,6 +44,7 @@ from code_review.install_state import state_dir
 from code_review.pipeline import StepContext, StepEvent, run_steps
 from code_review.steps.intent import Intent
 from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_REGISTRY
+from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
 from code_review.tui.input_relay import InputRelay
 
@@ -195,7 +196,11 @@ def _diff_against_head(branch: str) -> str:
 
 
 async def _run_pipeline(
-    branch: str, intent: Intent, agent: ClaudeCLI, relay: InputRelay
+    branch: str,
+    intent: Intent,
+    agent: ClaudeCLI,
+    relay: InputRelay,
+    activity_relay: ActivityRelay | None = None,
 ) -> AsyncIterator[StepEvent]:
     """Build the events `ReviewApp` renders: fetch the diff, then run every implemented
     step against it, in order.
@@ -205,6 +210,11 @@ async def _run_pipeline(
     (`review` below) is already driving the terminal, so a slow `git diff` capture no
     longer delays the TUI's own first paint (all steps "pending"); it only delays that
     first paint from progressing to `IntentStep` actually starting.
+
+    `activity_relay` (issue #66) becomes `ctx.activity_reporter` -- optional, defaulting to
+    `None`, matching `StepContext.activity_reporter`'s own default so existing callers of
+    this generator (e.g. `tests/test_cli_review.py`'s event-loop test) keep working
+    unchanged. `review` below always passes a real one.
     """
     diff = await asyncio.to_thread(_diff_against_head, branch)
     ctx = StepContext(
@@ -213,6 +223,7 @@ async def _run_pipeline(
         diff=diff,
         intent=intent,
         on_input_needed=relay.request_input,
+        activity_reporter=activity_relay,
     )
     steps = [cls() for cls in IMPLEMENTED_STEPS]
     async for event in run_steps(steps, ctx):
@@ -240,9 +251,13 @@ def review(
 
     agent = ClaudeCLI()
     relay = InputRelay()
+    activity_relay = ActivityRelay()
 
     tui_app = ReviewApp(
-        STEP_REGISTRY, _run_pipeline(branch, parsed_intent, agent, relay), input_relay=relay
+        STEP_REGISTRY,
+        _run_pipeline(branch, parsed_intent, agent, relay, activity_relay),
+        input_relay=relay,
+        activity_relay=activity_relay,
     )
     tui_app.run()
     asyncio.run(agent.close())

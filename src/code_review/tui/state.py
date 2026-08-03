@@ -24,6 +24,19 @@ not a `ReviewStep`/agent-call dependency, and fine directionally (`tui` importin
 once a run has finished, so a run's outcome (and the "e" exits now" cue) is what's left on
 screen instead of an app that silently exits itself the instant the last event arrives --
 see `app.py`'s `_render_status` for why that self-exit was removed.
+
+`ActivityRow`/`backfill_activities` (issue #66) are the same kind of pure extraction again,
+for the second, independent activity stream `tui.activity.ActivityRelay` produces:
+`backfill_activities` groups the `(step_name, ActivityEvent)` pairs `app.py`'s activity
+worker has tagged and collected (see `activity.py`'s module docstring for why that tagging,
+not `ActivityRelay` itself, is what assigns an activity to a step) into one `ActivityRow`
+per activity reported under one given step, using the identical "elapsed-while-running,
+final-once-finished" duration rule `backfill` uses for `StepRow`. `backfill` itself now
+attaches each step's own `ActivityRow`s to that `StepRow`'s new `activities` field --
+`tui/widgets.py`'s `PipelineBox` renders them as nested lines under their owning step's row
+regardless of that step's own current status (pending/running/completed/failed), so an
+activity's line -- and its final duration -- stays visible once reported, the same way a
+completed `StepRow` itself stays visible for the rest of the run.
 """
 
 from __future__ import annotations
@@ -34,8 +47,77 @@ from typing import Literal
 
 from code_review.pipeline.step import StepEvent
 from code_review.steps.review import ReviewOutput
+from code_review.tui.activity import ActivityEvent
 
 Status = Literal["pending", "running", "completed", "failed"]
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityRow:
+    """One nested activity line, rendered under its owning step's `StepRow` (see
+    `backfill_activities`). Reuses `Status` (only ever `"running"`/`"completed"` here) so
+    `tui/widgets.py` can render it with the exact same `_STATUS_ICONS`/`format_duration`
+    conventions a `StepRow` uses, rather than a parallel icon/formatting set.
+    """
+
+    label: str
+    status: Status
+    # None only transiently (never actually produced today -- `ActivityRelay.activity`
+    # always queues a "started" event before any "finished" one can exist); elapsed-so-far
+    # while running, the event's own final duration once finished. Mirrors `StepRow.duration`.
+    duration: float | None
+
+
+def backfill_activities(
+    step_name: str, activity_events: Sequence[tuple[str | None, ActivityEvent]], *, now: float
+) -> list[ActivityRow]:
+    """Turn `activity_events` -- `(owning_step_name, ActivityEvent)` pairs, as `app.py`'s
+    `_consume_activities` worker tags and collects them -- into one `ActivityRow` per
+    activity reported under `step_name`, in first-seen order. Pairs tagged with a
+    different step name (or `None`, e.g. an activity that arrived with no step yet marked
+    running) are ignored here -- correlation itself already happened at the tagging site
+    (`app.py`), not in this function.
+
+    Mirrors `backfill`'s own duration rule: an activity with a `"started"` event and no
+    matching `"finished"` one yet reports `now - started_at`; one with both reports the
+    `"finished"` event's own elapsed time, not recomputed against `now`.
+    """
+
+    started_at: dict[int, float] = {}
+    finished_duration: dict[int, float] = {}
+    label_by_id: dict[int, str] = {}
+    order: list[int] = []
+
+    for owner, event in activity_events:
+        if owner != step_name:
+            continue
+        if event.activity_id not in label_by_id:
+            order.append(event.activity_id)
+        label_by_id[event.activity_id] = event.label
+        if event.status == "started":
+            started_at[event.activity_id] = event.timestamp
+        else:
+            finished_duration[event.activity_id] = event.timestamp - started_at[event.activity_id]
+
+    rows = []
+    for activity_id in order:
+        if activity_id in finished_duration:
+            rows.append(
+                ActivityRow(
+                    label=label_by_id[activity_id],
+                    status="completed",
+                    duration=finished_duration[activity_id],
+                )
+            )
+        else:
+            rows.append(
+                ActivityRow(
+                    label=label_by_id[activity_id],
+                    status="running",
+                    duration=now - started_at[activity_id],
+                )
+            )
+    return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +137,11 @@ class StepRow:
     # completed.
     duration: float | None
 
+    # Nested activity lines reported under this step (issue #66), in first-seen order --
+    # `()` for a step with no reported activity (every step today, until #64/#65 land a
+    # real producer). See `backfill_activities`.
+    activities: tuple[ActivityRow, ...] = ()
+
 
 def backfill(
     registry: Sequence[str],
@@ -62,13 +149,17 @@ def backfill(
     *,
     now: float,
     failed_step: str | None = None,
+    activity_events: Sequence[tuple[str | None, ActivityEvent]] = (),
 ) -> list[StepRow]:
     """Turn `events` seen so far into one `StepRow` per `registry` entry, in order.
 
     A registry entry with no event yet is `"pending"`. A `"running"` event with no
     matching `"completed"` event yet is `"running"` (or `"failed"` if its name equals
     `failed_step`), with `duration` computed as `now - started_at`. A `"completed"` event
-    is `"completed"`, with `duration` taken from that event itself.
+    is `"completed"`, with `duration` taken from that event itself. Each row's
+    `activities` comes from `backfill_activities(name, activity_events, now=now)` --
+    `()` when `activity_events` is omitted, so every existing caller/test keeps working
+    unchanged.
     """
 
     started_at_by_step: dict[str, float] = {}
@@ -82,15 +173,28 @@ def backfill(
 
     rows = []
     for name in registry:
+        activities = tuple(backfill_activities(name, activity_events, now=now))
         if name in duration_by_completed_step:
             rows.append(
-                StepRow(name=name, status="completed", duration=duration_by_completed_step[name])
+                StepRow(
+                    name=name,
+                    status="completed",
+                    duration=duration_by_completed_step[name],
+                    activities=activities,
+                )
             )
         elif name in started_at_by_step:
             status: Status = "failed" if name == failed_step else "running"
-            rows.append(StepRow(name=name, status=status, duration=now - started_at_by_step[name]))
+            rows.append(
+                StepRow(
+                    name=name,
+                    status=status,
+                    duration=now - started_at_by_step[name],
+                    activities=activities,
+                )
+            )
         else:
-            rows.append(StepRow(name=name, status="pending", duration=None))
+            rows.append(StepRow(name=name, status="pending", duration=None, activities=activities))
     return rows
 
 
