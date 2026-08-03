@@ -94,6 +94,35 @@ on the milestones before it.
     specced yet, so that layer stays documented here and isn't sliced into a ticket until
     milestone 7 exists. Full PRD and ticket breakdown tracked as a GitHub issue (see
     `AGENTS.md`'s Current milestone line for the live issue numbers).
+14. **Sub-step activity streaming** (`src/code_review/tui/`, `pipeline/`, `steps/gitutils.py`).
+    Milestone 13's Pipeline box shows only a step-level spinner while a step runs — no
+    signal of what it's actually doing. `no-mistakes` has the same gap in its own TUI (a
+    flat step list, current activity computed but never rendered) and studying it surfaces
+    the design lesson worth imitating here: a live sub-step feed, one line per discrete
+    operation, collapsing to a duration once it finishes. The API is not transferable —
+    `no-mistakes` would solve this with a new daemon IPC event type; this project has no
+    daemon (see `GATE-MODEL.md`) and drives its TUI in-process off `run_steps`'s own
+    `AsyncIterator[StepEvent]`, so the mechanism here is a same-process seam instead: a
+    `StepContext` callback a step (or the shared `gitutils.run_git` helper, generically —
+    wrapping that one seam covers every `RebaseStep` git call for free rather than
+    narrating each call site by hand) invokes to report a label, merged into the existing
+    event stream as a new `StepEvent` status. Scoped down from `no-mistakes` in one
+    deliberate way: the `Agent` abstraction's contract is "one call in, one result out...
+    no streaming" (see `docs/GLOSSARY.md`) by design, so an agent-backed step (`ReviewStep`
+    today) can only report one coarse span ("Agent: reviewing diff via claude") — no
+    per-tool-call breakdown, unlike `no-mistakes`'s agent-lifecycle events. Revisiting that
+    invariant for finer granularity is out of scope here, not forgotten. Nesting is modeled
+    in the data shape (an optional parent label) but not exercised by real UI depth yet —
+    today's real steps (a handful of sequential git calls, one opaque agent call) have
+    nothing to nest more than one level deep; deeper nesting is only worth building once a
+    step actually produces it. Blocked on a prerequisite, independent bugfix found while
+    scoping this milestone (same pattern as issue #47 under Milestone 5): `gitutils.run_git`
+    is a blocking `subprocess.run` call made directly from inside an `async def Step.run`,
+    which freezes the whole Textual event loop — including the elapsed-duration tick — for
+    the duration of every git call today. Filed and tracked separately since it is a real
+    bug in already-shipped Milestone 4 code, not new scope, but sub-step ticks cannot render
+    live until it's fixed. Full PRD and ticket breakdown tracked as a GitHub issue (see
+    `AGENTS.md`'s Current milestone line once filed).
 
 ## Module sketch
 
