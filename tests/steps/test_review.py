@@ -1,12 +1,13 @@
-"""Tests for the Review step's schema, intent-conformance clause, deterministic
-pipeline-owned-delivery scope filter (Milestone 5, issue #26), and `ReviewStep` itself
-(issue #27).
+"""Tests for the Review step's schema (`ReviewOutput`, Milestone 5, issue #26) and
+`ReviewStep` itself (issue #27).
 
-The #26 tests above the `ReviewStep` section are pure function/schema tests, matching
-`tests/steps/test_intent.py`'s "pure function tests, nothing mocked" convention -- no
-agent, no subprocess. The `ReviewStep` section below follows
-`tests/pipeline/test_executor.py`'s convention instead: a real temporary git checkout with
-a real diff, the real Milestone 1 `ClaudeCLI` backend, and fake CLI scripts under
+The pure `intent_conformance_clause`/prompt-assembly tests moved to
+`tests/prompt/test_review.py`, and the deterministic pipeline-owned-delivery scope filter's
+tests moved to `tests/pipeline/test_findings.py`, in a later structural refactor alongside
+the functions themselves moving out of this module. What remains here is the schema shape
+(pure, no agent) and `ReviewStep`'s own orchestration tests, which follow
+`tests/pipeline/test_executor.py`'s convention: a real temporary git checkout with a real
+diff, the real Milestone 1 `ClaudeCLI` backend, and fake CLI scripts under
 `tests/pipeline/fakes/` -- no mocking of `Step` or `Agent`.
 """
 
@@ -19,12 +20,7 @@ from pathlib import Path
 from code_review.agent import Agent, ClaudeCLI
 from code_review.pipeline import Step, StepContext, StepEvent, StepOutcome, run_steps
 from code_review.steps.intent import Intent
-from code_review.steps.review import (
-    ReviewOutput,
-    ReviewStep,
-    filter_pipeline_owned_delivery_findings,
-    intent_conformance_clause,
-)
+from code_review.steps.review import ReviewOutput, ReviewStep
 
 # --- ReviewOutput schema shape -----------------------------------------------------------
 
@@ -78,166 +74,6 @@ def test_review_output_requires_risk_level_and_risk_rationale() -> None:
 
     with pytest.raises(ValidationError):
         ReviewOutput.model_validate({"findings": []})
-
-
-# --- intent_conformance_clause -----------------------------------------------------------
-
-
-def test_intent_conformance_clause_is_empty_for_non_explicit_intent() -> None:
-    intent = Intent(summary="inferred from transcript", source="claude", score=0.4)
-
-    assert intent_conformance_clause(intent) == ""
-
-
-def test_intent_conformance_clause_is_present_for_explicit_intent() -> None:
-    intent = Intent(summary="use a queue, not polling", source="explicit", score=1.0)
-
-    clause = intent_conformance_clause(intent)
-
-    assert clause != ""
-
-
-def test_intent_conformance_clause_obligates_ask_user_on_required_criterion_removal() -> None:
-    intent = Intent(summary="use a queue, not polling", source="explicit", score=1.0)
-
-    clause = intent_conformance_clause(intent)
-
-    assert "REQUIRED" in clause
-    assert "ask-user" in clause
-
-
-def test_intent_conformance_clause_obligates_ask_user_on_forbidden_behavior_addition() -> None:
-    intent = Intent(summary="use a queue, not polling", source="explicit", score=1.0)
-
-    clause = intent_conformance_clause(intent)
-
-    assert "FORBIDDEN" in clause
-    assert "ask-user" in clause
-
-
-def test_intent_conformance_clause_applies_even_when_otherwise_risk_clean() -> None:
-    intent = Intent(summary="use a queue, not polling", source="explicit", score=1.0)
-
-    clause = intent_conformance_clause(intent)
-
-    assert "risk-clean" in clause.lower()
-
-
-# --- filter_pipeline_owned_delivery_findings: the deterministic scope filter -------------
-
-
-def _finding(**overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
-        "severity": "warning",
-        "description": "example finding",
-        "action": "ask-user",
-        "review_scope": "source",
-    }
-    base.update(overrides)
-    return base
-
-
-def test_scope_filter_strips_pipeline_owned_delivery_findings() -> None:
-    output = ReviewOutput.model_validate(
-        {
-            "findings": [
-                _finding(review_scope="source"),
-                _finding(review_scope="pipeline-owned-delivery"),
-            ],
-            "risk_level": "low",
-            "risk_rationale": "one source finding, informational",
-        }
-    )
-
-    filtered = filter_pipeline_owned_delivery_findings(output)
-
-    assert len(filtered.findings) == 1
-    assert filtered.findings[0].review_scope == "source"
-
-
-def test_scope_filter_does_not_mutate_the_input_review_output() -> None:
-    output = ReviewOutput.model_validate(
-        {
-            "findings": [_finding(review_scope="pipeline-owned-delivery")],
-            "risk_level": "low",
-            "risk_rationale": "unaffected",
-        }
-    )
-
-    filter_pipeline_owned_delivery_findings(output)
-
-    assert len(output.findings) == 1
-
-
-def test_scope_filter_resets_risk_level_when_pipeline_owned_delivery_findings_are_sole_basis() -> (
-    None
-):
-    """Regression test A (issue #26): the only findings severe enough to justify a
-    medium/high risk_level are pipeline-owned-delivery-scoped. After filtering, the
-    elevated risk level has no remaining basis and must reset to "low" with a rationale
-    that names the reset -- overwritten, not appended, so it never describes a risk level
-    that is no longer returned."""
-
-    output = ReviewOutput.model_validate(
-        {
-            "findings": [
-                _finding(severity="error", review_scope="pipeline-owned-delivery"),
-                _finding(severity="info", review_scope="source"),
-            ],
-            "risk_level": "high",
-            "risk_rationale": "pipeline-generated lockfile diff looked malformed",
-        }
-    )
-
-    filtered = filter_pipeline_owned_delivery_findings(output)
-
-    assert filtered.risk_level == "low"
-    assert filtered.risk_rationale != output.risk_rationale
-    assert "reset" in filtered.risk_rationale.lower()
-    assert len(filtered.findings) == 1
-    assert filtered.findings[0].review_scope == "source"
-
-
-def test_scope_filter_keeps_risk_level_when_a_source_finding_at_the_same_severity_survives() -> (
-    None
-):
-    """Regression test B (issue #26): at least one source-scoped finding at the same
-    severity that justified risk_level survives filtering, so the elevated risk level
-    must NOT be reset -- filtering must not overreach into risk the pipeline-owned
-    findings were never the sole basis for."""
-
-    output = ReviewOutput.model_validate(
-        {
-            "findings": [
-                _finding(severity="error", review_scope="pipeline-owned-delivery"),
-                _finding(severity="error", review_scope="source"),
-            ],
-            "risk_level": "high",
-            "risk_rationale": "both a pipeline artifact and hand-written code look broken",
-        }
-    )
-
-    filtered = filter_pipeline_owned_delivery_findings(output)
-
-    assert filtered.risk_level == "high"
-    assert filtered.risk_rationale == output.risk_rationale
-    assert len(filtered.findings) == 1
-    assert filtered.findings[0].review_scope == "source"
-
-
-def test_scope_filter_leaves_an_already_low_risk_level_untouched() -> None:
-    output = ReviewOutput.model_validate(
-        {
-            "findings": [_finding(severity="error", review_scope="pipeline-owned-delivery")],
-            "risk_level": "low",
-            "risk_rationale": "informational only",
-        }
-    )
-
-    filtered = filter_pipeline_owned_delivery_findings(output)
-
-    assert filtered.risk_level == "low"
-    assert filtered.risk_rationale == "informational only"
 
 
 # --- ReviewStep (issue #27) ---------------------------------------------------------------
@@ -347,9 +183,9 @@ def test_review_step_needs_approval_and_is_not_auto_fixable_on_an_ask_user_findi
 def test_review_step_prompt_includes_intent_conformance_clause_for_explicit_intent(
     tmp_path: Path,
 ) -> None:
-    """Issue #27: `ReviewStep.run` appends `intent_conformance_clause(ctx.intent)` to its
-    prompt when `ctx.intent.source == "explicit"` -- proven by the fake CLI echoing back
-    whether it saw the clause's distinctive opening sentence."""
+    """Issue #27: `ReviewStep.run` appends `intent_conformance_clause(ctx.intent.source)`
+    to its prompt when `ctx.intent.source == "explicit"` -- proven by the fake CLI echoing
+    back whether it saw the clause's distinctive opening sentence."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
@@ -369,7 +205,7 @@ def test_review_step_prompt_omits_intent_conformance_clause_for_non_explicit_int
 ) -> None:
     """Issue #27: the same clause must NOT appear when `ctx.intent.source` is not
     "explicit" -- mirroring `intent_conformance_clause`'s own provenance rule (see
-    `steps/review.py`)."""
+    `code_review.prompt.review`)."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()

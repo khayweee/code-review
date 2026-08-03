@@ -31,6 +31,16 @@ before asserting. The fixed-order regression
 a real on-disk side effect (one fake CLI's marker file, checked by the next one) rather
 than by relabeling — a reordered or dropped step flips or omits an assertion.
 
+`findings.py` (Milestone 5, issue #26) defines `Finding`, `action_or_default`, and
+`has_blocking_finding`. A later structural refactor moved a fourth function here from
+`steps/review.py`: `filter_pipeline_owned_delivery_findings`, the deterministic filter that
+strips pipeline-owned-delivery-scoped findings from a `ReviewStep` answer and resets
+`risk_level` to `"low"` when that was the sole basis for an elevated verdict. It takes a
+`ReviewOutput` (defined in `steps/review.py`) but avoids inverting the `steps/` depends on
+`pipeline/` invariant by importing that type under `TYPE_CHECKING` only -- the same
+narrow, non-circular exception `pipeline/step.py` already uses for `steps.intent.Intent`;
+see this function's own docstring for the exact mechanics.
+
 Once the fix/approval loop (Milestone 7) lands, record here: the fail-safe-default
 regression test name(s) and the bounded-vs-unbounded fix-round asymmetry. Milestone 9
 owns the head-continuity guard's exact comparison rule.

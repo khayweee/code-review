@@ -29,7 +29,7 @@ constructor field with a production-sensible default, overridable by a caller or
 conflict -- a dirty working tree or a bad upstream ref also exits nonzero, and neither
 leaves anything to abort. This module instead reads the same on-disk signal `git status`
 itself reads to print "rebase in progress": whether `.git/rebase-merge` or
-`.git/rebase-apply` exists (see `_rebase_in_progress`). Only when one of those is present
+`.git/rebase-apply` exists (see `gitutils.rebase_in_progress`). Only when one of those is present
 does this step treat the failure as a conflict, list the unmerged paths (`git diff
 --name-only --diff-filter=U`, read *before* aborting -- that state disappears once the
 abort runs), and run `git rebase --abort`. Any other nonzero exit (no such state directory)
@@ -66,7 +66,7 @@ noticing that content, because the ordinary rebase path only ever reasons about
 even exists. The guard closes that blind spot.
 
 It fires only when **both** hold, checked with `git merge-base --is-ancestor` (exit 0 means
-"is an ancestor of, or equal to"; exit 1 means "is not"; see `_is_ancestor`):
+"is an ancestor of, or equal to"; exit 1 means "is not"; see `gitutils.is_ancestor`):
 1. Local `<default_branch>`'s tip is a strict descendant of `origin/<default_branch>`'s tip
    -- i.e. it has commits `origin/<default_branch>` doesn't. Checked as "the two tips
    differ" AND "origin's tip is an ancestor of local's tip" (the second alone would also
@@ -76,7 +76,7 @@ It fires only when **both** hold, checked with `git merge-base --is-ancestor` (e
 
 If no local branch literally named `<default_branch>` exists in `ctx.cwd` at all (the
 common case -- most checkouts, including this module's own `origin_and_checkout` test
-fixture, never create one), `_ref_sha` returns `None` and the guard is a no-op: there is
+fixture, never create one), `gitutils.ref_sha` returns `None` and the guard is a no-op: there is
 nothing to compare, not an error condition. When it fires, `RebaseStep.run` returns
 immediately with `StepOutcome(needs_approval=True, auto_fixable=False)` and exactly *one*
 `Finding` (not one per commit, unlike the conflict-findings loop below) whose `description`
@@ -94,61 +94,18 @@ author's own branch content, not pipeline-generated delivery content.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import Step, StepContext, StepOutcome
-
-
-def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    """Run a `git` subprocess in `cwd`, capturing output as text without raising on a
-    nonzero exit -- callers below inspect `.returncode` themselves, since both a clean
-    success and an expected failure (e.g. a conflicting rebase) are ordinary outcomes
-    here, not exceptional ones."""
-
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-
-
-def _rebase_in_progress(cwd: Path) -> bool:
-    """True if `cwd`'s `.git` shows a paused rebase -- either the merge-based
-    (`rebase-merge`, used by the default rebase backend) or apply-based (`rebase-apply`,
-    used by `--whitespace`/`-am` style rebases) state directory. This is the same on-disk
-    signal `git status` reads to print "rebase in progress", and is what tells a genuine
-    conflict (git paused mid-replay, leaving one of these behind) apart from a rebase that
-    never started at all (e.g. a dirty working tree or a bad upstream ref, neither of which
-    creates either directory) -- see module docstring's "Conflict detection" section.
-    """
-
-    git_dir = cwd / ".git"
-    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
-
-
-def _ref_sha(ref: str, cwd: Path) -> str | None:
-    """Resolve `ref` to a SHA in `cwd`, or `None` if it does not exist. Uses `rev-parse
-    --verify --quiet` so a missing ref (most commonly: no local branch literally named
-    `<default_branch>` in this checkout) is an ordinary "not found" result -- nonzero
-    exit, no stderr noise -- rather than something a caller has to except around.
-    """
-
-    result = _run_git(["rev-parse", "--verify", "--quiet", ref], cwd)
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def _is_ancestor(maybe_ancestor: str, descendant: str, cwd: Path) -> bool:
-    """True if `maybe_ancestor` is `descendant` itself or a commit `descendant` was built
-    on top of, per `git merge-base --is-ancestor`'s own exit-code contract (0 for
-    ancestor-or-equal, 1 for "not an ancestor", >1 for a bad ref -- neither ref passed by
-    this module's callers is ever bad, since both come from a prior successful
-    `_ref_sha`/fetch). Equality counting as "is an ancestor" is exactly right for both call
-    sites in `_unpushed_local_default_finding` -- see their own strictness checks.
-    """
-
-    result = _run_git(["merge-base", "--is-ancestor", maybe_ancestor, descendant], cwd)
-    return result.returncode == 0
+from code_review.steps.gitutils import (
+    conflicted_files,
+    is_ancestor,
+    rebase_in_progress,
+    ref_sha,
+    run_git,
+)
 
 
 def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding | None:
@@ -159,14 +116,14 @@ def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding |
     current.
     """
 
-    local_tip = _ref_sha(f"refs/heads/{default_branch}", cwd)
+    local_tip = ref_sha(f"refs/heads/{default_branch}", cwd)
     if local_tip is None:
         # No local branch literally named `default_branch` exists here -- nothing to
         # compare, so the guard cannot fire. Not an error: most checkouts, including this
         # module's own test fixture, never create one.
         return None
 
-    origin_tip = _ref_sha(f"refs/remotes/origin/{default_branch}", cwd)
+    origin_tip = ref_sha(f"refs/remotes/origin/{default_branch}", cwd)
     if origin_tip is None:
         # The fetch immediately before this call succeeded, so this should always
         # resolve; treat an unexpected miss the same as "nothing to compare" rather than
@@ -179,22 +136,22 @@ def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding |
         # trivially false.
         return None
 
-    if not _is_ancestor(origin_tip, local_tip, cwd):
+    if not is_ancestor(origin_tip, local_tip, cwd):
         # Local `default_branch` has diverged from (or fallen behind) origin rather than
         # being genuinely ahead of it -- condition 1 fails.
         return None
 
-    if not _is_ancestor(local_tip, "HEAD", cwd):
+    if not is_ancestor(local_tip, "HEAD", cwd):
         # The local tip exists but never made it into HEAD's own history -- condition 2
         # fails. The unpushed commits sit on local `default_branch` only; the branch under
         # review never incorporated them, so there is nothing riding along to warn about.
         return None
 
     commit_range = f"{origin_tip}..{local_tip}"
-    commits = _run_git(["log", "--oneline", commit_range], cwd).stdout.strip()
+    commits = run_git(["log", "--oneline", commit_range], cwd).stdout.strip()
     files = sorted(
         line
-        for line in _run_git(["diff", "--name-only", commit_range], cwd).stdout.splitlines()
+        for line in run_git(["diff", "--name-only", commit_range], cwd).stdout.splitlines()
         if line
     )
 
@@ -212,18 +169,6 @@ def _unpushed_local_default_finding(cwd: Path, default_branch: str) -> Finding |
     )
 
 
-def _conflicted_files(cwd: Path) -> list[str]:
-    """Return the sorted list of paths with unresolved merge conflicts, read via `git
-    diff --name-only --diff-filter=U`. Must be called before `git rebase --abort` runs --
-    the unmerged state this reads from disappears once the abort completes. Sorted for a
-    deterministic `Finding` order regardless of the underlying filesystem/git enumeration
-    order.
-    """
-
-    result = _run_git(["diff", "--name-only", "--diff-filter=U"], cwd)
-    return sorted(line for line in result.stdout.splitlines() if line)
-
-
 @dataclass(frozen=True, slots=True)
 class RebaseStep(Step):
     """Syncs `ctx.cwd`'s current branch (HEAD) onto `origin/<default_branch>` before
@@ -239,7 +184,7 @@ class RebaseStep(Step):
     default_branch: str = "main"
 
     async def run(self, ctx: StepContext) -> StepOutcome:
-        fetch = _run_git(["fetch", "origin", self.default_branch], ctx.cwd)
+        fetch = run_git(["fetch", "origin", self.default_branch], ctx.cwd)
         if fetch.returncode != 0:
             raise RuntimeError(
                 f"git fetch origin {self.default_branch} failed in {ctx.cwd}: "
@@ -255,13 +200,13 @@ class RebaseStep(Step):
 
         # One-argument form: rebases current HEAD onto origin/<default_branch> in place.
         # Deliberately not the two-argument form -- see module docstring.
-        rebase = _run_git(["rebase", f"origin/{self.default_branch}"], ctx.cwd)
+        rebase = run_git(["rebase", f"origin/{self.default_branch}"], ctx.cwd)
         if rebase.returncode == 0:
             # Already up to date, or a clean fast-forward/rebase -- no findings, nothing
             # for a human to review here.
             return StepOutcome(needs_approval=False, auto_fixable=False, findings=[])
 
-        if not _rebase_in_progress(ctx.cwd):
+        if not rebase_in_progress(ctx.cwd):
             # Nonzero exit with no paused-rebase state to abort: not a conflict this step
             # knows how to classify (e.g. a dirty working tree, or a bad upstream ref).
             # Re-raise rather than misreport it as a conflict finding -- see module
@@ -273,11 +218,11 @@ class RebaseStep(Step):
 
         # Read the conflicted paths before aborting -- the unmerged state this reads is
         # gone once `git rebase --abort` completes.
-        conflicted_files = _conflicted_files(ctx.cwd)
+        conflicts = conflicted_files(ctx.cwd)
 
         # Non-negotiable: the repo must never be left mid-rebase, regardless of what the
         # caller does with the returned findings.
-        abort = _run_git(["rebase", "--abort"], ctx.cwd)
+        abort = run_git(["rebase", "--abort"], ctx.cwd)
         if abort.returncode != 0:
             raise RuntimeError(f"git rebase --abort failed in {ctx.cwd}: {abort.stderr.strip()}")
 
@@ -291,7 +236,7 @@ class RebaseStep(Step):
                 action="ask-user",
                 review_scope="source",
             )
-            for path in conflicted_files
+            for path in conflicts
         ]
 
         return StepOutcome(needs_approval=True, auto_fixable=False, findings=findings)

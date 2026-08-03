@@ -31,6 +31,9 @@ meaning changes, edit the glossary in the same commit. It owns what words mean;
   executor (fixed step order; fix/approval loop added later).
 - `src/code_review/steps/` — the actual pipeline steps: intent, rebase, review,
   test_sufficiency, pr.
+- `src/code_review/prompt/` — pure prompt-construction helpers (sanitize/wrap/clause
+  builders) used by the steps above; a leaf package depended on by `steps/`, not the
+  reverse.
 - `src/code_review/scm/` — SCM host wrapper (GitHub via the `gh` CLI).
 - `src/code_review/tui/` — live pipeline-progress view (Textual), wired into `cli.py review`.
 - `tests/` — mirrors `src/code_review/` package-for-package.
@@ -193,7 +196,7 @@ repo-specific skill instead of letting the file keep growing.
 ## Nested AGENTS.md convention
 
 Package-scoped `AGENTS.md` + `CLAUDE.md` pairs live under `src/code_review/<package>/`
-(`agent/`, `pipeline/`, `steps/`, `scm/`, `tui/`). `scm/` is still a stub — "no
+(`agent/`, `pipeline/`, `steps/`, `prompt/`, `scm/`, `tui/`). `scm/` is still a stub — "no
 package-specific invariants yet, see root" — because that package isn't built out yet
 (Milestone 8). As a package gains real design decisions, gotchas, or regressions worth
 pinning, add that guidance to its own scoped file rather than growing this root file. The
