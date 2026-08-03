@@ -97,18 +97,18 @@ def test_render_rows_renders_one_line_per_row_in_order() -> None:
 # --- ActivityRow rendering (issue #66) ---------------------------------------------------
 
 
-def test_format_activity_row_is_indented_and_uses_the_same_status_icons() -> None:
+def test_format_activity_row_uses_tree_connectors_and_the_same_status_icons() -> None:
     running = ActivityRow(label="fetch", status="running", duration=1.2)
     completed = ActivityRow(label="rebase", status="completed", duration=3.4)
 
-    assert format_activity_row(running) == "  ◔ fetch  1.2s"
-    assert format_activity_row(completed) == "  ✔ rebase  3.4s"
+    assert format_activity_row(running, is_last=False) == "  ├  ◔ fetch  1.2s"
+    assert format_activity_row(completed, is_last=True) == "  └  ✔ rebase  3.4s"
 
 
 def test_format_activity_row_omits_duration_when_none() -> None:
     activity = ActivityRow(label="fetch", status="running", duration=None)
 
-    assert format_activity_row(activity) == "  ◔ fetch"
+    assert format_activity_row(activity, is_last=True) == "  └  ◔ fetch"
 
 
 def test_render_rows_nests_each_rows_activities_beneath_it() -> None:
@@ -126,7 +126,7 @@ def test_render_rows_nests_each_rows_activities_beneath_it() -> None:
     ]
 
     assert render_rows(rows) == (
-        "◔ RebaseStep  1.5s\n  ✔ fetch  0.2s\n  ◔ rebase  1.1s\n◌ ReviewStep"
+        "◔ RebaseStep  1.5s\n  ├  ✔ fetch  0.2s\n  └  ◔ rebase  1.1s\n◌ ReviewStep"
     )
 
 
@@ -197,6 +197,35 @@ def test_render_row_gradients_the_name_of_a_running_step_only() -> None:
     # ...while pending/completed rows render as plain text with no color spans at all.
     assert pending_text.spans == []
     assert completed_text.spans == []
+
+
+def test_render_row_uses_a_colored_dot_icon_for_completed_and_failed_but_not_pending() -> None:
+    """Distinct from the plain ✔/✘ glyph the deterministic text fallback (`format_row`)
+    uses -- the live pipeline view renders a completed/failed row's icon as a solid dot,
+    colored by status (blue/orange), so status reads at a glance from color rather than
+    glyph shape. Checked directly on the returned icon `Text` (`.style`), not via a printed
+    console capture, for the same reason `gradient_text`'s tests do: color-only invariants
+    aren't reliably recoverable from plain-text output."""
+
+    spinners: dict[str, Spinner] = {}
+
+    completed_icon, _ = _render_row(
+        StepRow(name="IntentStep", status="completed", duration=0.1), spinners
+    )
+    failed_icon, _ = _render_row(
+        StepRow(name="RebaseStep", status="failed", duration=0.1), spinners
+    )
+    pending_icon, _ = _render_row(
+        StepRow(name="ReviewStep", status="pending", duration=None), spinners
+    )
+
+    assert completed_icon.plain == "●"
+    assert completed_icon.style == "#5fafff"
+    assert failed_icon.plain == "●"
+    assert failed_icon.style == "#bb6400"
+    # Pending keeps the plain, uncolored hollow-ring glyph -- only completed/failed dot.
+    assert pending_icon.plain == "◌"
+    assert pending_icon.style == ""
 
 
 def test_render_row_keeps_the_duration_suffix_plain_even_while_running() -> None:

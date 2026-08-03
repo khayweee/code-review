@@ -173,7 +173,7 @@ def test_review_app_final_render_shows_intent_step_completed() -> None:
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
             box = app.query_one(PipelineBox)
-            assert "✔ IntentStep" in _pipeline_box_content(box)
+            assert "● IntentStep" in _pipeline_box_content(box)
 
     asyncio.run(scenario())
 
@@ -653,8 +653,12 @@ def test_review_app_final_render_on_failure_shows_the_broken_step_as_failed() ->
             await _wait_until_done(pilot, app)
             box = app.query_one(PipelineBox)
             content = _pipeline_box_content(box)
-            assert "✔ IntentStep" in content
-            assert "✘ RebaseStep" in content
+            # Completed and failed both render the same "●" dot glyph, colored by status --
+            # `_pipeline_box_content` prints through a `color_system=None` console, so it
+            # can't see that distinction here (`test_widgets.py`'s `_render_row` icon-color
+            # test covers it directly). This only confirms both rows moved off "pending".
+            assert "● IntentStep" in content
+            assert "● RebaseStep" in content
             # ReviewStep never ran -- still a pending placeholder even after the failure.
             assert "◌ ReviewStep" in content
 
