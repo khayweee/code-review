@@ -1,12 +1,18 @@
-"""Tests for `RebaseStep` (Milestone 4, issue #23).
+"""Tests for `RebaseStep`'s own orchestration/guard behavior (Milestone 4, issue #23).
 
 Real-git-repo convention throughout, matching `tests/pipeline/test_executor.py`'s
-docstring: no mocked `git` subprocess call anywhere. `origin_and_checkout` builds two real
-local repos -- one standing in for the remote ("origin", on branch "main"), one the
-checkout under test with `git remote add origin <path-to-origin>` wiring them together --
-mirroring `tests/conftest.py`'s `fake_tool_repo` convention of a real second local repo as
-a fake remote (used there for `uv tool install git+file://...`), just with plain `git`
-instead of `uv`.
+docstring: no mocked `git` subprocess call anywhere. `origin_and_checkout` (shared via
+`tests/steps/conftest.py` with `test_gitutils.py`) builds two real local repos -- one
+standing in for the remote ("origin", on branch "main"), one the checkout under test with
+`git remote add origin <path-to-origin>` wiring them together -- mirroring
+`tests/conftest.py`'s `fake_tool_repo` convention of a real second local repo as a fake
+remote (used there for `uv tool install git+file://...`), just with plain `git` instead of
+`uv`.
+
+Direct unit tests of the shared git-subprocess plumbing itself (`run_git`,
+`rebase_in_progress`, `ref_sha`, `is_ancestor`, `conflicted_files`, now in
+`steps/gitutils.py`) live in `test_gitutils.py`; this file only exercises them indirectly,
+through `RebaseStep.run`'s own guard/orchestration decisions.
 
 `RebaseStep` makes no agent call (see its module docstring), so `_SpyAgent` below -- a
 genuine hand-written `Agent`-protocol implementation, not a mock library stand-in, matching
@@ -28,6 +34,7 @@ from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepContext, StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.rebase import RebaseStep
+from tests.steps.conftest import commit_file
 
 _STAND_IN_INTENT = Intent(summary="add retry logic", source="explicit", score=1.0)
 
@@ -61,37 +68,6 @@ def _init_repo(path: Path) -> None:
     _run_git(["init", "-q"], path)
     _run_git(["config", "user.email", "test@example.com"], path)
     _run_git(["config", "user.name", "Test"], path)
-
-
-def _commit_file(repo: Path, filename: str, content: str, message: str) -> str:
-    """Write `content` to `filename` in `repo`, commit it, and return the new commit SHA."""
-
-    (repo / filename).write_text(content)
-    _run_git(["add", filename], repo)
-    _run_git(["commit", "-q", "-m", message], repo)
-    return _run_git(["rev-parse", "HEAD"], repo).stdout.strip()
-
-
-@pytest.fixture
-def origin_and_checkout(tmp_path: Path) -> tuple[Path, Path]:
-    """Build `origin` (a plain repo standing in for the remote, on branch "main" with one
-    commit) and `checkout` (a second repo with `origin` wired in via `git remote add`,
-    checked out onto its own branch "feature" at the point the two diverge). Individual
-    tests advance one or both branches from here to build their scenario.
-    """
-
-    origin = tmp_path / "origin"
-    _init_repo(origin)
-    _run_git(["checkout", "-q", "-b", "main"], origin)
-    _commit_file(origin, "a.txt", "line-a\n", "initial")
-
-    checkout = tmp_path / "checkout"
-    _init_repo(checkout)
-    _run_git(["remote", "add", "origin", str(origin)], checkout)
-    _run_git(["fetch", "-q", "origin"], checkout)
-    _run_git(["checkout", "-q", "-b", "feature", "origin/main"], checkout)
-
-    return origin, checkout
 
 
 def _ctx(checkout: Path, agent: _SpyAgent) -> StepContext:
@@ -139,9 +115,9 @@ def test_rebase_step_rebases_cleanly_onto_new_origin_commits_with_no_conflict(
     origin, checkout = origin_and_checkout
 
     # origin/main gains a commit touching an unrelated file...
-    origin_sha = _commit_file(origin, "origin_only.txt", "from origin\n", "origin advances")
+    origin_sha = commit_file(origin, "origin_only.txt", "from origin\n", "origin advances")
     # ...and the checkout's own branch has a commit touching a different unrelated file.
-    _commit_file(checkout, "feature_only.txt", "from feature\n", "feature advances")
+    commit_file(checkout, "feature_only.txt", "from feature\n", "feature advances")
 
     agent = _SpyAgent()
     outcome = asyncio.run(RebaseStep().run(_ctx(checkout, agent)))
@@ -172,9 +148,9 @@ def test_rebase_step_aborts_and_reports_a_finding_per_conflicted_file_on_real_co
     origin, checkout = origin_and_checkout
 
     # origin/main changes the same line...
-    _commit_file(origin, "a.txt", "line-a-from-origin\n", "origin changes a.txt")
+    commit_file(origin, "a.txt", "line-a-from-origin\n", "origin changes a.txt")
     # ...that the checkout's branch changes differently.
-    _commit_file(checkout, "a.txt", "line-a-from-feature\n", "feature changes a.txt")
+    commit_file(checkout, "a.txt", "line-a-from-feature\n", "feature changes a.txt")
 
     agent = _SpyAgent()
     outcome = asyncio.run(RebaseStep().run(_ctx(checkout, agent)))
@@ -213,7 +189,7 @@ def test_rebase_step_raises_rather_than_misclassify_a_dirty_working_tree_as_a_co
     module docstring's "Conflict detection" section)."""
 
     origin, checkout = origin_and_checkout
-    _commit_file(origin, "a.txt", "line-a-from-origin\n", "origin changes a.txt")
+    commit_file(origin, "a.txt", "line-a-from-origin\n", "origin changes a.txt")
 
     # Uncommitted, unstaged change to a tracked file -- git refuses to start a rebase.
     (checkout / "a.txt").write_text("locally dirtied, never committed\n")
@@ -247,7 +223,7 @@ def test_rebase_step_blocks_when_local_default_branch_carries_unpushed_commits_i
     # Local `main`, branched from origin/main, gains a commit the developer never pushed.
     _run_git(["branch", "main", "origin/main"], checkout)
     _run_git(["checkout", "-q", "main"], checkout)
-    local_only_sha = _commit_file(
+    local_only_sha = commit_file(
         checkout, "local_main_only.txt", "unpushed\n", "add local-main-only file"
     )
 
@@ -305,8 +281,8 @@ def test_rebase_step_does_not_block_and_rebases_normally_when_no_local_default_b
         != 0
     )
 
-    origin_sha = _commit_file(origin, "origin_only.txt", "from origin\n", "origin advances")
-    _commit_file(checkout, "feature_only.txt", "from feature\n", "feature advances")
+    origin_sha = commit_file(origin, "origin_only.txt", "from origin\n", "origin advances")
+    commit_file(checkout, "feature_only.txt", "from feature\n", "feature advances")
 
     agent = _SpyAgent()
     outcome = asyncio.run(RebaseStep().run(_ctx(checkout, agent)))
@@ -361,7 +337,7 @@ def test_rebase_step_does_not_block_when_local_default_branch_is_ahead_but_not_i
     origin, checkout = origin_and_checkout
     _run_git(["branch", "main", "origin/main"], checkout)
     _run_git(["checkout", "-q", "main"], checkout)
-    _commit_file(checkout, "local_main_only.txt", "unpushed\n", "add local-main-only file")
+    commit_file(checkout, "local_main_only.txt", "unpushed\n", "add local-main-only file")
     _run_git(["checkout", "-q", "feature"], checkout)
 
     agent = _SpyAgent()
@@ -387,7 +363,7 @@ def test_rebase_step_default_branch_is_overridable_for_a_non_main_default(
     origin = tmp_path / "origin"
     _init_repo(origin)
     _run_git(["checkout", "-q", "-b", "trunk"], origin)
-    _commit_file(origin, "a.txt", "line-a\n", "initial")
+    commit_file(origin, "a.txt", "line-a\n", "initial")
 
     checkout = tmp_path / "checkout"
     _init_repo(checkout)
