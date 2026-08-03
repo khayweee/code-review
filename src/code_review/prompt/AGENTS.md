@@ -29,5 +29,16 @@ sanitization runs -- see the module docstring for the regression this pins again
 prompt assembly used by `ReviewStep`. `build_review_prompt` calls `wrap_intent` from
 `intent.py` above and appends the clause only when it is non-empty.
 
-Once test-sufficiency's and PR's own prompt builders land (Milestones 6 and 8), record
-here whether they get their own modules in this package or share `review.py`.
+## `test_sufficiency.py`
+
+`build_test_sufficiency_prompt(ctx)` and its guardrail-clause constants (Milestone 6,
+issue #59): the decision-ladder text plus the not-sufficient-evidence/complete-suite-
+prohibition/test-quality-rule clauses used by `TestSufficiencyStep`. Got its own module
+rather than sharing `review.py`, because none of this guardrail text branches on intent
+provenance the way `intent_conformance_clause` does -- there is no per-provenance clause
+here to keep separate from an always-present one, so folding it into `review.py` would
+have bought nothing and made that module's one conditional clause harder to spot among
+several unconditional ones.
+
+Once PR's own prompt builder lands (Milestone 8), record here whether it gets its own
+module in this package or shares one of the above.
