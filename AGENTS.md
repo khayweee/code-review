@@ -137,6 +137,20 @@ pure `backfill`, `tui/widgets.py`'s `PipelineBox`, `tui/app.py`'s `ReviewApp`,
 screenshot waits on Milestone 7's approval loop, which isn't specced yet, and stays
 documented in `docs/ROADMAP.md` rather than sliced into a ticket until then.
 
+Milestone 6 (`src/code_review/steps/test_sufficiency.py`, single-pass test-sufficiency
+assessment) is specced as #58, sliced into #59 (schema, prompt, `TestSufficiencyStep`
+itself), #60 (wiring into `steps/registry.py`'s `IMPLEMENTED_STEPS`/`cli.py`, blocked by
+#59), and #61 (TUI display, blocked by #59; most useful once #60 also lands). #59's
+`TestSufficiencyOutput`/`TestArtifact` (`steps/test_sufficiency.py`),
+`build_test_sufficiency_prompt` (`prompt/test_sufficiency.py`), and `TestSufficiencyStep`
+itself are implemented on branch `feature/59-test-sufficiency-schema-step`, not yet
+merged. Per #58's Implementation
+Decisions, `TestSufficiencyStep` reuses `has_blocking_finding`/`action_or_default`
+unmodified but does not call the Review-specific `filter_pipeline_owned_delivery_findings`,
+and a shared test-quality-rule constant across the two steps' prompts is explicitly
+deferred. Not yet registered in `IMPLEMENTED_STEPS` or wired into `cli.py` (#60) or shown
+in the TUI (#61).
+
 Keep this line current - it's exactly the kind of fact this file's living-document policy
 expects to be edited on every session that moves the project forward.
 

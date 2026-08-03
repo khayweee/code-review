@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Fake Claude CLI returning a real `TestSufficiencyOutput`-shaped answer (issue #59): only
+"info"/"no-op" findings, alongside a full `tested`/`testing_summary`/`artifacts` payload --
+proving `TestSufficiencyStep` reports `needs_approval=False` when nothing resolves to
+"ask-user".
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+sys.stdin.read()  # drain the prompt; this fixture's answer doesn't depend on its contents
+
+response = {
+    "structured_output": {
+        "findings": [
+            {
+                "severity": "info",
+                "description": "test naming could be more descriptive",
+                "action": "no-op",
+                "review_scope": "source",
+            }
+        ],
+        "tested": ["greeting message includes the new line"],
+        "testing_summary": "Existing test suite already covers the changed behavior.",
+        "artifacts": [
+            {
+                "kind": "existing-test",
+                "description": "test_greeting_includes_world exercises the new line",
+                "location": "tests/test_greeting.py:12",
+            }
+        ],
+    }
+}
+print(json.dumps(response))
