@@ -10,8 +10,10 @@ mounted in a minimal `App` and driven through `run_test()` to prove `update_rows
 from __future__ import annotations
 
 import asyncio
+from io import StringIO
 
 import pytest
+from rich.console import Console
 from textual.app import App, ComposeResult
 
 from code_review.pipeline.findings import Finding
@@ -28,6 +30,13 @@ from code_review.tui.widgets import (
     render_rows,
 )
 
+
+def _render_content(renderable: object) -> str:
+    buffer = StringIO()
+    console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
+    console.print(renderable)
+    return buffer.getvalue().rstrip()
+
 # --- pure formatting -------------------------------------------------------------------
 
 
@@ -43,7 +52,7 @@ def test_format_duration_renders_minute_and_above_as_mm_ss() -> None:
 
 @pytest.mark.parametrize(
     ("status", "icon"),
-    [("pending", "○"), ("running", "◐"), ("completed", "✓"), ("failed", "✗")],
+    [("pending", "◌"), ("completed", "✔"), ("failed", "✘")],
 )
 def test_format_row_uses_a_distinct_icon_per_status(status: str, icon: str) -> None:
     row = StepRow(name="IntentStep", status=status, duration=None)  # type: ignore[arg-type]
@@ -51,18 +60,24 @@ def test_format_row_uses_a_distinct_icon_per_status(status: str, icon: str) -> N
     assert format_row(row).startswith(icon)
 
 
+def test_format_row_uses_a_fallback_icon_for_running_status() -> None:
+    row = StepRow(name="IntentStep", status="running", duration=1.2)
+
+    assert format_row(row).startswith("◔")
+
+
 def test_format_row_omits_duration_while_pending() -> None:
     row = StepRow(name="IntentStep", status="pending", duration=None)
 
-    assert format_row(row) == "○ IntentStep"
+    assert format_row(row) == "◌ IntentStep"
 
 
 def test_format_row_includes_duration_once_running_or_completed() -> None:
     running = StepRow(name="IntentStep", status="running", duration=1.2)
     completed = StepRow(name="IntentStep", status="completed", duration=3.4)
 
-    assert format_row(running) == "◐ IntentStep  1.2s"
-    assert format_row(completed) == "✓ IntentStep  3.4s"
+    assert format_row(running) == "◔ IntentStep  1.2s"
+    assert format_row(completed) == "✔ IntentStep  3.4s"
 
 
 def test_render_rows_renders_one_line_per_row_in_order() -> None:
@@ -71,7 +86,7 @@ def test_render_rows_renders_one_line_per_row_in_order() -> None:
         StepRow(name="RebaseStep", status="pending", duration=None),
     ]
 
-    assert render_rows(rows) == "✓ IntentStep  0.1s\n○ RebaseStep"
+    assert render_rows(rows) == "✔ IntentStep  0.1s\n◌ RebaseStep"
 
 
 # --- PipelineBox, mounted and driven through Pilot --------------------------------------
@@ -95,7 +110,7 @@ def test_pipeline_box_renders_its_initial_rows_on_mount() -> None:
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
-            assert box.content == "○ IntentStep"
+            assert _render_content(box.content) == "◌ IntentStep"
 
     asyncio.run(scenario())
 
@@ -110,7 +125,9 @@ def test_pipeline_box_update_rows_replaces_the_rendered_content() -> None:
             box.update_rows([StepRow(name="IntentStep", status="running", duration=0.5)])
             await pilot.pause()
 
-            assert box.content == "◐ IntentStep  0.5s"
+            content = _render_content(box.content)
+            assert "IntentStep" in content
+            assert any(frame in content for frame in ("🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"))
 
     asyncio.run(scenario())
 
