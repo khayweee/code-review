@@ -160,8 +160,7 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
         spinners.pop(row.name, None)
         dot_style = _STATUS_DOT_STYLES.get(row.status)
         icon: Spinner | Text = (
-            Text(_DOT_ICON, style=dot_style) if dot_style else Text(
-                _STATUS_ICONS[row.status])
+            Text(_DOT_ICON, style=dot_style) if dot_style else Text(_STATUS_ICONS[row.status])
         )
         row_text = Text(row.name)
     else:
@@ -206,10 +205,12 @@ def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> G
 
         last_index = len(row.activities) - 1
         for index, activity in enumerate(row.activities):
-            renderables.append(Text(
-                format_activity_row(activity, is_last=index == last_index),
-                style=_ACTIVITY_STYLE,
-            ))
+            renderables.append(
+                Text(
+                    format_activity_row(activity, is_last=index == last_index),
+                    style=_ACTIVITY_STYLE,
+                )
+            )
     return Group(*renderables)
 
 
@@ -250,9 +251,9 @@ class PipelineBox(_BorderedBox):
         self.border_title = "Pipeline"
 
     def on_mount(self) -> None:
-        self.set_interval(1 / 60, self._animate)
+        self.set_interval(1 / 60, self._animate_shimmer)
 
-    def _animate(self) -> None:
+    def _animate_shimmer(self) -> None:
         """Re-run `render_rows_live` every tick, not just `self.refresh()` -- `refresh()`
         alone only repaints whatever renderable is already stored, it does not call
         `gradient_text` again. A running row's shimmer color spans get baked into a plain
@@ -263,6 +264,11 @@ class PipelineBox(_BorderedBox):
         itself on every repaint, but a `Text`'s spans are static once built. `layout=False`
         since this recompute never changes row count/line length, only per-character
         color, so the layout pass every real `update_rows` does would be wasted work here.
+
+        Named `_animate_shimmer`, not `_animate` -- `Widget` already defines a private
+        `_animate: BoundAnimator | None` attribute for its own animation system, and
+        shadowing it with a same-named method broke mypy (`[override]`) with an unrelated
+        signature.
         """
 
         self.update(render_rows_live(self._rows, self._spinners), layout=False)

@@ -37,8 +37,7 @@ from code_review.tui.widgets import (
 
 def _render_content(renderable: object) -> str:
     buffer = StringIO()
-    console = Console(file=buffer, force_terminal=True,
-                      width=80, color_system=None)
+    console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
     console.print(renderable)
     return buffer.getvalue().rstrip()
 
@@ -61,8 +60,7 @@ def test_format_duration_renders_minute_and_above_as_mm_ss() -> None:
     [("pending", "◌"), ("completed", "✔"), ("failed", "✘")],
 )
 def test_format_row_uses_a_distinct_icon_per_status(status: str, icon: str) -> None:
-    row = StepRow(name="IntentStep", status=status,
-                  duration=None)  # type: ignore[arg-type]
+    row = StepRow(name="IntentStep", status=status, duration=None)  # type: ignore[arg-type]
 
     assert format_row(row).startswith(icon)
 
@@ -104,8 +102,7 @@ def test_format_activity_row_uses_tree_connectors_and_the_same_status_icons() ->
     completed = ActivityRow(label="rebase", status="completed", duration=3.4)
 
     assert format_activity_row(running, is_last=False) == "  ├  ◔ fetch  1.2s"
-    assert format_activity_row(
-        completed, is_last=True) == "  └  ✔ rebase  3.4s"
+    assert format_activity_row(completed, is_last=True) == "  └  ✔ rebase  3.4s"
 
 
 def test_format_activity_row_omits_duration_when_none() -> None:
@@ -262,8 +259,7 @@ class _HostApp(App[None]):
 
 def test_pipeline_box_renders_its_initial_rows_on_mount() -> None:
     async def scenario() -> None:
-        app = _HostApp(
-            [StepRow(name="IntentStep", status="pending", duration=None)])
+        app = _HostApp([StepRow(name="IntentStep", status="pending", duration=None)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
@@ -274,14 +270,12 @@ def test_pipeline_box_renders_its_initial_rows_on_mount() -> None:
 
 def test_pipeline_box_update_rows_replaces_the_rendered_content() -> None:
     async def scenario() -> None:
-        app = _HostApp(
-            [StepRow(name="IntentStep", status="pending", duration=None)])
+        app = _HostApp([StepRow(name="IntentStep", status="pending", duration=None)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
 
-            box.update_rows(
-                [StepRow(name="IntentStep", status="running", duration=0.5)])
+            box.update_rows([StepRow(name="IntentStep", status="running", duration=0.5)])
             await pilot.pause()
 
             content = _render_content(box.content)
@@ -306,15 +300,13 @@ def test_pipeline_box_reuses_the_same_spinner_instance_while_a_step_keeps_runnin
     """
 
     async def scenario() -> None:
-        app = _HostApp(
-            [StepRow(name="IntentStep", status="running", duration=0.0)])
+        app = _HostApp([StepRow(name="IntentStep", status="running", duration=0.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
             first_spinner = box._spinners["IntentStep"]
 
-            box.update_rows(
-                [StepRow(name="IntentStep", status="running", duration=0.3)])
+            box.update_rows([StepRow(name="IntentStep", status="running", duration=0.3)])
             await pilot.pause()
 
             assert box._spinners["IntentStep"] is first_spinner
@@ -324,15 +316,13 @@ def test_pipeline_box_reuses_the_same_spinner_instance_while_a_step_keeps_runnin
 
 def test_pipeline_box_evicts_a_step_s_spinner_once_it_stops_running() -> None:
     async def scenario() -> None:
-        app = _HostApp(
-            [StepRow(name="IntentStep", status="running", duration=0.0)])
+        app = _HostApp([StepRow(name="IntentStep", status="running", duration=0.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
             assert "IntentStep" in box._spinners
 
-            box.update_rows(
-                [StepRow(name="IntentStep", status="completed", duration=0.3)])
+            box.update_rows([StepRow(name="IntentStep", status="completed", duration=0.3)])
             await pilot.pause()
 
             assert "IntentStep" not in box._spinners
@@ -346,8 +336,7 @@ def test_pipeline_box_evicts_a_step_s_spinner_once_it_stops_running() -> None:
 
 def test_pipeline_box_renders_nested_activity_lines_under_their_owning_row() -> None:
     async def scenario() -> None:
-        app = _HostApp(
-            [StepRow(name="RebaseStep", status="running", duration=1.0)])
+        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=1.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
@@ -358,8 +347,7 @@ def test_pipeline_box_renders_nested_activity_lines_under_their_owning_row() -> 
                         name="RebaseStep",
                         status="running",
                         duration=1.0,
-                        activities=(ActivityRow(label="fetch",
-                                    status="running", duration=0.4),),
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.4),),
                     )
                 ]
             )
@@ -385,8 +373,7 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
     span -- matching a `StepRow`'s own "elapsed-so-far, then frozen" duration rule."""
 
     async def scenario() -> None:
-        app = _HostApp(
-            [StepRow(name="RebaseStep", status="running", duration=0.0)])
+        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=0.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
@@ -397,8 +384,7 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
                         name="RebaseStep",
                         status="running",
                         duration=0.2,
-                        activities=(ActivityRow(label="fetch",
-                                    status="running", duration=0.2),),
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.2),),
                     )
                 ]
             )
@@ -411,8 +397,7 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
                         name="RebaseStep",
                         status="running",
                         duration=0.6,
-                        activities=(ActivityRow(label="fetch",
-                                    status="running", duration=0.6),),
+                        activities=(ActivityRow(label="fetch", status="running", duration=0.6),),
                     )
                 ]
             )
@@ -425,8 +410,7 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
                         name="RebaseStep",
                         status="running",
                         duration=5.0,
-                        activities=(ActivityRow(label="fetch",
-                                    status="completed", duration=0.63),),
+                        activities=(ActivityRow(label="fetch", status="completed", duration=0.63),),
                     )
                 ]
             )
@@ -453,8 +437,7 @@ def test_pipeline_box_has_a_pipeline_border_title() -> None:
 
 
 def test_format_finding_omits_location_when_none() -> None:
-    finding = Finding(severity="warning",
-                      description="missing null check", review_scope="source")
+    finding = Finding(severity="warning", description="missing null check", review_scope="source")
 
     assert format_finding(finding) == "warning: missing null check"
 
@@ -481,10 +464,8 @@ def test_render_findings_lists_each_finding_and_a_severity_count_summary() -> No
                 review_scope="source",
                 location="steps/review.py:42",
             ),
-            Finding(severity="warning",
-                    description="unclear variable name", review_scope="source"),
-            Finding(severity="info", description="consider a docstring",
-                    review_scope="source"),
+            Finding(severity="warning", description="unclear variable name", review_scope="source"),
+            Finding(severity="info", description="consider a docstring", review_scope="source"),
         ],
         risk_level="high",
         risk_rationale="removes retry backoff",
@@ -501,8 +482,7 @@ def test_render_findings_lists_each_finding_and_a_severity_count_summary() -> No
 
 def test_render_findings_summary_counts_zero_severities_not_seen() -> None:
     output = ReviewOutput(
-        findings=[
-            Finding(severity="info", description="minor style nit", review_scope="source")],
+        findings=[Finding(severity="info", description="minor style nit", review_scope="source")],
         risk_level="low",
         risk_rationale="fine",
     )
@@ -529,8 +509,7 @@ def test_findings_box_renders_its_initial_findings_on_mount() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning",
-                        description="unclear naming", review_scope="source")
+                Finding(severity="warning", description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -547,8 +526,7 @@ def test_findings_box_renders_its_initial_findings_on_mount() -> None:
 def test_findings_box_update_findings_replaces_the_rendered_content() -> None:
     async def scenario() -> None:
         initial = ReviewOutput(
-            findings=[
-                Finding(severity="info", description="first", review_scope="source")],
+            findings=[Finding(severity="info", description="first", review_scope="source")],
             risk_level="low",
             risk_rationale="fine",
         )
@@ -558,8 +536,7 @@ def test_findings_box_update_findings_replaces_the_rendered_content() -> None:
             box = app.query_one(FindingsBox)
 
             updated = ReviewOutput(
-                findings=[
-                    Finding(severity="error", description="second", review_scope="source")],
+                findings=[Finding(severity="error", description="second", review_scope="source")],
                 risk_level="high",
                 risk_rationale="bad",
             )
@@ -573,8 +550,7 @@ def test_findings_box_update_findings_replaces_the_rendered_content() -> None:
 
 def test_findings_box_has_a_findings_border_title() -> None:
     async def scenario() -> None:
-        output = ReviewOutput(
-            findings=[], risk_level="low", risk_rationale="fine")
+        output = ReviewOutput(findings=[], risk_level="low", risk_rationale="fine")
         app = _FindingsHostApp(output)
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -601,8 +577,7 @@ class _StatusHostApp(App[None]):
 
 def test_status_box_renders_its_initial_message_on_mount() -> None:
     async def scenario() -> None:
-        app = _StatusHostApp(
-            "Pipeline ran successfully.\n\nPress 'e' to exit.")
+        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(StatusBox)
@@ -613,8 +588,7 @@ def test_status_box_renders_its_initial_message_on_mount() -> None:
 
 def test_status_box_update_status_replaces_the_rendered_content() -> None:
     async def scenario() -> None:
-        app = _StatusHostApp(
-            "Pipeline ran successfully.\n\nPress 'e' to exit.")
+        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(StatusBox)
@@ -629,8 +603,7 @@ def test_status_box_update_status_replaces_the_rendered_content() -> None:
 
 def test_status_box_has_a_status_border_title() -> None:
     async def scenario() -> None:
-        app = _StatusHostApp(
-            "Pipeline ran successfully.\n\nPress 'e' to exit.")
+        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(StatusBox)

@@ -34,8 +34,7 @@ from code_review.tui.app import ReviewApp
 # whole preview run finishes in a few seconds.
 _STEP_DELAY = 3.6
 
-_NO_FINDINGS = StepOutcome(
-    needs_approval=False, auto_fixable=False, findings=None)
+_NO_FINDINGS = StepOutcome(needs_approval=False, auto_fixable=False, findings=None)
 
 _REVIEW_FINDINGS = StepOutcome(
     needs_approval=True,
@@ -89,13 +88,14 @@ async def _fake_events(fail: bool, activity_relay: ActivityRelay) -> AsyncIterat
             [("git fetch origin", 0.5), ("git rebase origin/main", 0.5)],
         ),
         ("ReviewStep", _REVIEW_FINDINGS, [("claude review call", 1.0)]),
-        ("TestSufficiencyStep", _NO_FINDINGS, [
-         ("claude test-sufficiency call", 0.7)]),
+        ("TestSufficiencyStep", _NO_FINDINGS, [("claude test-sufficiency call", 0.7)]),
     ]
 
     for name, outcome, activities in steps:
         started = time.monotonic()
-        yield StepEvent(step_name=name, status="running", outcome=None, started_at=started, duration=None)
+        yield StepEvent(
+            step_name=name, status="running", outcome=None, started_at=started, duration=None
+        )
 
         if activities:
             for label, delay in activities:
@@ -105,8 +105,7 @@ async def _fake_events(fail: bool, activity_relay: ActivityRelay) -> AsyncIterat
             await asyncio.sleep(_STEP_DELAY)
 
         if fail and name == "ReviewStep":
-            raise RuntimeError(
-                "preview: simulated ReviewStep failure (--fail)")
+            raise RuntimeError("preview: simulated ReviewStep failure (--fail)")
 
         yield StepEvent(
             step_name=name,
@@ -120,7 +119,9 @@ async def _fake_events(fail: bool, activity_relay: ActivityRelay) -> AsyncIterat
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--fail", action="store_true", help="Simulate ReviewStep raising, to preview the failure path."
+        "--fail",
+        action="store_true",
+        help="Simulate ReviewStep raising, to preview the failure path.",
     )
     args = parser.parse_args()
 
