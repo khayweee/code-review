@@ -46,10 +46,24 @@ see this function's own docstring for the exact mechanics.
 import `tui/` directly, the same rule `on_input_needed` already follows. `StepContext.
 activity_reporter` carries an optional instance; `StepContext.report_activity(label)` is
 the single-line call site (`async with ctx.report_activity("..."): ...`) that delegates to
-it or no-ops via `contextlib.nullcontext()` when unset, so no call site ever needs an `if`
-branch. `tui.activity.ActivityRelay` satisfies the Protocol purely structurally. No step
-consumes this yet — see `tui/AGENTS.md`'s "The `ActivityRelay` seam" section for the
-consuming side.
+`activity_or_nullcontext(self.activity_reporter, label)` when a step has a `ctx` in hand
+(issue #65's `ReviewStep`). `tui.activity.ActivityRelay` satisfies the Protocol purely
+structurally — see `tui/AGENTS.md`'s "The `ActivityRelay` seam" section for the consuming
+side.
+
+**Ambient reporting (issue #64)**: `steps/gitutils.py`'s `run_git` has no `StepContext` to
+read `activity_reporter` off of, and `steps/rebase.py`'s own call sites must not gain one
+(that repo-wide constraint is exactly why this exists). `step.py`'s module-level
+`current_activity_reporter` (a `contextvars.ContextVar[ActivityReporter | None]`) carries
+whichever reporter is in scope for the currently running step; `executor.run_steps` is the
+sole writer, `.set()`/`.reset()`-ing it immediately around each `step.run(ctx)` call from
+that step's own `ctx.activity_reporter`, so the ambient value never outlives or leaks past
+one step's execution. `run_git` reads it directly via `.get()`, and both this ContextVar
+and `activity_or_nullcontext` are unprefixed (unlike `tui/activity.py`'s own, module-
+private `_current_activity_id`) because a different package (`steps/`) needs to read them.
+This is the only case so far where `pipeline/` exposes ambient (non-`ctx`-threaded) state
+across the `steps/` boundary — keep it that way; a second such seam is a sign the
+`StepContext` parameter itself should have grown instead.
 
 Once the fix/approval loop (Milestone 7) lands, record here: the fail-safe-default
 regression test name(s) and the bounded-vs-unbounded fix-round asymmetry. Milestone 9

@@ -133,11 +133,27 @@ the other.
 `ReviewApp.on_mount` starts a third worker (`_consume_activities`) in its own worker
 `group` ("activity-relay", distinct from both the default events group and "input-relay")
 when `activity_relay` is not `None`. Each iteration awaits `activity_relay.next_event()`
-and tags the received `ActivityEvent` with `self._running_step` — steps run strictly
-sequentially and never in parallel, so whichever step is "running" at receipt time is
-always the right owner; `ActivityRelay` itself never needs to know steps exist. Tagged
-`(step_name, ActivityEvent)` pairs accumulate in `self._activity_events` and feed
-`state.backfill`'s new `activity_events` parameter on every render.
+and tags the received `ActivityEvent` with an owning step name; `ActivityRelay` itself
+never needs to know steps exist. Tagged `(step_name, ActivityEvent)` pairs accumulate in
+`self._activity_events` and feed `state.backfill`'s new `activity_events` parameter on
+every render.
+
+**Owner tagging is NOT simply "`self._running_step` at receipt time" (fixed post-#66, by
+issue #64's real producer)**: steps themselves do run strictly sequentially and never in
+parallel, but `_consume_events` (the `StepEvent` worker) and `_consume_activities` are two
+independently scheduled `asyncio.Task`s draining two separate queues with no ordering
+guarantee between them. A fast step's last activity can have its "finished" event still
+queued at the moment the *next* step has already started, so naively re-reading
+`self._running_step` for that "finished" event tags it with the wrong (next) step —
+splitting one activity's two events across two different owners, which
+`backfill_activities` cannot handle (it assumes both halves share one owner; a mismatch
+produces either a phantom permanently-"running" row or a `KeyError`). `#66`'s own docstring
+originally asserted the naive version and its synthetic test never caught this, because
+that test keeps one step "running forever," so no step transition ever races an in-flight
+activity — only a real, fast-finishing producer like `RebaseStep` (issue #64) exercises it.
+The fix: `_consume_activities` records each activity's owner once, on its "started" event
+(`owner_by_activity_id: dict[int, str | None]`), and reuses that recorded owner for the
+matching "finished" event regardless of what `self._running_step` has since become.
 
 `state.py`'s `backfill_activities` groups those tagged pairs into one `ActivityRow` per
 activity under a given step, using the identical "elapsed-while-running, final-once-
@@ -152,11 +168,13 @@ does. Activity lines stay attached to their step permanently once reported, rega
 that step's own current status — the same way a completed `StepRow` itself stays visible
 for the rest of the run, rather than disappearing once the step moves on.
 
-No real producer exists yet — proven end to end with a hand-built, synthetic
-`relay.activity(...)` call feeding a real `ReviewApp` in `tests/tui/test_app.py`, exactly
-mirroring how #41 proved `InputRelay`'s own queueing contract before any real backend
-existed. Issues #64 (`gitutils.run_git`) and #65 (`ReviewStep`'s one agent call) are the
-first real producers, both blocked by this one.
+First proven end to end with a hand-built, synthetic `relay.activity(...)` call feeding a
+real `ReviewApp` in `tests/tui/test_app.py`, exactly mirroring how #41 proved `InputRelay`'s
+own queueing contract before any real backend existed. `gitutils.run_git` (issue #64,
+`steps/AGENTS.md`) is now the first real producer — see `tests/steps/test_rebase.py`'s
+"Activity reporting" section for a real `RebaseStep` run proving the full sequence end to
+end, which is also what caught the owner-tagging race documented above. Issue #65
+(`ReviewStep`'s one agent call) remains open.
 
 ## Non-goals landed in later issues, not here
 

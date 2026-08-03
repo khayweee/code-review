@@ -19,6 +19,19 @@ the list the caller passes, not of anything a step returns -- see
 `tests/pipeline/test_executor.py` for a test that would fail if that stopped being true.
 Auto-fix and the approval park are Milestone 7's job, layered on top of this same call
 shape; head continuity is Milestone 9's.
+
+**Why this module now touches activity reporting (issue #64)**: `steps/gitutils.py`'s
+`run_git` needs to reach the running step's `ActivityReporter` but has no `StepContext`
+parameter (and `steps/rebase.py`'s existing call sites must not gain one -- see
+`pipeline/step.py`'s module docstring, "Ambient reporting (issue #64)"). This executor is
+the one place that already calls `step.run(ctx)` uniformly for every step, so it is the
+natural, and only non-invasive, place to bind `pipeline.step.current_activity_reporter`
+(a `contextvars.ContextVar`) from `ctx.activity_reporter` for the duration of that one
+call: `.set()` immediately before `await step.run(ctx)`, `.reset()` immediately after, in
+a `try`/`finally` so a step that raises still unbinds it before the exception propagates.
+This is pure plumbing between two already-existing seams (`StepContext.activity_reporter`
+and the ContextVar `run_git` reads) -- it does not change which steps run, what they
+produce, or `StepEvent`'s own shape.
 """
 
 from __future__ import annotations
@@ -26,7 +39,12 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 
-from code_review.pipeline.step import Step, StepContext, StepEvent
+from code_review.pipeline.step import (
+    Step,
+    StepContext,
+    StepEvent,
+    current_activity_reporter,
+)
 
 
 async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEvent]:
@@ -35,6 +53,10 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
     Yields a "running" ``StepEvent`` immediately before calling ``step.run(ctx)``, then a
     "completed" ``StepEvent`` (that step's ``StepOutcome`` plus timing) immediately after
     it finishes -- for every step in ``steps``, strictly in list order.
+
+    Also binds ``ctx.activity_reporter`` as the ambient ``current_activity_reporter``
+    (``pipeline/step.py``) for exactly the duration of each ``step.run(ctx)`` call -- see
+    this module's docstring's "Why this module now touches activity reporting" section.
     """
 
     for step in steps:
@@ -47,7 +69,11 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
             started_at=started_at,
             duration=None,
         )
-        outcome = await step.run(ctx)
+        token = current_activity_reporter.set(ctx.activity_reporter)
+        try:
+            outcome = await step.run(ctx)
+        finally:
+            current_activity_reporter.reset(token)
         yield StepEvent(
             step_name=step_name,
             status="completed",

@@ -14,12 +14,14 @@ is what `cli.py` hands to both sides of that seam.
 
 `activity_relay` (issue #66) is a third, independent seam of the same shape: an optional
 `tui.activity.ActivityRelay` this app polls, in a third worker (`_consume_activities`), for
-nested sub-step activity relayed via `StepContext.report_activity`. It does not change
-`StepEvent`/`run_steps` at all -- it is a second event stream, not a new `StepEvent`
-status. `ActivityRelay` itself never knows which step an activity belongs to (see that
-module's docstring); this app supplies that correlation by tagging each received
-`ActivityEvent` with `self._running_step` at receipt time, since steps run strictly
-sequentially and never in parallel.
+nested sub-step activity relayed via `StepContext.report_activity` or, ambiently,
+`gitutils.run_git` (issue #64). It does not change `StepEvent`/`run_steps` at all -- it is
+a second event stream, not a new `StepEvent` status. `ActivityRelay` itself never knows
+which step an activity belongs to (see that module's docstring); this app supplies that
+correlation, tagging an activity with whichever step owned it when it *started* -- not by
+re-reading `self._running_step` independently for its "finished" half too, since that
+worker and `_consume_events` are separately scheduled tasks with no ordering guarantee
+between them (see `_consume_activities`'s own docstring for the exact race this avoids).
 """
 
 from __future__ import annotations
@@ -211,15 +213,35 @@ class ReviewApp(App[None]):
         """Poll `self._activity_relay` for reported sub-step activity (issue #66).
 
         Runs for the app's whole lifetime (cancelled automatically on `self.exit()`, like
-        every other worker). Each iteration tags the received `ActivityEvent` with
-        `self._running_step` -- correct because steps run strictly sequentially and never
-        in parallel, so whichever step is "running" when an activity event arrives is
-        always the step that reported it -- appends it to `self._activity_events`, and
-        re-renders, the same way `_consume_events` re-renders after each `StepEvent`.
+        every other worker), appending each received `ActivityEvent` (tagged with its
+        owning step, see below) to `self._activity_events` and re-rendering, the same way
+        `_consume_events` re-renders after each `StepEvent`.
+
+        **Owner tagging (fixed by issue #64's real producer)**: `self._running_step` at
+        receipt time is *not* always the right owner to tag an event with, despite steps
+        themselves running strictly sequentially and never in parallel -- `_consume_events`
+        (the `StepEvent` worker) and this worker are two independently scheduled
+        `asyncio.Task`s draining two separate queues, with no ordering guarantee between
+        them. A step that finishes quickly (e.g. `RebaseStep`'s last `git rebase` call) can
+        have its activity's "finished" event still sitting in the queue at the moment
+        `_consume_events` already processed that step's "completed" `StepEvent` and the
+        next step's "running" one -- so by the time this worker gets scheduled to dequeue
+        the "finished" event, `self._running_step` has already moved on, and naively
+        re-reading it here would tag one activity's two halves with two different owners.
+        `backfill_activities` (`state.py`) assumes both halves share one owner; a mismatch
+        either leaves a phantom "running forever" row under the first step or raises a
+        `KeyError` looking up a "started" timestamp that got filed under the other step's
+        events. `owner_by_activity_id` fixes this by recording the owner once, on the
+        "started" event, and reusing that same recorded owner for the "finished" event
+        regardless of what `self._running_step` has since become.
         """
 
         assert self._activity_relay is not None
+        owner_by_activity_id: dict[int, str | None] = {}
         while True:
             event = await self._activity_relay.next_event()
-            self._activity_events.append((self._running_step, event))
+            if event.status == "started":
+                owner_by_activity_id[event.activity_id] = self._running_step
+            owner = owner_by_activity_id.get(event.activity_id, self._running_step)
+            self._activity_events.append((owner, event))
             self._render()

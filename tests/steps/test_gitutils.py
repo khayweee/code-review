@@ -18,6 +18,13 @@ scenario below runs its awaits inside a small `async def scenario()` closure dri
 `asyncio.run(...)`, matching this repo's existing convention for testing async code
 (`tests/steps/test_rebase.py`'s `asyncio.run(RebaseStep().run(...))`) rather than pulling
 in `pytest-asyncio`.
+
+The "--- Ambient activity reporting" section near the bottom pins `run_git`'s own contract
+in isolation (issue #64): bind/unbind `pipeline.step.current_activity_reporter` directly
+(rather than through a full `run_steps([RebaseStep()], ctx)` call) to prove `run_git`
+reports itself and derives its label correctly, independent of `RebaseStep`'s own
+orchestration. `test_rebase.py` proves the full, real end-to-end call sequence and
+ordering through `RebaseStep` itself.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from code_review.pipeline.step import current_activity_reporter
 from code_review.steps.gitutils import (
     conflicted_files,
     is_ancestor,
@@ -36,6 +44,7 @@ from code_review.steps.gitutils import (
     ref_sha,
     run_git,
 )
+from code_review.tui.activity import ActivityEvent, ActivityRelay
 from tests.steps.conftest import commit_file
 
 # --- run_git -----------------------------------------------------------------------------
@@ -212,3 +221,78 @@ def test_conflicted_files_is_empty_outside_a_conflict(
     _origin, checkout = origin_and_checkout
 
     assert asyncio.run(conflicted_files(checkout)) == []
+
+
+# --- Ambient activity reporting (issue #64) -------------------------------------------------
+# `run_git` reads `pipeline.step.current_activity_reporter` directly rather than through a
+# `StepContext` (it has none) -- bind/unbind it here the same way `executor.run_steps`
+# does, to pin `run_git`'s own reporting contract down in isolation from `RebaseStep`.
+
+
+def test_run_git_reports_a_started_and_finished_activity_when_a_reporter_is_bound(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    _origin, checkout = origin_and_checkout
+    relay = ActivityRelay()
+
+    async def scenario() -> list[ActivityEvent]:
+        token = current_activity_reporter.set(relay)
+        try:
+            await run_git(["status"], checkout)
+        finally:
+            current_activity_reporter.reset(token)
+        return [await relay.next_event(), await relay.next_event()]
+
+    started, finished = asyncio.run(scenario())
+
+    assert started.status == "started"
+    assert started.label == "git status"
+    assert finished.status == "finished"
+    assert finished.label == "git status"
+    # Same activity span, not two unrelated ones.
+    assert finished.activity_id == started.activity_id
+    # `run_git` calls are flat, never nested inside one another.
+    assert started.parent_id is None
+
+
+def test_run_git_derives_the_label_from_subcommand_and_main_argument(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    _origin, checkout = origin_and_checkout
+    relay = ActivityRelay()
+
+    async def scenario() -> str:
+        token = current_activity_reporter.set(relay)
+        try:
+            await run_git(["fetch", "origin", "main"], checkout)
+        finally:
+            current_activity_reporter.reset(token)
+        return (await relay.next_event()).label
+
+    assert asyncio.run(scenario()) == "git fetch origin"
+
+
+def test_run_git_reports_an_activity_even_when_the_call_fails(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    """A nonzero-exit `git` call (an ordinary, non-exceptional outcome for `run_git`, per
+    its own docstring) still gets a matching started/finished pair -- reporting is tied to
+    the subprocess call's lifetime, not to whether it succeeded."""
+
+    _origin, checkout = origin_and_checkout
+    relay = ActivityRelay()
+
+    async def scenario() -> tuple[ActivityEvent, ActivityEvent]:
+        token = current_activity_reporter.set(relay)
+        try:
+            result = await run_git(["not-a-real-git-subcommand"], checkout)
+        finally:
+            current_activity_reporter.reset(token)
+        assert result.returncode != 0
+        return await relay.next_event(), await relay.next_event()
+
+    started, finished = asyncio.run(scenario())
+
+    assert started.status == "started"
+    assert finished.status == "finished"
+    assert finished.activity_id == started.activity_id
