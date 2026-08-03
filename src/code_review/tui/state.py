@@ -12,10 +12,11 @@ executor reports. The caller here (the App) is the only thing that knows a run a
 mid-step; it passes that step's name in as `failed_step` so the final render can show it as
 failed instead of stuck "running" forever.
 
-`latest_findings` (issue #42) is the same kind of pure extraction as `backfill`, scanning
-`events` for the most recently completed step whose outcome carries a non-empty
-`ReviewOutput`. It imports `ReviewOutput` from `steps.review` -- a data-schema import only,
-not a `ReviewStep`/agent-call dependency, and fine directionally (`tui` importing a
+`latest_findings` (issue #42, widened for #61) is the same kind of pure extraction as
+`backfill`, scanning `events` for the most recently completed step whose outcome carries a
+non-empty `ReviewOutput` or `TestSufficiencyOutput`. It imports both from `steps.review`/
+`steps.test_sufficiency` -- a data-schema import only, not a `ReviewStep`/
+`TestSufficiencyStep`/agent-call dependency, and fine directionally (`tui` importing a
 `steps/`-defined pydantic model does not create a cycle, since `steps/` never imports
 `tui/`). `tui/app.py` calls it alongside `backfill` on every event and on the timer tick;
 `tests/tui/test_state.py` calls it directly against hand-built `StepEvent`s.
@@ -47,6 +48,7 @@ from typing import Literal
 
 from code_review.pipeline.step import StepEvent
 from code_review.steps.review import ReviewOutput
+from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.activity import ActivityEvent
 
 Status = Literal["pending", "running", "completed", "failed"]
@@ -198,19 +200,21 @@ def backfill(
     return rows
 
 
-def latest_findings(events: Sequence[StepEvent]) -> ReviewOutput | None:
-    """Return the most recently completed step's `ReviewOutput`, or `None` if none exists.
+def latest_findings(events: Sequence[StepEvent]) -> ReviewOutput | TestSufficiencyOutput | None:
+    """Return the most recently completed step's `ReviewOutput`/`TestSufficiencyOutput`, or
+    `None` if none exists.
 
-    A `"completed"` event counts only when its `outcome.findings` is a `ReviewOutput`
-    instance (guarding against e.g. `IntentStep`'s outcome, whose `findings` is an `Intent`,
-    never triggering a findings display -- see `pipeline/step.py`'s `StepOutcome.findings`,
-    deliberately untyped as `object`) AND that `ReviewOutput.findings` list is non-empty.
-    Scans `events` in order and keeps the last match, so two completed steps that both carry
-    findings resolve to whichever completed later, matching `PipelineBox`'s own "one box,
-    most recent wins" display -- not an accumulated history across steps.
+    A `"completed"` event counts only when its `outcome.findings` is a `ReviewOutput` or
+    `TestSufficiencyOutput` instance (guarding against e.g. `IntentStep`'s outcome, whose
+    `findings` is an `Intent`, never triggering a findings display -- see `pipeline/step.py`'s
+    `StepOutcome.findings`, deliberately untyped as `object`) AND that output's `findings`
+    list is non-empty. Scans `events` in order and keeps the last match, so two completed
+    steps that both carry findings resolve to whichever completed later -- regardless of
+    which of the two schemas each one is -- matching `PipelineBox`'s own "one box, most
+    recent wins" display -- not an accumulated history across steps.
     """
 
-    result: ReviewOutput | None = None
+    result: ReviewOutput | TestSufficiencyOutput | None = None
     for event in events:
         if event.status != "completed":
             continue
@@ -218,7 +222,7 @@ def latest_findings(events: Sequence[StepEvent]) -> ReviewOutput | None:
         if outcome is None:
             continue
         findings = outcome.findings
-        if isinstance(findings, ReviewOutput) and findings.findings:
+        if isinstance(findings, (ReviewOutput, TestSufficiencyOutput)) and findings.findings:
             result = findings
     return result
 
