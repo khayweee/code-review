@@ -17,9 +17,11 @@ is what `cli.py` hands to both sides of that seam.
 nested sub-step activity relayed via `StepContext.report_activity`. It does not change
 `StepEvent`/`run_steps` at all -- it is a second event stream, not a new `StepEvent`
 status. `ActivityRelay` itself never knows which step an activity belongs to (see that
-module's docstring); this app supplies that correlation by tagging each received
-`ActivityEvent` with `self._running_step` at receipt time, since steps run strictly
-sequentially and never in parallel.
+module's docstring); this app supplies that correlation, but not by tagging each received
+`ActivityEvent` with whichever step `_consume_activities` sees as current *at the moment it
+dequeues that event* -- issue #65 found that design unsound (see `_tag_activity_events`'s
+docstring below) once a real producer (`ReviewStep`) existed to expose the race. Ownership
+is instead derived purely from timestamps, at render time.
 """
 
 from __future__ import annotations
@@ -84,10 +86,12 @@ class ReviewApp(App[None]):
         # Same "None means no worker starts" shape as `_input_relay`, for the activity
         # stream (issue #66) -- see `activity.py`.
         self._activity_relay = activity_relay
-        # `(owning_step_name, ActivityEvent)` pairs collected by `_consume_activities`,
-        # tagged with `self._running_step` at receipt time -- fed to `state.backfill` on
-        # every render so each row can show its own nested activity lines.
-        self._activity_events: list[tuple[str | None, ActivityEvent]] = []
+        # Raw `ActivityEvent`s collected by `_consume_activities`, in receipt order -- NOT
+        # tagged with an owning step at collection time (issue #65; see
+        # `_tag_activity_events`). `_rows` tags them from `self._seen` immediately before
+        # every call into `state.backfill`, so each row can show its own nested activity
+        # lines.
+        self._activity_events: list[ActivityEvent] = []
         self._seen: list[StepEvent] = []
         # Name of the step most recently seen "running" with no "completed" yet -- the
         # step a mid-flight exception must be blamed on. Reset to None once that step's
@@ -135,7 +139,7 @@ class ReviewApp(App[None]):
             self._seen,
             now=time.monotonic(),
             failed_step=self._failed_step,
-            activity_events=self._activity_events,
+            activity_events=_tag_activity_events(self._seen, self._activity_events),
         )
 
     def _render(self) -> None:
@@ -211,15 +215,89 @@ class ReviewApp(App[None]):
         """Poll `self._activity_relay` for reported sub-step activity (issue #66).
 
         Runs for the app's whole lifetime (cancelled automatically on `self.exit()`, like
-        every other worker). Each iteration tags the received `ActivityEvent` with
-        `self._running_step` -- correct because steps run strictly sequentially and never
-        in parallel, so whichever step is "running" when an activity event arrives is
-        always the step that reported it -- appends it to `self._activity_events`, and
-        re-renders, the same way `_consume_events` re-renders after each `StepEvent`.
+        every other worker). Each iteration appends the raw `ActivityEvent` to
+        `self._activity_events` and re-renders, the same way `_consume_events` re-renders
+        after each `StepEvent` -- see `_tag_activity_events` for why owner correlation does
+        NOT happen here at receipt time (issue #65).
         """
 
         assert self._activity_relay is not None
         while True:
             event = await self._activity_relay.next_event()
-            self._activity_events.append((self._running_step, event))
+            self._activity_events.append(event)
             self._render()
+
+
+def _tag_activity_events(
+    seen: Sequence[StepEvent], activity_events: Sequence[ActivityEvent]
+) -> list[tuple[str | None, ActivityEvent]]:
+    """Attribute each of `activity_events` to the step that reported it, purely from
+    `seen`'s own `StepEvent` timestamps -- computed fresh on every render, not tagged once
+    at collection time.
+
+    `_consume_activities` and `_consume_events` are two independently scheduled workers
+    draining two independent queues (`ActivityRelay`'s and `events`'), so nothing
+    guarantees a `report_activity` block's "finished" `ActivityEvent` is dequeued and
+    tagged *before* the owning step's own "completed" `StepEvent` is dequeued and the next
+    step starts. In practice it never is when a step's activity closes right at the tail of
+    `Step.run` with no further `await` before the next step starts (`ReviewStep`'s call
+    shape, issue #65's real first producer): asyncio's cooperative scheduling runs
+    `_consume_events` to completion for both events -- advancing `self._running_step` to
+    the *next* step -- before `_consume_activities` ever gets scheduled to dequeue and tag
+    the "finished" event with the (by then stale) previous value. That mis-tagged the
+    "finished" event with the wrong owner, splitting one activity span's "started"/
+    "finished" pair across two different owners and crashing `state.backfill_activities`'
+    finished-duration lookup (`KeyError`) -- this function replaces that live-tag-at-receipt
+    design entirely.
+
+    Sound because steps run strictly sequentially and never in parallel (`pipeline/
+    AGENTS.md`): each step's own running window -- from its "running" `StepEvent`'s
+    `started_at` to its "completed" `StepEvent`'s implied end time, or open-ended while
+    still running -- fully contains every activity it reports, since `ctx.report_activity`
+    can only be called from inside that step's own `run` coroutine. Both events of one
+    activity span are tagged with the SAME owner, computed once from the "started" event's
+    own timestamp and reused for its "finished" event -- not recomputed per event -- so a
+    "finished" timestamp landing a hair outside the window (e.g. clock-resolution jitter
+    right at a step boundary) can never split one span across two different owners.
+    """
+
+    windows: dict[str, tuple[float, float | None]] = {}
+    for step_event in seen:
+        if step_event.status == "running":
+            windows[step_event.step_name] = (step_event.started_at, None)
+        else:
+            assert step_event.duration is not None
+            # `.get(..., (step_event.started_at, None))`, not a bare lookup: `backfill`'s
+            # own contract tolerates a "completed" `StepEvent` with no preceding "running"
+            # one for the same step (real `run_steps` output never does this, but several
+            # hand-built synthetic event streams in `tests/tui/test_app.py` skip straight
+            # to "completed" since nothing else in `backfill` needed the "running" one).
+            # `StepEvent.started_at` is carried on every event regardless of status, so
+            # it's a legitimate stand-in start time for that fallback.
+            started_at, _ = windows.get(step_event.step_name, (step_event.started_at, None))
+            windows[step_event.step_name] = (started_at, started_at + step_event.duration)
+
+    owner_by_activity_id: dict[int, str | None] = {}
+    tagged: list[tuple[str | None, ActivityEvent]] = []
+    for activity_event in activity_events:
+        if activity_event.status == "started":
+            owner_by_activity_id[activity_event.activity_id] = _owning_step(
+                activity_event.timestamp, windows
+            )
+        tagged.append((owner_by_activity_id.get(activity_event.activity_id), activity_event))
+    return tagged
+
+
+def _owning_step(timestamp: float, windows: dict[str, tuple[float, float | None]]) -> str | None:
+    """Which step's running window (see `_tag_activity_events`) `timestamp` falls inside,
+    or `None` if it falls inside none of them (not expected in practice, given the
+    containment argument in `_tag_activity_events`'s own docstring, but the caller-side
+    correlation these windows replace already tolerated an unmatched/`None` owner, so this
+    stays a safe fallback rather than an assertion)."""
+
+    for name, (started_at, completed_at) in windows.items():
+        if timestamp < started_at:
+            continue
+        if completed_at is None or timestamp < completed_at:
+            return name
+    return None

@@ -17,10 +17,13 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from code_review.agent import Agent, ClaudeCLI
+import pytest
+
+from code_review.agent import Agent, ClaudeCLI, ProcessExitError
 from code_review.pipeline import Step, StepContext, StepEvent, StepOutcome, run_steps
 from code_review.steps.intent import Intent
 from code_review.steps.review import ReviewOutput, ReviewStep
+from code_review.tui.activity import ActivityEvent, ActivityRelay
 
 # --- ReviewOutput schema shape -----------------------------------------------------------
 
@@ -82,6 +85,12 @@ _FAKES = Path(__file__).parent.parent / "pipeline" / "fakes"
 CLEAN_FAKE_CLI = _FAKES / "review_output_clean.py"
 BLOCKING_FAKE_CLI = _FAKES / "review_output_blocking.py"
 PROMPT_PROBE_FAKE_CLI = _FAKES / "review_prompt_probe.py"
+# Reused directly from `tests/agent/` rather than copied into `pipeline/fakes/` -- it is a
+# generic "start, then exit non-zero" double with no `ReviewOutput`-specific behavior, and
+# `tests/agent/test_claude_cli.py`'s own `test_nonzero_exit_raises_process_exit_error_with_
+# context` already proves what it does at the `ClaudeCLI` layer; this module only needs it
+# to exercise `ReviewStep`'s activity-reporting exit path (issue #65).
+NONZERO_EXIT_FAKE_CLI = Path(__file__).parent.parent / "agent" / "fakes" / "nonzero_exit.py"
 
 _EXPLICIT_INTENT = Intent(summary="use a queue, not polling", source="explicit", score=1.0)
 _INFERRED_INTENT = Intent(summary="use a queue, not polling", source="claude", score=0.4)
@@ -239,3 +248,94 @@ def test_review_step_calls_agent_exactly_once(tmp_path: Path) -> None:
     completed = [e for e in events if e.status == "completed"]
     assert len(running) == 1
     assert len(completed) == 1
+
+
+# --- Activity reporting (issue #65) --------------------------------------------------------
+
+
+async def _drain_activity_events(relay: ActivityRelay, count: int) -> list[ActivityEvent]:
+    """Collect exactly `count` events off `relay`, mirroring `ReviewApp`'s own activity
+    worker (`tui/app.py`'s `_consume_activities`, wired to `ActivityRelay.next_event()`
+    in a background task) -- see `tui/activity.py`'s module docstring, "Consuming side".
+    Started as a background task *before* the steps run, since `next_event()` blocks until
+    an event is queued and `ReviewStep.run` reports its span synchronously within the same
+    event loop."""
+
+    return [await relay.next_event() for _ in range(count)]
+
+
+def test_review_step_reports_exactly_one_activity_span_for_the_agent_call(
+    tmp_path: Path,
+) -> None:
+    """Issue #65's first acceptance criterion: `ReviewStep.run` wraps its one
+    `ctx.agent.run` call in `ctx.report_activity(...)`, producing exactly one activity
+    ("started" then "finished") spanning the call, with a real elapsed duration on the
+    "finished" event -- proven with a real `StepContext.activity_reporter` (a real
+    `ActivityRelay`, satisfying `pipeline/step.py`'s `ActivityReporter` Protocol purely
+    structurally, per that module's own design note), not a mock."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    relay = ActivityRelay()
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+    )
+    step: Step = ReviewStep(executable=CLEAN_FAKE_CLI)
+
+    async def scenario() -> list[ActivityEvent]:
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 2))
+        async for _event in run_steps([step], ctx):
+            pass
+        return await drain_task
+
+    started, finished = asyncio.run(scenario())
+    asyncio.run(agent.close())
+
+    assert started.status == "started"
+    assert started.label == "Agent: reviewing diff via claude"
+    assert started.parent_id is None
+
+    assert finished.status == "finished"
+    assert finished.label == started.label
+    # Same span, not a fresh one -- the "finished" event closes the exact activity the
+    # "started" event opened.
+    assert finished.activity_id == started.activity_id
+    # A real elapsed duration: monotonic time only ever moves forward, so a genuine call
+    # (however fast) leaves the "finished" timestamp no earlier than the "started" one.
+    assert finished.timestamp >= started.timestamp
+
+
+def test_review_step_still_finishes_its_activity_span_when_the_agent_call_raises(
+    tmp_path: Path,
+) -> None:
+    """Issue #65's second acceptance criterion: the same shape must hold whether the call
+    succeeds or raises -- a failed agent call still leaves its activity line showing a
+    duration, not stuck mid-tick, because `ctx.report_activity`'s `async with` block
+    finishes the activity on any exit path (see `ActivityRelay.activity`'s `finally`).
+    `NONZERO_EXIT_FAKE_CLI` makes `ctx.agent.run` raise `ProcessExitError` -- proving this
+    against a real failure from the real `ClaudeCLI` backend, not a stand-in exception."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    relay = ActivityRelay()
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+    )
+    step: Step = ReviewStep(executable=NONZERO_EXIT_FAKE_CLI)
+
+    async def scenario() -> list[ActivityEvent]:
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 2))
+        with pytest.raises(ProcessExitError):
+            async for _event in run_steps([step], ctx):
+                pass
+        return await drain_task
+
+    started, finished = asyncio.run(scenario())
+    asyncio.run(agent.close())
+
+    assert started.status == "started"
+    assert started.label == "Agent: reviewing diff via claude"
+
+    assert finished.status == "finished"
+    assert finished.activity_id == started.activity_id
+    assert finished.timestamp >= started.timestamp
