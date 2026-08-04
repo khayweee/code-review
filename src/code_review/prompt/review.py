@@ -28,6 +28,12 @@ it hands the agent the original diff as originating context only, and explicitly
 to re-inspect the live working tree (the agent already has full tool/shell access via the
 existing `RunOpts` permission defaults -- no `RunOpts` change was needed for this, only
 this prompt's wording).
+
+`_SUGGESTION_OBLIGATION_CLAUSE` (issue #76, part of #75) obligates the agent to populate
+`Finding.suggestions` (`pipeline/findings.py`) with concrete remediation options for every
+finding whose `action` resolves to `"ask-user"`. Unlike `_INTENT_CONFORMANCE_CLAUSE`, it is
+unconditional -- it does not branch on `ctx.intent.source` -- so both `build_review_prompt`
+and `build_review_fix_prompt` append it directly rather than through a gated helper.
 """
 
 from __future__ import annotations
@@ -46,6 +52,23 @@ _INTENT_CONFORMANCE_CLAUSE = (
     "hunk -- even if every other aspect of the change is otherwise risk-clean. A "
     "risk-clean diff is not a substitute for conforming to explicit, authoritative "
     "intent."
+)
+
+
+# --- suggestion_obligation_clause (issue #76) -------------------------------------------
+
+# Kept as a module-level constant, mirroring `_INTENT_CONFORMANCE_CLAUSE` above, so the
+# exact obligation text is one grep away and diffable on its own line when it needs to
+# change. Unlike `_INTENT_CONFORMANCE_CLAUSE`, this clause is unconditional -- it does not
+# branch on `ctx.intent.source` -- so `build_review_prompt`/`build_review_fix_prompt`
+# append it directly rather than through a `source`-gated helper function.
+_SUGGESTION_OBLIGATION_CLAUSE = (
+    'For every finding whose action resolves to "ask-user" -- including one where '
+    "action is left unset, null, or set to an unrecognized value, since that is exactly "
+    'what resolves to "ask-user" via action_or_default -- you MUST populate that '
+    "finding's suggestions with one or more concrete, actionable remediation options: "
+    "what a human could actually do about it, not a restatement of the problem. Findings "
+    'whose action resolves to "no-op" or "auto-fix" do not need suggestions.'
 )
 
 
@@ -73,9 +96,10 @@ def intent_conformance_clause(source: str) -> str:
 def build_review_prompt(ctx: StepContext) -> str:
     """Assemble `ReviewStep`'s single prompt: the diff, then the wrapped intent block
     (`wrap_intent`, see `prompt/intent.py`), then the intent-conformance clause appended
-    only when non-empty (see `intent_conformance_clause` above). Diff first, so the agent
-    reads what changed before what it is being held to -- mirroring `ReviewOutput`'s own
-    findings-before-risk field ordering rationale.
+    only when non-empty (see `intent_conformance_clause` above), then the (unconditional)
+    suggestion-obligation clause (see `_SUGGESTION_OBLIGATION_CLAUSE` above). Diff first,
+    so the agent reads what changed before what it is being held to -- mirroring
+    `ReviewOutput`'s own findings-before-risk field ordering rationale.
     """
 
     sections = [
@@ -86,6 +110,8 @@ def build_review_prompt(ctx: StepContext) -> str:
     clause = intent_conformance_clause(ctx.intent.source)
     if clause:
         sections.append(clause)
+
+    sections.append(_SUGGESTION_OBLIGATION_CLAUSE)
 
     return "\n\n".join(sections)
 
@@ -139,10 +165,11 @@ def build_review_fix_prompt(ctx: StepContext) -> str:
     prompt's wording.
 
     Section order: the fix instruction first (what to do), then the stale-diff-warned
-    original diff (background), then the wrapped intent block and intent-conformance clause
-    (unchanged from `build_review_prompt`, since a fix round must honor the same intent
-    obligations as any other round) -- fix instructions lead so the agent knows it is
-    editing, not merely reading, before it reaches the diff.
+    original diff (background), then the wrapped intent block, the intent-conformance
+    clause, and the suggestion-obligation clause (all unchanged from `build_review_prompt`,
+    since a fix round must honor the same intent and suggestion obligations as any other
+    round) -- fix instructions lead so the agent knows it is editing, not merely reading,
+    before it reaches the diff.
     """
 
     assert ctx.fix_round is not None, "build_review_fix_prompt requires ctx.fix_round to be set"
@@ -157,5 +184,7 @@ def build_review_fix_prompt(ctx: StepContext) -> str:
     clause = intent_conformance_clause(ctx.intent.source)
     if clause:
         sections.append(clause)
+
+    sections.append(_SUGGESTION_OBLIGATION_CLAUSE)
 
     return "\n\n".join(sections)

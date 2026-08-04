@@ -47,6 +47,13 @@ agent could otherwise slip through:
 Each constant is kept module-level and out-of-line, matching `review.py`'s
 `_INTENT_CONFORMANCE_CLAUSE` pattern, so the exact obligation text is one grep away and
 diffable on its own line when it needs to change.
+
+A fifth, `_SUGGESTION_OBLIGATION_CLAUSE` (issue #76, part of #75), obligates the agent to
+populate `Finding.suggestions` (`pipeline/findings.py`) with concrete remediation options
+for every finding whose `action` resolves to `"ask-user"`. It is unconditional, matching
+this module's other four clauses, and is a separately-defined local constant rather than
+an import from `prompt/review.py` -- same wording, same obligation, but per this module's
+"no cross-step sharing" rule (see above), each module owns its own copy.
 """
 
 from __future__ import annotations
@@ -93,10 +100,23 @@ _TEST_QUALITY_RULE = (
     "an actual test run or an actual manual verification step counts."
 )
 
+# Mirrors `prompt/review.py`'s `_SUGGESTION_OBLIGATION_CLAUSE` in wording -- a same-named,
+# separately defined local constant, not an import (see this module's own docstring for
+# why `prompt/test_sufficiency.py` keeps no cross-step sharing with `prompt/review.py`).
+# Unconditional, matching this module's other four guardrail clauses above.
+_SUGGESTION_OBLIGATION_CLAUSE = (
+    'For every finding whose action resolves to "ask-user" -- including one where '
+    "action is left unset, null, or set to an unrecognized value, since that is exactly "
+    'what resolves to "ask-user" via action_or_default -- you MUST populate that '
+    "finding's suggestions with one or more concrete, actionable remediation options: "
+    "what a human could actually do about it, not a restatement of the problem. Findings "
+    'whose action resolves to "no-op" or "auto-fix" do not need suggestions.'
+)
+
 
 def build_test_sufficiency_prompt(ctx: StepContext) -> str:
     """Assemble `TestSufficiencyStep`'s single prompt: the diff, then the wrapped intent
-    block (`wrap_intent`, see `prompt/intent.py`), then the four guardrail clauses above,
+    block (`wrap_intent`, see `prompt/intent.py`), then the five guardrail clauses above,
     always in the same fixed order and always all present -- there is no conditional
     clause here the way `build_review_prompt` conditionally appends
     `intent_conformance_clause`, since none of this module's guardrail text branches on
@@ -110,6 +130,7 @@ def build_test_sufficiency_prompt(ctx: StepContext) -> str:
         _NOT_SUFFICIENT_EVIDENCE_ALONE,
         _COMPLETE_SUITE_PROHIBITION,
         _TEST_QUALITY_RULE,
+        _SUGGESTION_OBLIGATION_CLAUSE,
     ]
     return "\n\n".join(sections)
 
@@ -165,7 +186,7 @@ def build_test_sufficiency_fix_prompt(ctx: StepContext) -> str:
     no `RunOpts` change is needed here, only this prompt's wording.
 
     Section order: the fix instruction first (what to do), then the stale-diff-warned
-    original diff (background), then the wrapped intent block, then all four guardrail
+    original diff (background), then the wrapped intent block, then all five guardrail
     clauses (unchanged from `build_test_sufficiency_prompt`, since a fix round's
     re-assessment must honor the same guardrails as any other round) -- fix instructions
     lead so the agent knows it is acting, not merely reading, before it reaches the diff.
@@ -184,5 +205,6 @@ def build_test_sufficiency_fix_prompt(ctx: StepContext) -> str:
         _NOT_SUFFICIENT_EVIDENCE_ALONE,
         _COMPLETE_SUITE_PROHIBITION,
         _TEST_QUALITY_RULE,
+        _SUGGESTION_OBLIGATION_CLAUSE,
     ]
     return "\n\n".join(sections)

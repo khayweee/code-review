@@ -29,6 +29,19 @@ pipeline-owned-delivery-scoped findings from a `ReviewStep` answer and resets `r
 back to `"low"` when that was the sole basis for an elevated verdict -- see the function's
 own docstring for the exact rule, its documented limits, and a note on how it avoids a
 `pipeline/` -> `steps/` import.
+
+`Finding.suggestions` (issue #76, part of #75) defaults to `[]` and is populated by the
+producing step's prompt (`prompt/review.py`'s and `prompt/test_sufficiency.py`'s
+suggestion-obligation clause), never enforced here at the schema level. This was an open
+design question in #75: whether an `ask-user` finding with empty `suggestions` should be
+accepted as-is, or rejected by a pydantic validator. Prompt-only enforcement won, for the
+same reason `action` itself is `str | None` rather than a closed `Literal` (see above): a
+validator that rejects a response missing `suggestions` would fail the whole schema
+validation exactly when a human's judgement is needed most, trading a fail-safe "ask the
+human, with a thinner set of options" outcome for a hard failure. A finding with `action`
+resolving to `"ask-user"` and empty `suggestions` is therefore valid, just less useful --
+mirroring how `action_or_default` already accepts (rather than rejects) responses it
+cannot fully trust.
 """
 
 from __future__ import annotations
@@ -106,6 +119,16 @@ class Finding(BaseModel):
     # produced today leaves this at its default. That is a future refinement, not this
     # field's job.
     location: str | None = None
+
+    # Agent-proposed remediation options for this finding, e.g. ["revert the rewrap",
+    # "add a comment explaining the exit key"]. Defaults to `[]` so this field is
+    # backward-compatible with every `Finding` already validated by earlier tickets'
+    # tests, mirroring how `location` was added. Populated by the producing step's prompt
+    # (`prompt/review.py`'s and `prompt/test_sufficiency.py`'s suggestion-obligation
+    # clause), for findings whose `action` resolves to `"ask-user"` (see
+    # `action_or_default`) -- not enforced at the schema level (see module docstring for
+    # why). Consumer: `tui/widgets.py`'s `FindingsBox` (issue #77), not yet built.
+    suggestions: list[str] = []
 
 
 def action_or_default(action: str | None) -> Action:
