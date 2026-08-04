@@ -328,7 +328,7 @@ def test_latest_findings_returns_the_review_output_when_findings_are_non_empty()
         )
     ]
 
-    assert latest_findings(events) is output
+    assert latest_findings(events) == ("ReviewStep", output)
 
 
 def test_latest_findings_with_two_completed_steps_the_later_one_wins() -> None:
@@ -355,7 +355,7 @@ def test_latest_findings_with_two_completed_steps_the_later_one_wins() -> None:
         ),
     ]
 
-    assert latest_findings(events) is later
+    assert latest_findings(events) == ("TestSufficiencyStep", later)
 
 
 def test_latest_findings_ignores_a_completed_test_sufficiency_step_with_empty_findings() -> None:
@@ -388,7 +388,7 @@ def test_latest_findings_returns_the_test_sufficiency_output_when_findings_are_n
         )
     ]
 
-    assert latest_findings(events) is output
+    assert latest_findings(events) == ("TestSufficiencyStep", output)
 
 
 def test_latest_findings_with_a_review_output_then_a_test_sufficiency_output_the_later_wins() -> (
@@ -417,7 +417,7 @@ def test_latest_findings_with_a_review_output_then_a_test_sufficiency_output_the
         ),
     ]
 
-    assert latest_findings(events) is later
+    assert latest_findings(events) == ("TestSufficiencyStep", later)
 
 
 def test_latest_findings_with_a_test_sufficiency_output_then_a_review_output_the_later_wins() -> (
@@ -446,7 +446,7 @@ def test_latest_findings_with_a_test_sufficiency_output_then_a_review_output_the
         ),
     ]
 
-    assert latest_findings(events) is later
+    assert latest_findings(events) == ("ReviewStep", later)
 
 
 # --- final_status_message -----------------------------------------------------------------

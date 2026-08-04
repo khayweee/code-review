@@ -192,15 +192,17 @@ class ReviewApp(App[None]):
         an empty one (issue #42's acceptance criteria), which a permanently-composed box
         cannot express on its own."""
 
-        output = latest_findings(self._seen)
+        result = latest_findings(self._seen)
         boxes = list(self.query(FindingsBox))
-        if output is None:
+        if result is None:
             for box in boxes:
                 box.remove()
-        elif boxes:
-            boxes[0].update_findings(output)
         else:
-            self.mount(FindingsBox(output))
+            step_name, output = result
+            if boxes:
+                boxes[0].update_findings(output, step_name)
+            else:
+                self.mount(FindingsBox(output, step_name))
 
     def _render_status(self) -> None:
         """Mount, update in place, or remove the Status box, mirroring

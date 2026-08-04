@@ -9,6 +9,7 @@ into the `ApprovalRelay` seam (issue #80).
 
 from __future__ import annotations
 
+from rich.console import RenderableType
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
@@ -58,7 +59,7 @@ class InputPromptScreen(ModalScreen[str]):
         self.dismiss(event.value)
 
 
-def _format_outcome(outcome: StepOutcome) -> str:
+def _format_outcome(outcome: StepOutcome) -> RenderableType:
     """Render a parked `StepOutcome.findings` for display on `ApprovalPromptScreen`.
 
     `findings` is untyped `object` at the `pipeline/` layer (see `pipeline/step.py`'s
@@ -68,7 +69,9 @@ def _format_outcome(outcome: StepOutcome) -> str:
     whenever `has_blocking_finding` is true) -- both rendered via the exact same functions
     `FindingsBox` already uses for a completed step's findings (`widgets.render_findings`/
     `format_finding`), so a parked step's findings look the same here as they would once
-    completed. Anything else (an empty list, or a future producer whose findings fit
+    completed. Returns `RenderableType`, not `str`, since `render_findings` itself returns
+    a Rich `Group` (issue #77's two-column grid) rather than a plain string -- `Static`
+    accepts either. Anything else (an empty list, or a future producer whose findings fit
     neither shape) falls back to `str(...)` rather than guessing at a schema this module
     has no business assuming.
     """
