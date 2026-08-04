@@ -11,6 +11,22 @@ itself, off `ctx.intent`, the same way `build_review_prompt` does (see `steps/AG
 rule: each step's own prompt builder re-derives wrapped intent text from `ctx.intent`,
 never receives it forward through a prior step's `StepOutcome`).
 
+`build_test_sufficiency_fix_prompt` (issue #82) is the fix-mode counterpart to
+`build_test_sufficiency_prompt`: `steps/test_sufficiency.py`'s `TestSufficiencyStep.run`
+calls this instead whenever `ctx.fix_round is not None`. It instructs the agent to actually
+act on `ctx.fix_round.instructions` (write the missing test, perform the missing manual
+verification, etc.), then re-run its own test-sufficiency assessment from scratch -- the
+returned `TestSufficiencyOutput` must be a fresh verdict (new `findings`/`tested`/
+`testing_summary`/`artifacts`), never an echo of what triggered the round. Mirrors
+`prompt/review.py`'s `build_review_fix_prompt` shape and reasoning exactly, including its
+own `ctx.diff`-staleness handling (`_STALE_DIFF_WARNING` below, a same-named but separately
+defined local constant -- not imported from `prompt/review.py`, per this module's own
+"no cross-step sharing" rule above), but is a standalone definition in this module rather
+than an import from `prompt/review.py`, for the same reason `build_test_sufficiency_prompt`
+itself is: nothing here should depend on `prompt/review.py`, or `prompt/review.py` on this
+module. This module's four guardrail clauses apply to a fix round's re-assessment exactly
+as they do to a normal round, so `build_test_sufficiency_fix_prompt` includes all four too.
+
 The four guardrail constants below exist to close specific loopholes a test-sufficiency
 agent could otherwise slip through:
 
@@ -89,6 +105,80 @@ def build_test_sufficiency_prompt(ctx: StepContext) -> str:
 
     sections = [
         f"Assess test sufficiency for this diff:\n{ctx.diff}",
+        wrap_intent(ctx.intent.summary, ctx.intent.source),
+        _DECISION_LADDER,
+        _NOT_SUFFICIENT_EVIDENCE_ALONE,
+        _COMPLETE_SUITE_PROHIBITION,
+        _TEST_QUALITY_RULE,
+    ]
+    return "\n\n".join(sections)
+
+
+# --- build_test_sufficiency_fix_prompt (issue #82) ----------------------------------------
+
+# Kept as a module-level constant, mirroring `prompt/review.py`'s `_FIX_ROUND_INSTRUCTION`,
+# so the exact re-assessment instruction is one grep away and diffable on its own line when
+# it needs to change.
+_FIX_ROUND_INSTRUCTION = (
+    "You are running a fix round on a test-sufficiency assessment you previously made. Act "
+    "on every item below -- write the missing test, perform the missing manual "
+    "verification, or otherwise do whatever the item calls for -- then re-run your own "
+    "test-sufficiency assessment from scratch: report a fresh set of findings and a fresh "
+    "tested/testing_summary/artifacts reflecting the diff as it now stands. Do not simply "
+    "restate or echo the items below as your findings -- they describe what to address, "
+    "not what you must report back."
+)
+
+# Mirrors `prompt/review.py`'s `_STALE_DIFF_WARNING` in reasoning and wording -- a
+# same-named, separately defined local constant, not an import (see this module's own
+# docstring for why `prompt/test_sufficiency.py` keeps no cross-step sharing with
+# `prompt/review.py`, per issue #58's Implementation Decisions).
+_STALE_DIFF_WARNING = (
+    "The diff below is what triggered the ORIGINAL test-sufficiency assessment, before any "
+    "fix round ran -- it does not reflect edits a prior fix round may already have made to "
+    "the working tree. Treat it only as background on what this change was originally "
+    "about; re-inspect the live working tree yourself (e.g. run `git diff` against the same "
+    "base) to see what the diff actually looks like right now, and assess that."
+)
+
+
+def build_test_sufficiency_fix_prompt(ctx: StepContext) -> str:
+    """Assemble `TestSufficiencyStep`'s fix-mode prompt (issue #82): instructs the agent to
+    act on `ctx.fix_round.instructions`, then re-run its own test-sufficiency assessment
+    and return a fresh `TestSufficiencyOutput` -- new findings/tested/testing_summary/
+    artifacts, never an unchanged echo of what triggered the round.
+
+    Requires `ctx.fix_round is not None`; the caller (`steps/test_sufficiency.py`'s
+    `TestSufficiencyStep.run`) is responsible for choosing this function over
+    `build_test_sufficiency_prompt` based on exactly that check.
+
+    **Why the live working tree, not `ctx.diff`**: same reasoning as
+    `prompt/review.py`'s `build_review_fix_prompt` -- `ctx.diff` is computed once, before
+    the pipeline starts, from a `git diff` against a base ref, and does not reflect edits a
+    fix round's own agent call makes to the working tree in a later round. A fix-mode
+    prompt that treated `ctx.diff` as ground truth for "what to re-assess" would silently
+    assess a stale snapshot from before its own edits, on every round after the first.
+    Instead, `ctx.diff` is included only as originating context (`_STALE_DIFF_WARNING`
+    above makes this explicit, by name) and the agent is told to re-inspect the live
+    working tree itself -- it already has full tool/shell access via `RunOpts`'s existing
+    permission defaults (see `steps/test_sufficiency.py`'s `TestSufficiencyStep.run`), so
+    no `RunOpts` change is needed here, only this prompt's wording.
+
+    Section order: the fix instruction first (what to do), then the stale-diff-warned
+    original diff (background), then the wrapped intent block, then all four guardrail
+    clauses (unchanged from `build_test_sufficiency_prompt`, since a fix round's
+    re-assessment must honor the same guardrails as any other round) -- fix instructions
+    lead so the agent knows it is acting, not merely reading, before it reaches the diff.
+    """
+
+    assert ctx.fix_round is not None, (
+        "build_test_sufficiency_fix_prompt requires ctx.fix_round to be set"
+    )
+
+    sections = [
+        _FIX_ROUND_INSTRUCTION,
+        f"Address the following:\n{ctx.fix_round.instructions}",
+        f"{_STALE_DIFF_WARNING}\n\n{ctx.diff}",
         wrap_intent(ctx.intent.summary, ctx.intent.source),
         _DECISION_LADDER,
         _NOT_SUFFICIENT_EVIDENCE_ALONE,

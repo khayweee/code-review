@@ -52,6 +52,24 @@ a `ReviewOutput`-only `risk_level` field `TestSufficiencyOutput` deliberately do
 have). Not yet registered in `STEP_REGISTRY`'s `IMPLEMENTED_STEPS` or wired into `cli.py`
 (issue #60) or the TUI (issue #61).
 
+`test_sufficiency.py`'s `TestSufficiencyStep` also owns Milestone 7's fix-mode addition
+(issue #82, mirroring `review.py`'s own #81 paragraph above): it is the second step (after
+`ReviewStep`) to set `supports_fix_round: ClassVar[bool] = True` (`pipeline/step.py`), so
+`pipeline/executor.py`'s bounded auto-fix-before-park round and the uncapped human-"fix"
+park response both apply to it too. `TestSufficiencyStep.run`'s own shape does not change
+-- still exactly one `ctx.agent.run` call per invocation, still the same
+`has_blocking_finding`/`action_or_default`-based `auto_fixable`/`needs_approval`
+post-processing applied every round, still no `filter_pipeline_owned_delivery_findings`
+call either way -- the only new branch is which prompt-assembly function to call:
+`code_review.prompt.test_sufficiency.build_test_sufficiency_fix_prompt(ctx)` when
+`ctx.fix_round is not None`, `build_test_sufficiency_prompt(ctx)` otherwise. See
+`prompt/AGENTS.md`'s `test_sufficiency.py` section for what the fix-mode prompt asks the
+agent to do differently (act on `ctx.fix_round.instructions` then re-assess from scratch,
+and why it steers the agent at the live working tree rather than the stale `ctx.diff`
+string a prior round's own edits invalidate -- the same reasoning `build_review_fix_prompt`
+already established, kept as a separately-defined, same-named local constant here rather
+than an import, per issue #58's no-cross-step-sharing decision).
+
 `gitutils.py`'s `run_git` reports itself as a timed activity (Milestone 14, issue #64) for
 every call it makes, with zero changes at any of `rebase.py`'s own call sites -- it reaches
 the running step's `ActivityReporter` ambiently (`pipeline.step.current_activity_reporter`),

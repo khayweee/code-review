@@ -53,5 +53,23 @@ here to keep separate from an always-present one, so folding it into `review.py`
 have bought nothing and made that module's one conditional clause harder to spot among
 several unconditional ones.
 
+`build_test_sufficiency_fix_prompt(ctx)` (Milestone 7, issue #82): the fix-mode
+counterpart, `steps/test_sufficiency.py`'s `TestSufficiencyStep.run` calls this instead
+whenever `ctx.fix_round is not None`, mirroring `review.py`'s `build_review_fix_prompt`
+shape and reasoning exactly. It instructs the agent to actually act on
+`ctx.fix_round.instructions` (write the missing test, perform the missing manual
+verification, etc.), then re-run its own test-sufficiency assessment from scratch -- a
+fresh `TestSufficiencyOutput`, never an echo of what triggered the round. Same
+`ctx.diff`-staleness handling as `build_review_fix_prompt`, via a same-named but
+separately-defined local `_STALE_DIFF_WARNING` constant -- not imported from `review.py`,
+per this module's own "no cross-step sharing" rule above (issue #58's Implementation
+Decisions). All four of this module's guardrail clauses (`_DECISION_LADDER`,
+`_NOT_SUFFICIENT_EVIDENCE_ALONE`, `_COMPLETE_SUITE_PROHIBITION`, `_TEST_QUALITY_RULE`) are
+unconditional, so the fix-mode prompt includes all four too, unlike `build_review_prompt`'s
+one conditional intent-conformance clause. No `RunOpts` change was needed here either, for
+the same reason `build_review_fix_prompt` didn't need one: the agent already has full
+tool/shell access via `RunOpts`'s existing permission defaults, so this is a
+prompt-wording-only change.
+
 Once PR's own prompt builder lands (Milestone 8), record here whether it gets its own
 module in this package or shares one of the above.
