@@ -15,7 +15,7 @@ from io import StringIO
 
 from rich.console import Console
 from textual.pilot import Pilot
-from textual.widgets import Input, Static
+from textual.widgets import Input, OptionList, Static
 
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
@@ -27,7 +27,7 @@ from code_review.tui.app import ReviewApp, _tag_activity_events
 from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import ApprovalPromptScreen, InputPromptScreen
-from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox, render_findings
+from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
 
@@ -39,6 +39,19 @@ def _pipeline_box_content(box: PipelineBox) -> str:
 
     buffer = StringIO()
     Console(file=buffer, force_terminal=True, width=80, color_system=None).print(box.content)
+    return buffer.getvalue().rstrip()
+
+
+def _findings_box_content(box: FindingsBox) -> str:
+    """Render every option in `box`'s child `OptionList` to plain text, one line each,
+    joined -- `FindingsBox` is a `Vertical` with an `OptionList` child, not a single
+    renderable `.content` the way `PipelineBox` is (issue #88), so this renders each
+    option's `prompt` individually rather than reading one shared attribute."""
+
+    buffer = StringIO()
+    console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
+    for option in box.query_one(OptionList).options:
+        console.print(option.prompt)
     return buffer.getvalue().rstrip()
 
 
@@ -606,7 +619,16 @@ def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_marku
         async with app.run_test() as pilot:
             await _wait_for_approval_prompt(pilot, app)
 
-            prompt_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
+            # `widget.content` isn't always a plain `str` -- the `Static` showing the
+            # parked findings holds `render_findings`'s `Group` renderable (issue #77), not
+            # text -- so each widget's content is rendered through a real `Console` the
+            # same way `_pipeline_box_content`/`_findings_box_content` do, rather than
+            # `str(...)`'d directly.
+            buffer = StringIO()
+            console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
+            for widget in app.screen.query(Static):
+                console.print(widget.content)
+            prompt_text = buffer.getvalue()
             assert "drops error handling required by the caller's contract" in prompt_text
 
             await pilot.press("a")
@@ -719,14 +741,32 @@ def test_review_app_shows_a_findings_box_once_a_step_completes_with_non_empty_fi
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            expected = _review_output(
-                Finding(
-                    severity="error", description="removes error handling", review_scope="source"
-                )
-            )
             box = app.query_one(FindingsBox)
-            assert box.content == render_findings(expected)
-            assert box.border_title == "Findings"
+            assert "removes error handling" in _findings_box_content(box)
+            assert box.border_title == "Findings -- ReviewStep"
+
+    asyncio.run(scenario())
+
+
+def test_review_app_e_still_exits_after_the_findings_box_option_list_has_focus() -> None:
+    """Regression test for issue #88: `FindingsBox`'s child `OptionList` can take focus
+    and handle its own up/down bindings without shadowing the app-level "e" exit binding
+    (registered on `App`, not on `OptionList`)."""
+
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, _review_step_completes_with_findings())
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+
+            box = app.query_one(FindingsBox)
+            box.query_one(OptionList).focus()
+            await pilot.pause()
+
+            assert app.is_running is True
+            await pilot.press("e")
+            await pilot.pause()
+
+            assert app.is_running is False
 
     asyncio.run(scenario())
 
@@ -737,16 +777,9 @@ def test_review_app_shows_a_findings_box_for_a_completed_test_sufficiency_output
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            expected = _test_sufficiency_output(
-                Finding(
-                    severity="warning",
-                    description="no test covers the retry path",
-                    review_scope="source",
-                )
-            )
             box = app.query_one(FindingsBox)
-            assert box.content == render_findings(expected)
-            assert box.border_title == "Findings"
+            assert "no test covers the retry path" in _findings_box_content(box)
+            assert box.border_title == "Findings -- TestSufficiencyStep"
 
     asyncio.run(scenario())
 
@@ -782,8 +815,9 @@ def test_review_app_findings_box_shows_the_later_of_two_completed_findings() -> 
             await _wait_until_done(pilot, app)
 
             box = app.query_one(FindingsBox)
-            assert "second pass finding" in box.content
-            assert "first pass finding" not in box.content
+            content = _findings_box_content(box)
+            assert "second pass finding" in content
+            assert "first pass finding" not in content
 
     asyncio.run(scenario())
 

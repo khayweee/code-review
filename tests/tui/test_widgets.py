@@ -16,6 +16,7 @@ import pytest
 from rich.console import Console
 from rich.spinner import Spinner
 from textual.app import App, ComposeResult
+from textual.widgets import OptionList, Static
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
@@ -42,6 +43,14 @@ def _render_content(renderable: object) -> str:
     console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
     console.print(renderable)
     return buffer.getvalue().rstrip()
+
+
+def _option_list_content(option_list: OptionList) -> list[str]:
+    """Render every option's `prompt` in `option_list` to plain text, one entry per
+    option -- the `FindingsBox`-equivalent of `_render_content`, since an `OptionList`
+    has no single renderable `.content` the way `_BorderedBox`-based widgets do."""
+
+    return [_render_content(option.prompt) for option in option_list.options]
 
 
 # --- pure formatting -------------------------------------------------------------------
@@ -520,7 +529,7 @@ def test_pipeline_box_has_a_pipeline_border_title() -> None:
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
-            assert box.border_title == "Pipeline"
+            assert box.border_title == "Agentic Code Review Pipeline"
 
     asyncio.run(scenario())
 
@@ -563,13 +572,12 @@ def test_render_findings_lists_each_finding_and_a_severity_count_summary() -> No
         risk_rationale="removes retry backoff",
     )
 
-    assert render_findings(output) == (
-        "error: removes the retry loop's backoff (steps/review.py:42)\n"
-        "warning: unclear variable name\n"
-        "info: consider a docstring\n"
-        "\n"
-        "1 error, 1 warning, 1 info"
-    )
+    content = _render_content(render_findings(output))
+    assert "error: removes the retry loop's backoff (steps/review.py:42)" in content
+    assert "warning: unclear variable name" in content
+    assert "info: consider a docstring" in content
+    # The trailing severity-count summary line stays, unchanged in wording, below the grid.
+    assert content.splitlines()[-1] == "1 error, 1 warning, 1 info"
 
 
 def test_render_findings_summary_counts_zero_severities_not_seen() -> None:
@@ -579,7 +587,41 @@ def test_render_findings_summary_counts_zero_severities_not_seen() -> None:
         risk_rationale="fine",
     )
 
-    assert render_findings(output).endswith("0 error, 0 warning, 1 info")
+    content = _render_content(render_findings(output))
+    assert content.splitlines()[-1] == "0 error, 0 warning, 1 info"
+
+
+def test_render_findings_puts_suggestions_in_a_separate_right_hand_column() -> None:
+    output = ReviewOutput(
+        findings=[
+            Finding(
+                severity="warning",
+                description="unclear naming",
+                review_scope="source",
+                suggestions=["rename to `retry_count`", "add a comment"],
+            ),
+        ],
+        risk_level="low",
+        risk_rationale="fine",
+    )
+
+    lines = _render_content(render_findings(output)).splitlines()
+    finding_line = next(line for line in lines if "unclear naming" in line)
+    assert "rename to `retry_count`" in finding_line
+    # The second suggestion renders on its own line beneath the first -- still visually
+    # separate from the left column's description, not concatenated onto its line.
+    assert any("add a comment" in line and "unclear naming" not in line for line in lines)
+
+
+def test_render_findings_a_finding_with_no_suggestions_has_no_placeholder_cell() -> None:
+    output = ReviewOutput(
+        findings=[Finding(severity="info", description="no-op finding", review_scope="source")],
+        risk_level="low",
+        risk_rationale="fine",
+    )
+
+    content = _render_content(render_findings(output))
+    assert "None" not in content
 
 
 def test_render_findings_accepts_a_test_sufficiency_output() -> None:
@@ -598,12 +640,10 @@ def test_render_findings_accepts_a_test_sufficiency_output() -> None:
         artifacts=[],
     )
 
-    assert render_findings(output) == (
-        "error: no test covers the new retry path (tests/test_foo.py:10)\n"
-        "warning: manual check only\n"
-        "\n"
-        "1 error, 1 warning, 0 info"
-    )
+    content = _render_content(render_findings(output))
+    assert "error: no test covers the new retry path (tests/test_foo.py:10)" in content
+    assert "warning: manual check only" in content
+    assert content.splitlines()[-1] == "1 error, 1 warning, 0 info"
 
 
 # --- FindingsBox, mounted and driven through Pilot ----------------------------------------
@@ -613,12 +653,13 @@ class _FindingsHostApp(App[None]):
     """Minimal host app: mounts one `FindingsBox` so `Pilot` can drive it directly,
     independent of `ReviewApp`'s event-consuming worker."""
 
-    def __init__(self, output: ReviewOutput | TestSufficiencyOutput) -> None:
+    def __init__(self, output: ReviewOutput | TestSufficiencyOutput, step_name: str) -> None:
         super().__init__()
         self._initial_output = output
+        self._step_name = step_name
 
     def compose(self) -> ComposeResult:
-        yield FindingsBox(self._initial_output)
+        yield FindingsBox(self._initial_output, self._step_name)
 
 
 def test_findings_box_renders_its_initial_findings_on_mount() -> None:
@@ -630,23 +671,97 @@ def test_findings_box_renders_its_initial_findings_on_mount() -> None:
             risk_level="low",
             risk_rationale="fine",
         )
-        app = _FindingsHostApp(output)
+        app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(FindingsBox)
-            assert box.content == render_findings(output)
+            lines = _option_list_content(box.query_one(OptionList))
+            assert len(lines) == 1
+            assert "warning: unclear naming" in lines[0]
+            assert box.query_one(Static).content == "0 error, 1 warning, 0 info"
 
     asyncio.run(scenario())
 
 
-def test_findings_box_update_findings_replaces_the_rendered_content() -> None:
+def test_findings_box_highlights_index_0_by_default_and_shows_only_its_suggestions() -> None:
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="first finding",
+                    review_scope="source",
+                    suggestions=["fix the first one"],
+                ),
+                Finding(
+                    severity="error",
+                    description="second finding",
+                    review_scope="source",
+                    suggestions=["fix the second one"],
+                ),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsBox)
+            option_list = box.query_one(OptionList)
+            assert option_list.highlighted == 0
+            lines = _option_list_content(option_list)
+            assert "fix the first one" in lines[0]
+            assert "fix the second one" not in lines[1]
+
+    asyncio.run(scenario())
+
+
+def test_findings_box_arrow_key_down_moves_which_finding_shows_its_suggestions() -> None:
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="first finding",
+                    review_scope="source",
+                    suggestions=["fix the first one"],
+                ),
+                Finding(
+                    severity="error",
+                    description="second finding",
+                    review_scope="source",
+                    suggestions=["fix the second one"],
+                ),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsBox)
+            box.query_one(OptionList).focus()
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+
+            option_list = box.query_one(OptionList)
+            assert option_list.highlighted == 1
+            lines = _option_list_content(option_list)
+            assert "fix the first one" not in lines[0]
+            assert "fix the second one" in lines[1]
+
+    asyncio.run(scenario())
+
+
+def test_findings_box_update_findings_replaces_the_rendered_options() -> None:
     async def scenario() -> None:
         initial = ReviewOutput(
             findings=[Finding(severity="info", description="first", review_scope="source")],
             risk_level="low",
             risk_rationale="fine",
         )
-        app = _FindingsHostApp(initial)
+        app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(FindingsBox)
@@ -656,10 +771,14 @@ def test_findings_box_update_findings_replaces_the_rendered_content() -> None:
                 risk_level="high",
                 risk_rationale="bad",
             )
-            box.update_findings(updated)
+            box.update_findings(updated, "ReviewStep")
             await pilot.pause()
 
-            assert box.content == render_findings(updated)
+            lines = _option_list_content(box.query_one(OptionList))
+            assert len(lines) == 1
+            assert "error: second" in lines[0]
+            assert "first" not in "".join(lines)
+            assert box.query_one(Static).content == "1 error, 0 warning, 0 info"
 
     asyncio.run(scenario())
 
@@ -678,26 +797,44 @@ def test_findings_box_renders_a_test_sufficiency_output_on_mount() -> None:
             testing_summary="mostly fine",
             artifacts=[],
         )
-        app = _FindingsHostApp(output)
+        app = _FindingsHostApp(output, "TestSufficiencyStep")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(FindingsBox)
-            assert box.content == render_findings(output)
-            assert box.content == (
-                "warning: no test covers the retry path\n\n0 error, 1 warning, 0 info"
-            )
+            lines = _option_list_content(box.query_one(OptionList))
+            assert "warning: no test covers the retry path" in lines[0]
+            assert box.query_one(Static).content == "0 error, 1 warning, 0 info"
 
     asyncio.run(scenario())
 
 
-def test_findings_box_has_a_findings_border_title() -> None:
+def test_findings_box_border_title_names_the_owning_step() -> None:
     async def scenario() -> None:
         output = ReviewOutput(findings=[], risk_level="low", risk_rationale="fine")
-        app = _FindingsHostApp(output)
+        app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(FindingsBox)
-            assert box.border_title == "Findings"
+            assert box.border_title == "Findings -- ReviewStep"
+
+    asyncio.run(scenario())
+
+
+def test_findings_box_update_findings_updates_the_border_title_to_the_new_step() -> None:
+    async def scenario() -> None:
+        initial = ReviewOutput(findings=[], risk_level="low", risk_rationale="fine")
+        app = _FindingsHostApp(initial, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsBox)
+
+            updated = TestSufficiencyOutput(
+                findings=[], tested=[], testing_summary="fine", artifacts=[]
+            )
+            box.update_findings(updated, "TestSufficiencyStep")
+            await pilot.pause()
+
+            assert box.border_title == "Findings -- TestSufficiencyStep"
 
     asyncio.run(scenario())
 

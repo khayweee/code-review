@@ -236,9 +236,11 @@ def backfill(
     return rows
 
 
-def latest_findings(events: Sequence[StepEvent]) -> ReviewOutput | TestSufficiencyOutput | None:
-    """Return the most recently completed step's `ReviewOutput`/`TestSufficiencyOutput`, or
-    `None` if none exists.
+def latest_findings(
+    events: Sequence[StepEvent],
+) -> tuple[str, ReviewOutput | TestSufficiencyOutput] | None:
+    """Return the most recently completed step's name paired with its
+    `ReviewOutput`/`TestSufficiencyOutput`, or `None` if none exists.
 
     A `"completed"` event counts only when its `outcome.findings` is a `ReviewOutput` or
     `TestSufficiencyOutput` instance (guarding against e.g. `IntentStep`'s outcome, whose
@@ -247,10 +249,14 @@ def latest_findings(events: Sequence[StepEvent]) -> ReviewOutput | TestSufficien
     list is non-empty. Scans `events` in order and keeps the last match, so two completed
     steps that both carry findings resolve to whichever completed later -- regardless of
     which of the two schemas each one is -- matching `PipelineBox`'s own "one box, most
-    recent wins" display -- not an accumulated history across steps.
+    recent wins" display -- not an accumulated history across steps. The step name (issue
+    #74) travels alongside the output rather than being re-derived by the caller, since
+    this is the one place that already knows which `StepEvent` the winning output came
+    from -- `FindingsBox`'s `border_title` is the current consumer (via `app.py`'s
+    `_render_findings`).
     """
 
-    result: ReviewOutput | TestSufficiencyOutput | None = None
+    result: tuple[str, ReviewOutput | TestSufficiencyOutput] | None = None
     for event in events:
         if event.status != "completed":
             continue
@@ -259,7 +265,7 @@ def latest_findings(events: Sequence[StepEvent]) -> ReviewOutput | TestSufficien
             continue
         findings = outcome.findings
         if isinstance(findings, (ReviewOutput, TestSufficiencyOutput)) and findings.findings:
-            result = findings
+            result = (event.step_name, findings)
     return result
 
 

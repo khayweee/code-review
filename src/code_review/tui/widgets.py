@@ -22,7 +22,11 @@ from rich.console import Group
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
-from textual.widgets import Static
+from textual.app import ComposeResult
+from textual.containers import Vertical
+from textual.css.query import NoMatches
+from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option
 
 from code_review.pipeline.findings import Finding
 from code_review.steps.review import ReviewOutput
@@ -53,6 +57,16 @@ _STATUS_DOT_STYLES: dict[Status, str] = {
     "failed": "#bb6400",  # orange
     "parked": "#d7af00",  # amber -- waiting on a human decision
     "skipped": "#8a8a8a",  # gray -- deliberately bypassed by a human, not an error
+}
+
+# `FindingsBox`'s per-finding risk indicator (issue #77): a colored `_DOT_ICON`, keyed by
+# `Finding.severity` -- the same "reuse an existing field via a colored dot" shape as
+# `_STATUS_DOT_STYLES` above, rather than inventing a new per-finding risk field (`Finding`
+# carries no such field today; only a review's overall `risk_level` verdict does).
+_SEVERITY_DOT_STYLES: dict[str, str] = {
+    "error": "#bb6400",  # orange -- matches _STATUS_DOT_STYLES's "failed" color
+    "warning": "#d7af00",  # amber -- matches _STATUS_DOT_STYLES's "parked" color
+    "info": "#5fafff",  # blue -- matches _STATUS_DOT_STYLES's "completed" color
 }
 
 
@@ -245,7 +259,7 @@ class PipelineBox(_BorderedBox):
         self,
         rows: Sequence[StepRow] = (),
         *,
-        id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
+        id: (str | None) = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
         # One `Spinner` per currently-running step name, reused across `update_rows`
@@ -254,7 +268,7 @@ class PipelineBox(_BorderedBox):
         self._spinners: dict[str, Spinner] = {}
         super().__init__(render_rows_live(rows, self._spinners), id=id, classes=classes)
         self._rows = list(rows)
-        self.border_title = "Pipeline"
+        self.border_title = "Agentic Code Review Pipeline"
 
     def on_mount(self) -> None:
         self.set_interval(1 / 60, self._animate_shimmer)
@@ -295,43 +309,168 @@ def format_finding(finding: Finding) -> str:
     return f"{finding.severity}: {finding.description}{location}"
 
 
-def render_findings(output: ReviewOutput | TestSufficiencyOutput) -> str:
-    """Render every finding in `output.findings`, one per line via `format_finding`, then a
-    blank line and a severity-count summary, e.g. `1 error, 2 warning, 0 info`. `output` is
-    whichever of `ReviewOutput`/`TestSufficiencyOutput` `state.py`'s `latest_findings` picked
-    -- both schemas share an identical `findings: list[Finding]` shape, so nothing below
-    needs to branch on which one it got."""
+def _render_finding_row(finding: Finding, *, show_suggestions: bool = True) -> tuple[Text, Text]:
+    """Render one `Finding` as a `(left, right)` cell pair for `render_findings`'s grid.
 
-    lines = [format_finding(finding) for finding in output.findings]
+    Left: a colored `_DOT_ICON` (`_SEVERITY_DOT_STYLES`, keyed by `finding.severity`) --
+    the per-finding risk indicator issue #77 asks for, reusing `severity` rather than a
+    new field -- followed by `format_finding`'s existing severity/description/location
+    text. Right: `finding.suggestions`, one per line, or an empty `Text` when there are
+    none -- never a placeholder string like `"None"` (a `no-op`/`auto-fix` finding has
+    nothing for a human to choose between).
+
+    `show_suggestions=False` (issue #88, `FindingsBox`'s per-option rendering) forces an
+    empty right cell regardless of `finding.suggestions` -- used for every option except
+    the one currently under the cursor, so only the focused finding's suggestions show."""
+
+    left = Text(_DOT_ICON, style=_SEVERITY_DOT_STYLES[finding.severity])
+    left.append(f" {format_finding(finding)}")
+    right = Text("\n".join(finding.suggestions) if show_suggestions else "")
+    return left, right
+
+
+def _findings_summary(output: ReviewOutput | TestSufficiencyOutput) -> str:
+    """Render `output.findings`' severity-count summary, e.g. `1 error, 2 warning, 0
+    info` -- shared by `render_findings` and `FindingsBox`'s own summary line."""
+
     counts = {severity: 0 for severity in ("error", "warning", "info")}
     for finding in output.findings:
         counts[finding.severity] += 1
-    summary = f"{counts['error']} error, {counts['warning']} warning, {counts['info']} info"
-    return "\n".join([*lines, "", summary])
+    return f"{counts['error']} error, {counts['warning']} warning, {counts['info']} info"
 
 
-class FindingsBox(_BorderedBox):
+def render_findings(output: ReviewOutput | TestSufficiencyOutput) -> Group:
+    """Render every finding in `output.findings` as a two-column grid (issue #77) --
+    left column each finding's severity/description/location plus a per-finding risk
+    indicator (`_render_finding_row`), right column that finding's `suggestions` -- then a
+    blank line and a severity-count summary, e.g. `1 error, 2 warning, 0 info`, below the
+    grid. `output` is whichever of `ReviewOutput`/`TestSufficiencyOutput` `state.py`'s
+    `latest_findings` picked -- both schemas share an identical `findings: list[Finding]`
+    shape, so nothing below needs to branch on which one it got.
+
+    Uses `Table.grid`, one row per finding, mirroring `render_rows_live`'s per-row-grid
+    pattern (see that function's own docstring for why a single shared grid across
+    unrelated rows is the wrong shape: one finding's long text would otherwise widen every
+    other finding's columns too). Returned as a `Group` so the grid's height -- and
+    therefore `_BorderedBox`'s `height: auto` CSS -- tracks the number of findings actually
+    shown, rather than reserving a fixed size."""
+
+    grid = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
+    grid.add_column()
+    grid.add_column()
+    for finding in output.findings:
+        grid.add_row(*_render_finding_row(finding))
+
+    return Group(grid, "", _findings_summary(output))
+
+
+def _finding_option_prompt(finding: Finding, *, show_suggestions: bool) -> Table:
+    """Render one `Finding` as an `OptionList.Option`'s `prompt` -- the same two-column
+    `(left, right)` shape `render_findings` uses per row, in its own small grid rather
+    than a shared one (see `render_rows_live`'s docstring for why a per-row grid, not one
+    grid spanning every option)."""
+
+    row = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
+    row.add_column()
+    row.add_column()
+    row.add_row(*_render_finding_row(finding, show_suggestions=show_suggestions))
+    return row
+
+
+def _finding_options(findings: Sequence[Finding], highlighted: int | None) -> list[Option]:
+    """Build one `OptionList.Option` per finding (issue #88) -- only the option at index
+    `highlighted` shows its suggestions in the right column, every other index's right
+    column is empty. `highlighted=None` (no findings, or before Textual has highlighted
+    anything) shows no suggestions anywhere."""
+
+    return [
+        Option(_finding_option_prompt(finding, show_suggestions=index == highlighted))
+        for index, finding in enumerate(findings)
+    ]
+
+
+class FindingsBox(Vertical):
     """A bordered box showing the most recently completed step's findings (see
     `state.py`'s `latest_findings`, which recognizes a `ReviewOutput` (`ReviewStep`) or a
     `TestSufficiencyOutput` (`TestSufficiencyStep`) equally): each finding's severity,
-    description, and location when it has one, plus a severity-count summary. Display
+    description, location when it has one, and risk indicator in a left column, that
+    finding's suggestions in a right column -- but only for the finding currently under
+    the cursor (issue #88); arrow keys move the cursor between findings via a child
+    `OptionList`. A trailing severity-count summary line sits below the list, unchanged
+    in wording from #77. `border_title` names the owning step (issue #74, e.g.
+    `"Findings -- ReviewStep"`) so it's clear which step's output is on display. Display
     only -- no key or action here lets a user approve, fix, skip, or abort a finding (see
-    docs/GLOSSARY.md's "Action"; Milestone 7's fix/approval loop is a later ticket)."""
+    docs/GLOSSARY.md's "Action"; Milestone 7's fix/approval loop is a later ticket).
+
+    A `Vertical`, not a `_BorderedBox` (`Static`) subclass like `PipelineBox`/`StatusBox`
+    -- it needs two children (the `OptionList` and the summary `Static`), which a
+    `Static` can't host. `_BorderedBox`'s border/padding rule is duplicated here rather
+    than shared, since this widget can no longer extend that base alongside `Vertical`.
+    """
+
+    DEFAULT_CSS = """
+    FindingsBox {
+        border: round $primary;
+        padding: 0 1;
+        height: auto;
+    }
+
+    FindingsBox > OptionList {
+        height: auto;
+        border: none;
+    }
+    """
 
     def __init__(
         self,
         output: ReviewOutput | TestSufficiencyOutput,
+        step_name: str,
         *,
-        id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
+        id: (str | None) = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
-        super().__init__(render_findings(output), id=id, classes=classes)
-        self.border_title = "Findings"
+        super().__init__(id=id, classes=classes)
+        self._output = output
+        self.border_title = f"Findings -- {step_name}"
 
-    def update_findings(self, output: ReviewOutput | TestSufficiencyOutput) -> None:
-        """Replace the displayed findings with `output`'s, re-rendered."""
+    def compose(self) -> ComposeResult:
+        yield OptionList(*_finding_options(self._output.findings, highlighted=0))
+        yield Static(_findings_summary(self._output))
 
-        self.update(render_findings(output))
+    def update_findings(self, output: ReviewOutput | TestSufficiencyOutput, step_name: str) -> None:
+        """Replace the displayed findings with `output`'s, re-rendered, and update
+        `border_title` to name `step_name` (issue #74).
+
+        `app.py`'s `_render` runs on a periodic timer, so a freshly `self.mount()`ed
+        `FindingsBox` can receive an `update_findings` call before Textual has actually
+        finished mounting its own `compose()`-yielded children -- `self.mount()` returns
+        as soon as the widget is attached to the DOM, not once its subtree is fully
+        mounted. `self._output`/`border_title` are always updated regardless (neither
+        needs a mounted child), and the `OptionList`/`Static` rebuild is skipped rather
+        than raised when they aren't there yet -- `compose()` already renders from
+        `self._output`, so once mounting does finish it reflects this call's data anyway.
+        """
+
+        self._output = output
+        self.border_title = f"Findings -- {step_name}"
+        try:
+            option_list = self.query_one(OptionList)
+            summary = self.query_one(Static)
+        except NoMatches:
+            return
+        option_list.clear_options()
+        option_list.add_options(_finding_options(output.findings, highlighted=0))
+        summary.update(_findings_summary(output))
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        """Rebuild every option's prompt so only `event.option_index`'s row shows its
+        suggestions -- see the module docstring's rationale for a full rebuild over
+        diffing old-vs-new highlighted index."""
+
+        for index, finding in enumerate(self._output.findings):
+            event.option_list.replace_option_prompt_at_index(
+                index, _finding_option_prompt(finding, show_suggestions=index == event.option_index)
+            )
 
 
 class StatusBox(_BorderedBox):
@@ -345,7 +484,7 @@ class StatusBox(_BorderedBox):
         self,
         message: str,
         *,
-        id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
+        id: (str | None) = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
         super().__init__(message, id=id, classes=classes)

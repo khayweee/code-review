@@ -8,6 +8,14 @@ real branch and shells out to the `claude` CLI for every step. This mirrors exac
 `app.py`'s own injection-seam docstring -- just left running on a timer instead of driven
 through `Pilot` and asserted against.
 
+ReviewStep's outcome has `needs_approval=True`, and a real `ApprovalRelay` (issue #80/#81)
+is wired into `ReviewApp` exactly the way `cli.py` wires one for a real run -- so this
+preview also drives `ApprovalPromptScreen`: `_fake_events` awaits
+`approval_relay.request_approval(...)` after ReviewStep's "completed" event, the same call
+`pipeline.executor.run_steps` makes, and reacts to whatever the human answers (approve/skip/
+fix/abort) the same way that executor does -- "fix" re-runs the step for one simulated round
+before moving on, "abort" raises `RunAbortedError`, matching real behavior.
+
 Not installed as a package entry point and not covered by `tests/` -- it is a manual dev
 tool, not a shipped code path.
 
@@ -23,12 +31,14 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 
+from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.registry import STEP_REGISTRY
 from code_review.steps.review import ReviewOutput
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
+from code_review.tui.approval_relay import ApprovalRelay
 
 # Long enough that each step's "running" state is visible on screen, short enough that the
 # whole preview run finishes in a few seconds.
@@ -47,6 +57,10 @@ _REVIEW_FINDINGS = StepOutcome(
                 action="ask-user",
                 review_scope="source",
                 location="src/code_review/cli.py:249",
+                suggestions=[
+                    "Log the exception before re-raising.",
+                    "Propagate it to the caller instead of swallowing it.",
+                ],
             ),
             Finding(
                 severity="warning",
@@ -54,6 +68,7 @@ _REVIEW_FINDINGS = StepOutcome(
                 action="auto-fix",
                 review_scope="source",
                 location="src/code_review/tui/app.py:120",
+                suggestions=["Update the docstring to match the current behavior."],
             ),
             Finding(
                 severity="info",
@@ -68,7 +83,9 @@ _REVIEW_FINDINGS = StepOutcome(
 )
 
 
-async def _fake_events(fail: bool, activity_relay: ActivityRelay) -> AsyncIterator[StepEvent]:
+async def _fake_events(
+    fail: bool, activity_relay: ActivityRelay, approval_relay: ApprovalRelay
+) -> AsyncIterator[StepEvent]:
     """Steps in `STEP_REGISTRY` order. `PRStep` has no class yet (see `registry.py`), so it
     is left out entirely and renders as a pending placeholder, matching a real run today.
 
@@ -78,6 +95,16 @@ async def _fake_events(fail: bool, activity_relay: ActivityRelay) -> AsyncIterat
     `activity_relay.activity(label)`, so `ReviewApp`'s activity worker (`app.py`'s
     `_consume_activities`) and `state.py`'s `backfill_activities` render them exactly as
     they would a real run's. `IntentStep` reports none, matching reality (no subprocess).
+
+    ReviewStep's outcome carries `needs_approval=True`, so once its "completed" event is
+    yielded this awaits `approval_relay.request_approval(...)` -- exactly the call
+    `pipeline.executor.run_steps` makes at a real park -- and blocks until `ReviewApp`'s
+    approval-relay worker resolves it from a human answering `ApprovalPromptScreen`. This
+    mirrors that executor's own approve/skip/fix/abort handling: "fix" re-runs the step for
+    one simulated round (settling on `_NO_FINDINGS`, standing in for a fix that resolved the
+    findings) before moving on; "abort" raises `RunAbortedError`, matching the real failure
+    path this preview's `--fail` flag also exercises; "approve"/"skip" both simply continue
+    to the next step, the same "presentational only" distinction the real executor draws.
     """
 
     steps: list[tuple[str, StepOutcome, list[tuple[str, float]]]] = [
@@ -115,6 +142,30 @@ async def _fake_events(fail: bool, activity_relay: ActivityRelay) -> AsyncIterat
             duration=time.monotonic() - started,
         )
 
+        if outcome.needs_approval:
+            response = await approval_relay.request_approval(name, outcome)
+            if response.decision == "abort":
+                raise RunAbortedError(name)
+            if response.decision == "fix":
+                fix_started = time.monotonic()
+                yield StepEvent(
+                    step_name=name,
+                    status="running",
+                    outcome=None,
+                    started_at=fix_started,
+                    duration=None,
+                )
+                await asyncio.sleep(1.0)
+                yield StepEvent(
+                    step_name=name,
+                    status="completed",
+                    outcome=_NO_FINDINGS,
+                    started_at=fix_started,
+                    duration=time.monotonic() - fix_started,
+                )
+            # "approve"/"skip" leave no further bookkeeping here -- `ReviewApp`'s own
+            # approval-relay worker already records "skip" into `self._skipped_steps`.
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -126,8 +177,12 @@ def main() -> None:
     args = parser.parse_args()
 
     activity_relay = ActivityRelay()
+    approval_relay = ApprovalRelay()
     app = ReviewApp(
-        STEP_REGISTRY, _fake_events(args.fail, activity_relay), activity_relay=activity_relay
+        STEP_REGISTRY,
+        _fake_events(args.fail, activity_relay, approval_relay),
+        activity_relay=activity_relay,
+        approval_relay=approval_relay,
     )
     app.run()
 
