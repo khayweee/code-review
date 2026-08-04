@@ -8,7 +8,7 @@ for every call.
 ## Subunits
 
 | Subunit | Purpose | Input | Output |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `Agent` | Protocol used by steps: asynchronous `run` plus `close` for teardown. | `RunOpts[T]` | `Result[T]` |
 | `RunOpts[T]` | Complete description of one isolated call: prompt, checkout, Pydantic output schema, model, prompt overrides, tool permissions, interactive-input relay, and executable test seam. | Values supplied by a step | Backend call configuration |
 | `Result[T]` | Preserve both the validated answer and backend evidence. | Backend response | Typed `output`, original `text`, and optional `Usage` |
@@ -17,27 +17,6 @@ for every call.
 | `process_group.py` | Terminate the entire subprocess tree on success, failure, or cancellation. | Spawned process/session | Completed bounded cleanup |
 | `errors.py` | Distinguish process-start, process-exit, missing-output, schema-validation, and stdin-blocked-with-no-relay failures. | Failure details | Actionable `AgentError` subtype |
 | `Usage` | Record backend-reported tokens and cost without inventing missing values. | Optional backend metadata | Values or `None` when unknown |
-
-## One-call data flow
-
-```text
-Step
-  | RunOpts(prompt, cwd, output_schema, ...)
-  v
-Agent protocol
-  v
-ClaudeCLI backend
-  | stdin: prompt
-  | argv: model, schema, prompt/permission options
-  v
-Claude subprocess -- JSON envelope on stdout
-  v
-extract JSON --> unwrap structured_output --> validate schema
-  v
-Result(output=T, text=raw response, usage=optional)
-  |
-  +--> Step wraps `output` in a StepOutcome
-```
 
 On any exit path, the backend tears down the process group so child tools do not remain
 as orphans. Failures stay separate because callers may respond differently: retrying a
