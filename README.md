@@ -74,11 +74,9 @@ src/code_review/
   install_state.py install-lifecycle state directory (`~/.code-review`)
   agent/           Agent abstraction — shells out to a coding-agent CLI (starting with `claude`)
   pipeline/        Step protocol, findings model, and the executor
-  steps/           intent, review, test_sufficiency, pr
+  steps/           the pipeline steps themselves — see below
   scm/             GitHub wrapper (via the `gh` CLI)
 scripts/
   install.sh       one-shot install script (`uv tool install` under the hood)
 tests/             mirrors src/code_review/ package-for-package
 ```
-
-Contributor and agent conventions live in [`AGENTS.md`](AGENTS.md).
