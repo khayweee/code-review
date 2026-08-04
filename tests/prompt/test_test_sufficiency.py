@@ -96,6 +96,15 @@ def test_build_test_sufficiency_prompt_puts_the_diff_before_the_intent_block() -
     assert prompt.index("diff --git") < prompt.index("-----BEGIN USER INTENT-----")
 
 
+def test_build_test_sufficiency_prompt_contains_the_suggestion_obligation_clause() -> None:
+    intent = Intent(summary="add retry logic", source="explicit", score=1.0)
+
+    prompt = build_test_sufficiency_prompt(_ctx(intent))
+
+    assert "ask-user" in prompt
+    assert "concrete, actionable remediation options" in prompt
+
+
 # --- build_test_sufficiency_fix_prompt (issue #82) -----------------------------------------
 
 
@@ -138,7 +147,7 @@ def test_build_test_sufficiency_fix_prompt_includes_the_wrapped_intent_block() -
     assert "use a queue, not polling" in prompt
 
 
-def test_build_test_sufficiency_fix_prompt_contains_all_four_guardrail_clauses() -> None:
+def test_build_test_sufficiency_fix_prompt_contains_all_five_guardrail_clauses() -> None:
     intent = Intent(summary="add retry logic", source="explicit", score=1.0)
     fix_round = FixRound(instructions="do the thing")
 
@@ -151,6 +160,7 @@ def test_build_test_sufficiency_fix_prompt_contains_all_four_guardrail_clauses()
     assert "unit tests passing is not sufficient evidence by itself" in lowered
     assert "not permission to run nothing" in lowered
     assert "grep" in lowered
+    assert "concrete, actionable remediation options" in lowered
 
 
 def test_build_test_sufficiency_fix_prompt_instructs_a_fresh_reassessment_not_an_echo() -> None:

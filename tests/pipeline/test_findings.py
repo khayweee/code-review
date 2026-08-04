@@ -75,6 +75,29 @@ def test_finding_location_accepts_a_file_line_string() -> None:
     assert finding.location == "steps/review.py:42"
 
 
+def test_finding_suggestions_defaults_to_empty_list_when_unset() -> None:
+    # Mirrors `location`'s own default test above -- an agent response omitting
+    # `suggestions` entirely must still validate, matching every existing fixture.
+    finding = _finding()
+
+    assert finding.suggestions == []
+
+
+def test_finding_suggestions_accepts_a_list_of_strings() -> None:
+    finding = _finding(suggestions=["revert the rewrap", "add a comment explaining this"])
+
+    assert finding.suggestions == ["revert the rewrap", "add a comment explaining this"]
+
+
+def test_finding_with_ask_user_action_and_empty_suggestions_still_validates() -> None:
+    # Prompt-only enforcement (see pipeline/findings.py's module docstring for why):
+    # nothing at the schema level rejects an ask-user finding with no suggestions.
+    finding = _finding(action="ask-user", suggestions=[])
+
+    assert finding.action == "ask-user"
+    assert finding.suggestions == []
+
+
 # --- action_or_default: the fail-safe default -------------------------------------------
 
 

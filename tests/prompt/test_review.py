@@ -1,5 +1,7 @@
 """Tests for the Review step's prompt-construction helpers (Milestone 5, issue #26):
-`intent_conformance_clause` and `build_review_prompt`.
+`intent_conformance_clause` and `build_review_prompt`. Also covers the unconditional
+suggestion-obligation clause added to both `build_review_prompt` and
+`build_review_fix_prompt` by issue #76.
 
 Moved here from `tests/steps/test_review.py` in a later structural refactor alongside the
 functions themselves moving to `code_review.prompt.review`. `intent_conformance_clause`'s
@@ -12,8 +14,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from code_review.pipeline.step import StepContext
-from code_review.prompt.review import build_review_prompt, intent_conformance_clause
+from code_review.pipeline.step import FixRound, StepContext
+from code_review.prompt.review import (
+    build_review_fix_prompt,
+    build_review_prompt,
+    intent_conformance_clause,
+)
 from code_review.steps.intent import Intent
 
 # --- intent_conformance_clause -----------------------------------------------------------
@@ -60,8 +66,14 @@ class _SpyAgent:
         pass
 
 
-def _ctx(intent: Intent, diff: str = "diff --git a/f b/f\n+hello\n") -> StepContext:
-    return StepContext(cwd=Path("."), agent=_SpyAgent(), diff=diff, intent=intent)  # type: ignore[arg-type]
+def _ctx(
+    intent: Intent,
+    diff: str = "diff --git a/f b/f\n+hello\n",
+    fix_round: FixRound | None = None,
+) -> StepContext:
+    return StepContext(  # type: ignore[arg-type]
+        cwd=Path("."), agent=_SpyAgent(), diff=diff, intent=intent, fix_round=fix_round
+    )
 
 
 def test_build_review_prompt_includes_the_diff() -> None:
@@ -104,3 +116,30 @@ def test_build_review_prompt_puts_the_diff_before_the_intent_block() -> None:
     prompt = build_review_prompt(_ctx(intent))
 
     assert prompt.index("diff --git") < prompt.index("-----BEGIN USER INTENT-----")
+
+
+def test_build_review_prompt_includes_the_suggestion_obligation_clause() -> None:
+    intent = Intent(summary="add retry logic", source="explicit", score=1.0)
+
+    prompt = build_review_prompt(_ctx(intent))
+
+    assert "ask-user" in prompt
+    assert "suggestions" in prompt
+
+
+def test_build_review_prompt_includes_the_suggestion_clause_for_non_explicit_intent() -> None:
+    intent = Intent(summary="add retry logic", source="claude", score=0.4)
+
+    prompt = build_review_prompt(_ctx(intent))
+
+    assert "concrete, actionable remediation options" in prompt
+
+
+def test_build_review_fix_prompt_includes_the_suggestion_obligation_clause() -> None:
+    intent = Intent(summary="add retry logic", source="explicit", score=1.0)
+    fix_round = FixRound(instructions="do the thing")
+
+    prompt = build_review_fix_prompt(_ctx(intent, fix_round=fix_round))
+
+    assert "ask-user" in prompt
+    assert "concrete, actionable remediation options" in prompt
