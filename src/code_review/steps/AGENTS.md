@@ -28,6 +28,19 @@ siblings -- see that package's own `AGENTS.md`.
 (Milestone 8, see [docs/ROADMAP.md](../../../docs/ROADMAP.md)). Once its real prompt/schema
 lands, record here any PR-body byte-budget/truncation rules.
 
+`review.py`'s `ReviewStep` also owns Milestone 7's fix-mode addition (issue #81): it is the
+first (and, until #82, only) step to set `supports_fix_round: ClassVar[bool] = True`
+(`pipeline/step.py`), so `pipeline/executor.py`'s bounded auto-fix-before-park round and the
+uncapped human-"fix" park response both apply to it. `ReviewStep.run`'s own shape does not
+change -- still exactly one `ctx.agent.run` call per invocation, still the same
+`filter_pipeline_owned_delivery_findings`/`has_blocking_finding`/`auto_fixable`
+post-processing applied every round -- the only new branch is which prompt-assembly
+function to call: `code_review.prompt.review.build_review_fix_prompt(ctx)` when
+`ctx.fix_round is not None`, `build_review_prompt(ctx)` otherwise. See `prompt/AGENTS.md`'s
+`review.py` section for what the fix-mode prompt asks the agent to do differently
+(edit-then-re-review, and why it steers the agent at the live working tree rather than the
+stale `ctx.diff` string a prior round's own edits invalidate).
+
 `test_sufficiency.py` is implemented (Milestone 6, issue #59): `TestSufficiencyOutput`/
 `TestArtifact` and `TestSufficiencyStep`, mirroring `review.py`'s split of schema/
 orchestration from prompt construction (`build_test_sufficiency_prompt` lives in
@@ -38,6 +51,24 @@ shared blocking-findings gate `ReviewStep` uses -- but does NOT call
 a `ReviewOutput`-only `risk_level` field `TestSufficiencyOutput` deliberately does not
 have). Not yet registered in `STEP_REGISTRY`'s `IMPLEMENTED_STEPS` or wired into `cli.py`
 (issue #60) or the TUI (issue #61).
+
+`test_sufficiency.py`'s `TestSufficiencyStep` also owns Milestone 7's fix-mode addition
+(issue #82, mirroring `review.py`'s own #81 paragraph above): it is the second step (after
+`ReviewStep`) to set `supports_fix_round: ClassVar[bool] = True` (`pipeline/step.py`), so
+`pipeline/executor.py`'s bounded auto-fix-before-park round and the uncapped human-"fix"
+park response both apply to it too. `TestSufficiencyStep.run`'s own shape does not change
+-- still exactly one `ctx.agent.run` call per invocation, still the same
+`has_blocking_finding`/`action_or_default`-based `auto_fixable`/`needs_approval`
+post-processing applied every round, still no `filter_pipeline_owned_delivery_findings`
+call either way -- the only new branch is which prompt-assembly function to call:
+`code_review.prompt.test_sufficiency.build_test_sufficiency_fix_prompt(ctx)` when
+`ctx.fix_round is not None`, `build_test_sufficiency_prompt(ctx)` otherwise. See
+`prompt/AGENTS.md`'s `test_sufficiency.py` section for what the fix-mode prompt asks the
+agent to do differently (act on `ctx.fix_round.instructions` then re-assess from scratch,
+and why it steers the agent at the live working tree rather than the stale `ctx.diff`
+string a prior round's own edits invalidate -- the same reasoning `build_review_fix_prompt`
+already established, kept as a separately-defined, same-named local constant here rather
+than an import, per issue #58's no-cross-step-sharing decision).
 
 `gitutils.py`'s `run_git` reports itself as a timed activity (Milestone 14, issue #64) for
 every call it makes, with zero changes at any of `rebase.py`'s own call sites -- it reaches

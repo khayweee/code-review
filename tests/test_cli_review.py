@@ -63,6 +63,7 @@ runner = CliRunner()
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 _FAKES = Path(__file__).parent / "pipeline" / "fakes"
+AUTO_FIX_ROUND_FAKE_CLAUDE = _FAKES / "claude_superset_auto_fix_then_clean.py"
 CLEAN_FAKE_CLAUDE = _FAKES / "claude_superset_clean.py"
 BLOCKING_FAKE_CLAUDE = _FAKES / "claude_superset_blocking.py"
 
@@ -622,6 +623,41 @@ def test_review_choosing_approve_at_the_rebase_park_continues_the_run(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         keypresses=[(3.0, "a")],
+        env=env,
+    )
+    output = _plain(result.stdout)
+
+    assert result.returncode == 0
+    assert "Traceback" not in output
+    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep"):
+        assert step_name in output
+    assert "Pipeline ran successfully." in output
+
+    _assert_no_leftover_code_review_process()
+
+
+def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park(
+    repo_with_branch: tuple[Path, str], tmp_path: Path
+) -> None:
+    """Real end-to-end proof of issue #81's automatic path, through the real `code-review
+    review` command: `ReviewStep`'s first round returns one auto-fix finding and no
+    ask-user finding (`auto_fixable=True`, `needs_approval=False`), which `pipeline/
+    executor.py`'s round loop re-runs automatically -- no park, no keypress, no human
+    interaction of any kind -- before `TestSufficiencyStep` ever runs. `AUTO_FIX_ROUND_
+    FAKE_CLAUDE` answers clean on every call after its first (both `ReviewStep`'s own
+    automatic fix round and `TestSufficiencyStep`'s later, separate call resolve this same
+    fake `claude` on `PATH`), so this run reaches "Pipeline ran successfully." with only
+    the closing "e" ever sent -- if the automatic round instead parked (the regression this
+    test guards against), no approval prompt would ever be answered and this would time out
+    instead of exiting cleanly."""
+
+    repo, branch = repo_with_branch
+    env = _env_with_fake_claude(AUTO_FIX_ROUND_FAKE_CLAUDE, tmp_path)
+
+    result = _run_review_and_press_e_to_exit(
+        [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
+        cwd=repo,
+        wait_before_keypress=5.0,  # one extra fake-claude call over the other full-run tests
         env=env,
     )
     output = _plain(result.stdout)

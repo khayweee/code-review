@@ -27,20 +27,38 @@ guardrail text lives only in `prompt/test_sufficiency.py`, with no cross-step sh
 `has_blocking_finding`/`action_or_default` (`pipeline/findings.py`) are reused here
 unmodified -- both are explicitly documented in that module as shared across Milestone 5
 (Review) and Milestone 6 (this step); see that module's own docstring.
+
+**Fix mode (Milestone 7, issue #82)**: `TestSufficiencyStep` is the second step (after
+`steps/review.py`'s `ReviewStep`, issue #81) to set `supports_fix_round: ClassVar[bool] =
+True` (`pipeline/step.py`), opting into `pipeline/executor.py`'s bounded
+auto-fix-before-park round and the uncapped human-"fix" park response. `TestSufficiencyStep.
+run`'s own shape is unchanged by this: still exactly one `ctx.agent.run` call per
+invocation (per round), still the same `has_blocking_finding`/`action_or_default`-based
+`auto_fixable`/`needs_approval` post-processing applied to whatever `TestSufficiencyOutput`
+comes back, and still no call to `filter_pipeline_owned_delivery_findings` (unaffected
+either way, see above). The only branch this method adds is which prompt-assembly function
+to call: `build_test_sufficiency_fix_prompt(ctx)` when `ctx.fix_round is not None`,
+`build_test_sufficiency_prompt(ctx)` otherwise -- see `prompt/test_sufficiency.py`'s own
+docstring for what a fix-mode prompt asks the agent to do differently, mirroring
+`ReviewStep`'s identical shape exactly (see `steps/review.py`'s own "Fix mode" docstring
+section).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel
 
 from code_review.agent import RunOpts
 from code_review.pipeline.findings import Finding, action_or_default, has_blocking_finding
 from code_review.pipeline.step import Step, StepContext, StepOutcome
-from code_review.prompt.test_sufficiency import build_test_sufficiency_prompt
+from code_review.prompt.test_sufficiency import (
+    build_test_sufficiency_fix_prompt,
+    build_test_sufficiency_prompt,
+)
 
 # --- TestArtifact ------------------------------------------------------------------------
 
@@ -127,9 +145,13 @@ class TestSufficiencyStep(Step):
     gate (`pipeline/findings.py`) applied to the parsed answer to compute this step's
     `StepOutcome` -- no scope filter runs here (see module docstring).
 
-    Single pass only -- no retry, no re-verification, no session persistence, mirroring
-    `ReviewStep`'s own single-pass rationale (see docs/GLOSSARY.md's "Agent"). The
-    fix/approval loop that would act on a parked run is Milestone 7's, not this step's.
+    Single pass, single agent call *per round* -- no retry, no session persistence within
+    one call (see docs/GLOSSARY.md's "Agent": one call in, one result out), mirroring
+    `ReviewStep`'s own single-pass rationale. The fix/approval loop that decides whether and
+    how to re-run this step lives in `pipeline/executor.py` (Milestone 7, issues #80/#81),
+    not here -- this class has no idea it is on its second, third, or Nth round;
+    `ctx.fix_round` is the only signal that differs between rounds, and it only changes
+    which prompt-assembly function `run` calls (issue #82).
     """
 
     # Subprocess test seam threaded through to `RunOpts.executable`, mirroring
@@ -141,10 +163,31 @@ class TestSufficiencyStep(Step):
     # issue #60.
     executable: str | Path = "claude"
 
+    # Opts into `pipeline/executor.py`'s fix-round loop (issue #82) -- see this class's own
+    # "Fix mode" docstring section and `pipeline/step.py`'s `Step.supports_fix_round` for
+    # why this must be an explicit per-step opt-in rather than following from
+    # `StepOutcome.auto_fixable` alone. `TestSufficiencyStep` is the second step (after
+    # `steps/review.py`'s `ReviewStep`, issue #81) to set this `True`.
+    supports_fix_round: ClassVar[bool] = True
+
     async def run(self, ctx: StepContext) -> StepOutcome:
+        # Fix mode (issue #82): a fix round needs the agent to actually act on
+        # `ctx.fix_round.instructions` (write the missing test, perform the missing manual
+        # verification, etc.) and re-assess its own result, not just assess a static diff --
+        # see `build_test_sufficiency_fix_prompt`'s own docstring for the prompt-level
+        # differences and why it does not rely solely on `ctx.diff`. Which prompt-assembly
+        # function to call is the only thing that differs between an ordinary round and a
+        # fix round; every other line below (the agent call shape, the post-processing) is
+        # identical, mirroring `ReviewStep.run`'s identical shape (`steps/review.py`).
+        prompt = (
+            build_test_sufficiency_fix_prompt(ctx)
+            if ctx.fix_round is not None
+            else build_test_sufficiency_prompt(ctx)
+        )
+
         result = await ctx.agent.run(
             RunOpts(
-                prompt=build_test_sufficiency_prompt(ctx),
+                prompt=prompt,
                 cwd=ctx.cwd,
                 output_schema=TestSufficiencyOutput,
                 executable=self.executable,

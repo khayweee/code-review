@@ -15,10 +15,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import StepOutcome
+from code_review.pipeline.step import ApprovalDecision, StepOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
-from code_review.tui.approval_relay import Decision
 from code_review.tui.widgets import format_finding, render_findings
 
 
@@ -82,16 +81,22 @@ def _format_outcome(outcome: StepOutcome) -> str:
     return str(findings)
 
 
-class ApprovalPromptScreen(ModalScreen[Decision]):
-    """Shows `step_name`/`outcome` and an approve/skip/abort choice; dismisses with the
-    chosen `Decision`.
+class ApprovalPromptScreen(ModalScreen[ApprovalDecision]):
+    """Shows `step_name`/`outcome` and an approve/skip/fix/abort choice; dismisses with the
+    chosen `ApprovalDecision`.
 
     A distinct screen from `InputPromptScreen`, not a reuse of it (see `approval_relay.py`'s
-    module docstring) -- the response here is a three-way choice, not free text. Offers both
+    module docstring) -- the response here is a four-way choice, not free text. Offers both
     a mouse path (`Button`s) and a keyboard path (single-key `BINDINGS`, mirroring this
     app's existing single-key convention, e.g. `app.py`'s own exit binding) so a script-
     driven pty test (no mouse available) can answer it the same way a `Pilot`-driven test
     or a real interactive user would.
+
+    "fix" (issue #81) dismisses with just the `ApprovalDecision` string, not a full
+    `ApprovalResponse` -- this screen has no way to collect free-text instructions itself
+    (it would need a second widget, and `InputPromptScreen` already does exactly that job).
+    `ReviewApp._relay_approval` (`app.py`) is what pushes `InputPromptScreen` next when it
+    sees "fix" come back from here, and only then builds the full `ApprovalResponse`.
     """
 
     DEFAULT_CSS = """
@@ -124,6 +129,7 @@ class ApprovalPromptScreen(ModalScreen[Decision]):
     BINDINGS = [
         ("a", "choose_approve", "Approve"),
         ("s", "choose_skip", "Skip"),
+        ("f", "choose_fix", "Fix"),
         ("x", "choose_abort", "Abort"),
     ]
 
@@ -141,10 +147,11 @@ class ApprovalPromptScreen(ModalScreen[Decision]):
         with Vertical():
             yield Static(f"{self._step_name} needs approval:", markup=False)
             yield Static(_format_outcome(self._outcome), markup=False)
-            yield Static("[a] Approve   [s] Skip   [x] Abort", markup=False)
+            yield Static("[a] Approve   [s] Skip   [f] Fix   [x] Abort", markup=False)
             with Horizontal():
                 yield Button("Approve", id="approve", variant="success")
                 yield Button("Skip", id="skip", variant="warning")
+                yield Button("Fix", id="fix", variant="primary")
                 yield Button("Abort", id="abort", variant="error")
 
     def action_choose_approve(self) -> None:
@@ -152,6 +159,9 @@ class ApprovalPromptScreen(ModalScreen[Decision]):
 
     def action_choose_skip(self) -> None:
         self.dismiss("skip")
+
+    def action_choose_fix(self) -> None:
+        self.dismiss("fix")
 
     def action_choose_abort(self) -> None:
         self.dismiss("abort")
@@ -161,5 +171,7 @@ class ApprovalPromptScreen(ModalScreen[Decision]):
             self.action_choose_approve()
         elif event.button.id == "skip":
             self.action_choose_skip()
+        elif event.button.id == "fix":
+            self.action_choose_fix()
         elif event.button.id == "abort":
             self.action_choose_abort()

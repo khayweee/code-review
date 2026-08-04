@@ -13,18 +13,31 @@ cannot return a review without a risk assessment, the way prompt wording alone c
 guarantee (see root AGENTS.md's design invariants).
 
 This module holds only the schema (`ReviewOutput`) and step-orchestration code
-(`ReviewStep`). Prompt-construction logic -- `intent_conformance_clause` and the
-prompt-assembly function (`build_review_prompt`) -- moved to `code_review.prompt.review`
-in a later structural refactor, and the deterministic pipeline-owned-delivery scope filter
-(`filter_pipeline_owned_delivery_findings`) moved to `code_review.pipeline.findings`
-alongside its `Finding`-processing siblings. `ReviewStep.run` imports and calls both.
+(`ReviewStep`). Prompt-construction logic -- `intent_conformance_clause` and the two
+prompt-assembly functions (`build_review_prompt`/`build_review_fix_prompt`) -- moved to
+`code_review.prompt.review` in a later structural refactor, and the deterministic
+pipeline-owned-delivery scope filter (`filter_pipeline_owned_delivery_findings`) moved to
+`code_review.pipeline.findings` alongside its `Finding`-processing siblings. `ReviewStep.run`
+imports and calls all three.
+
+**Fix mode (Milestone 7, issue #81)**: `ReviewStep` is the first (and, as of this ticket,
+only) step to set `supports_fix_round: ClassVar[bool] = True` (`pipeline/step.py`), opting
+into `pipeline/executor.py`'s bounded auto-fix-before-park round and the uncapped
+human-"fix" park response. `ReviewStep.run`'s own shape is unchanged by this: still exactly
+one `ctx.agent.run` call per invocation (per round, from the executor's perspective -- see
+that module's own docstring), still the same `filter_pipeline_owned_delivery_findings`/
+`has_blocking_finding`/`auto_fixable` post-processing applied to whatever `ReviewOutput`
+comes back. The only branch this method adds is which prompt-assembly function to call:
+`build_review_fix_prompt(ctx)` when `ctx.fix_round is not None`, `build_review_prompt(ctx)`
+otherwise -- see `prompt/review.py`'s own docstring for what a fix-mode prompt asks the
+agent to do differently.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel
 
@@ -36,7 +49,7 @@ from code_review.pipeline.findings import (
     has_blocking_finding,
 )
 from code_review.pipeline.step import Step, StepContext, StepOutcome
-from code_review.prompt.review import build_review_prompt
+from code_review.prompt.review import build_review_fix_prompt, build_review_prompt
 
 # --- ReviewOutput ----------------------------------------------------------------------
 
@@ -92,10 +105,13 @@ class ReviewStep(Step):
     pipeline-owned-delivery scope filter (`code_review.pipeline.findings`) applied to the
     parsed answer before it becomes this step's `StepOutcome`.
 
-    Single pass only -- no retry, no re-review, no session persistence (see
-    docs/GLOSSARY.md's "Agent": one call in, one result out; a step that needs more calls
-    makes more calls, this one needs exactly one). The fix/approval loop that would act on
-    a parked run is Milestone 7's, not this step's.
+    Single pass, single agent call *per round* -- no retry, no session persistence within
+    one call (see docs/GLOSSARY.md's "Agent": one call in, one result out; a step that
+    needs more calls makes more calls, this one needs exactly one per invocation). The
+    fix/approval loop that decides whether and how to re-run this step lives in
+    `pipeline/executor.py` (Milestone 7, issues #80/#81), not here -- this class has no
+    idea it is on its second, third, or Nth round; `ctx.fix_round` is the only signal that
+    differs between rounds, and it only changes which prompt-assembly function `run` calls.
 
     The one agent call is wrapped in `ctx.report_activity(...)` (Milestone 14, issue #65)
     as a single coarse span -- deliberately not finer-grained, since the `Agent` protocol
@@ -114,7 +130,26 @@ class ReviewStep(Step):
     # docstring); that wiring is a later ticket.
     executable: str | Path = "claude"
 
+    # Opts into `pipeline/executor.py`'s fix-round loop (issue #81) -- see this class's own
+    # "Fix mode" docstring section and `pipeline/step.py`'s `Step.supports_fix_round` for
+    # why this must be an explicit per-step opt-in rather than following from
+    # `StepOutcome.auto_fixable` alone. `ReviewStep` is the only step so far that sets this
+    # `True`; `steps/test_sufficiency.py`'s `TestSufficiencyStep` deliberately leaves it at
+    # `Step`'s own `False` default (issue #82, not this ticket).
+    supports_fix_round: ClassVar[bool] = True
+
     async def run(self, ctx: StepContext) -> StepOutcome:
+        # Fix mode (issue #81): a fix round needs the agent to actually edit files and
+        # re-review its own result, not just review a static diff -- see
+        # `build_review_fix_prompt`'s own docstring for the prompt-level differences and
+        # why it does not rely solely on `ctx.diff`. Which prompt-assembly function to call
+        # is the only thing that differs between an ordinary round and a fix round; every
+        # other line below (the activity span, the agent call shape, the post-processing)
+        # is identical.
+        prompt = (
+            build_review_fix_prompt(ctx) if ctx.fix_round is not None else build_review_prompt(ctx)
+        )
+
         # One coarse activity span for the whole call (issue #65) -- not per-tool-call,
         # per the `Agent` protocol's "one call in, one result out... no streaming"
         # contract (docs/GLOSSARY.md; see also `docs/ROADMAP.md` milestone 14). The label
@@ -128,7 +163,7 @@ class ReviewStep(Step):
         async with ctx.report_activity("Agent: reviewing diff via claude"):
             result = await ctx.agent.run(
                 RunOpts(
-                    prompt=build_review_prompt(ctx),
+                    prompt=prompt,
                     cwd=ctx.cwd,
                     output_schema=ReviewOutput,
                     executable=self.executable,
