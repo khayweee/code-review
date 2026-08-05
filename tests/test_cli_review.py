@@ -27,7 +27,9 @@ Issue #80's approval park adds a real end-to-end proof against an already-shippe
 `repo_with_unpushed_local_default_commits` builds a checkout where `RebaseStep`'s issue #24
 guard fires for real, and `_run_review_with_keypresses` (generalizing
 `_run_review_and_press_e_to_exit` to an ordered sequence of keypresses, not just the final
-"e") answers the resulting `ApprovalPromptScreen` with "a"/"s"/"x" over a real pty. Once
+"e") answers the resulting parked `FindingsBox` (issue #87's inline decision selector,
+superseding the `ApprovalPromptScreen` modal this docstring originally described) with
+"a"/"s"/"x" over a real pty. Once
 `ReviewStep`/`TestSufficiencyStep` set `needs_approval` from `has_blocking_finding` (already
 shipped, `steps/review.py`/`steps/test_sufficiency.py`), `test_review_surfaces_a_blocking_
 finding_without_crashing` below changed too: a blocking finding now genuinely parks the run
@@ -141,7 +143,7 @@ def repo_with_unpushed_local_default_commits(tmp_path: Path) -> tuple[Path, str,
     Returns `(repo, branch, unpushed_sha)`: `branch` is `repo_with_branch`'s own
     "feature/change" (used only for `_diff_against_head`'s diff, unrelated to the guard);
     `unpushed_sha` is the local-only commit's full SHA, whose short form both `RebaseStep`'s
-    resulting `Finding.description` and `ApprovalPromptScreen`'s own displayed text name.
+    resulting `Finding.description` and the parked `FindingsBox`'s own displayed text name.
     """
 
     origin = tmp_path / "origin"
@@ -421,8 +423,9 @@ def _run_review_with_keypresses(
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Like `_run_review_and_press_e_to_exit`, generalized to send an ordered sequence of
-    `(delay_seconds, key)` pairs -- issue #80's `ApprovalPromptScreen` needs a single
-    keypress ("a"/"s"/"x") answered *before* the run reaches its own Status box, unlike
+    `(delay_seconds, key)` pairs -- issue #80's approval park needs a single keypress
+    ("a"/"s"/"x") answered on the parked `FindingsBox` *before* the run reaches its own
+    Status box, unlike
     every prior full-run test here, which only ever needs the final "e". Each `key` is
     written directly to the child's stdin after sleeping `delay_seconds` -- the same
     "generous margin over the run's own real duration, not a tight one" reasoning

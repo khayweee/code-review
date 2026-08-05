@@ -102,27 +102,65 @@ proven against a fake CLI subprocess in `tests/agent/test_claude_cli.py` — but
 not been exercised together against a real `claude` CLI process that actually blocks on
 stdin waiting for a permission answer. See `agent/AGENTS.md`'s matching note.
 
-## The Findings box (issue #42, widened for #61)
+## The Findings box (issue #42, widened for #61 and #87)
 
-`FindingsBox` (`widgets.py`) is a second `_BorderedBox` widget (the shared base that also
-backs `PipelineBox` and `StatusBox` — see its own docstring for why the border/padding CSS
-lives there once, not copy-pasted per box), mirroring `PipelineBox`'s shape (a bordered
-box, an `update_*` method) but with a different mount lifecycle:
-`PipelineBox` is always composed (empty registry entries render as pending placeholders),
-while `FindingsBox` is mounted/removed dynamically by `ReviewApp._render_findings` because
-"no findings" must show no box at all, not an empty one. `state.py`'s `latest_findings`
-picks the most recently *completed* step whose `outcome.findings` is a non-empty
-`ReviewOutput` (imported from `steps.review`) or `TestSufficiencyOutput` (imported from
-`steps.test_sufficiency`) -- both are data-schema imports, not a `ReviewStep`/
-`TestSufficiencyStep`/agent-call dependency, and neither creates an import cycle since
-`steps/` never imports `tui/`; `IntentStep`'s outcome (`findings` is an `Intent`) is exactly
-what the `isinstance` check there guards against. `render_findings`/`FindingsBox` themselves
-never branch on which of the two schemas they were handed -- both share an identical
-`findings: list[Finding]` shape, so only `state.py`'s `isinstance` check and the type
-annotations threaded through `widgets.py` needed to widen; the rendering logic itself did
-not change. One box, most-recent-completion-wins -- not an accumulated history across
-steps, matching `PipelineBox`'s own "one box, updated in place" pattern. Display only: no
-key or action here lets a user approve, fix, skip, or abort a finding.
+`FindingsBox` (`widgets.py`) is a `Vertical` (not a `_BorderedBox`/`Static` subclass like
+`PipelineBox`/`StatusBox` — it needs to host a child `OptionList` and, while parked, an
+inline chat widget too, which a `Static` can't do), mirroring `PipelineBox`'s shape (a
+bordered box, an `update_*` method) but with a different mount lifecycle: `PipelineBox` is
+always composed (empty registry entries render as pending placeholders), while `FindingsBox`
+is mounted/removed dynamically by `ReviewApp._render_findings` because "no findings" must
+show no box at all, not an empty one. `state.py`'s `latest_findings` picks the most recently
+*completed* step whose `outcome.findings` is a non-empty `ReviewOutput` (imported from
+`steps.review`), `TestSufficiencyOutput` (imported from `steps.test_sufficiency`), or bare
+`list[Finding]` (`steps/rebase.py`'s two `needs_approval=True` returns, widened for issue
+#87 — without this a `RebaseStep` park would have no `FindingsBox` content at all, once
+issue #87 removed `ApprovalPromptScreen`'s own fallback rendering) -- the two schema imports
+are data-schema imports, not a `ReviewStep`/`TestSufficiencyStep`/agent-call dependency, and
+neither creates an import cycle since `steps/` never imports `tui/`; `IntentStep`'s outcome
+(`findings` is an `Intent`) is exactly what the `isinstance` checks there guard against.
+`widgets.py`'s finding-rendering helpers never branch on which of the three shapes they were
+handed beyond one point of entry, `_findings_of`, which normalizes all three to a plain
+`list[Finding]` — everything downstream of it is unchanged regardless of shape. One box,
+most-recent-completion-wins -- not an accumulated history across steps, matching
+`PipelineBox`'s own "one box, updated in place" pattern.
+
+**No longer display-only (issue #87)**: while a step is parked, `FindingsBox.await_decision`
+(awaited by `app.py`'s `_relay_approval`, see below) turns the right column of the
+highlighted finding's row into a live decision selector cycling through
+`[*finding.suggestions, "Type something.", "approve", "skip", "abort"]` (`_decision_entries`,
+`_CUSTOM_ENTRY`/`_DECISION_ENTRIES`) — left/right arrow keys move a `_decision_cursor`
+through that list (reset to 0 whenever the highlighted finding changes), Enter confirms
+whatever it's on, and single-key "a"/"s"/"x"/"f" shortcuts (`_FindingOptionList`'s extra
+`BINDINGS`) jump straight to Approve/Skip/Abort/free-text regardless of cursor position —
+mirroring the removed `ApprovalPromptScreen`'s own bindings, so existing muscle memory and
+most of the pre-#87 approval tests kept working unchanged. `_render_finding_row` renders this
+list 1-based ("1. rename it", "2. Type something.", …), and digit keys "1".."9"
+(`_FindingOptionList`'s `jump_decision(n)` bindings, delegating to `FindingsBox.
+_jump_decision`) jump `_decision_cursor` straight to that entry — a no-op if the digit is
+past the highlighted finding's own entry count, since a finding with fewer suggestions than
+another has a shorter list. The decision itself is step-scoped, not per-finding: confirming
+approve/skip/abort from *any* finding's row resolves the one pending park, regardless of
+which row the cursor was browsing — `_decision_cursor` is purely a per-row display aid.
+Confirming a suggestion string or "Type something." is discussion-only (it does not
+auto-apply anything — issue #78's `EditStep`/apply machinery is still out of scope): it
+mounts `_InlineApprovalChat`, a small `Vertical` with a prompt `Static` and an `Input` seeded
+with that suggestion's text (or empty, for "Type something."), submitting which resolves the
+park with `ApprovalResponse(decision="fix", instructions=<what was typed>)` — `_open_chat` is
+a no-op if one is already mounted, so re-entering this path (e.g. an errant second Enter/"f")
+never stacks a second prompt. Outside a park, the box behaves exactly as #88 already shipped:
+read-only, only the highlighted finding's suggestions shown, no key does anything.
+
+`FindingsBox.update_findings` is called on every one of `app.py`'s periodic render ticks
+(`_render` → `_render_findings`), not just when the displayed output actually changed —
+rebuilding the `OptionList` therefore preserves whatever index is already `highlighted`
+(clamped to the new finding count) rather than resetting to 0. `clear_options()` drops
+Textual's own highlighted-index cursor as a side effect, so it has to be restored explicitly
+after `add_options()` — passing `highlighted` into `_finding_options` only controls which
+row's *prompt* renders its suggestions, not the `OptionList` widget's actual cursor.
+Without this, a human arrowing down to browse a later finding's suggestions would see the
+highlight silently snap back to finding 0 on the very next redundant tick, before they had a
+chance to read them.
 
 ## The `ActivityRelay` seam (issue #66)
 
@@ -198,31 +236,35 @@ and `tests/steps/test_review.py`'s activity-span tests for real end-to-end runs 
 full sequence, which between them is what caught the owner-tagging race documented above.
 Both issues are closed.
 
-## The `ApprovalRelay` seam (issue #80)
+## The `ApprovalRelay` seam (issue #80, extended by #81 and #87)
 
 `approval_relay.py`'s `ApprovalRelay` is the same shape as `InputRelay`/`ActivityRelay`
 above -- Textual-import-free, unit-tested in isolation in `tests/tui/test_approval_relay.py`
--- for a third purpose: relaying a parked step's approve/skip/abort decision. A distinct
-class from `InputRelay`, not a reuse of it, since the answer here is a three-way `Decision`
-(`Literal["approve", "skip", "abort"]`), not free text. Breaks the same construction-order
-cycle the other two do: `cli.py` builds one `ApprovalRelay`, hands `relay.request_approval`
-to `StepContext.on_approval_needed` on one side and `relay` itself to `ReviewApp(...,
-approval_relay=relay)` on the other. The caller that actually invokes `on_approval_needed`
-is `pipeline.executor.run_steps` itself (not a step -- see that module's "The approval
-park" section), the moment a step's `StepOutcome.needs_approval` is True.
+-- for a third purpose: relaying a parked step's approve/skip/fix/abort decision. Breaks the
+same construction-order cycle the other two do: `cli.py` builds one `ApprovalRelay`, hands
+`relay.request_approval` to `StepContext.on_approval_needed` on one side and `relay` itself
+to `ReviewApp(..., approval_relay=relay)` on the other. The caller that actually invokes
+`on_approval_needed` is `pipeline.executor.run_steps` itself (not a step -- see that
+module's "The approval park" section), the moment a step's `StepOutcome.needs_approval` is
+True.
 
 `ReviewApp.on_mount` starts a fourth worker (`_relay_approval`) in its own worker group
 ("approval-relay") when `approval_relay` is not `None`. Each iteration awaits
 `approval_relay.next_request()` (the parked step's name and its `StepOutcome`), sets
-`self._parked_step` and re-renders (so the Pipeline box shows that row as "parked" right
-away), pushes `screens.ApprovalPromptScreen` via `await self.push_screen_wait(...)` to
-collect a `Decision`, records a "skip" into `self._skipped_steps` (permanently, the same
-"stays visible for the rest of the run" rule reported activities and `_failed_step` already
-follow), clears `self._parked_step` back to `None`, re-renders again, and only then resolves
-`future.set_result(decision)` -- so the app's own rendered state already reflects the
-decision by the time the parked `run_steps` call resumes (or, on "abort", raises `pipeline.
-executor.RunAbortedError`, unwinding the run through the same generic `ReviewApp.error` path
-every other step failure already uses -- `cli.py` needs no dedicated `except` clause for it).
+`self._parked_step` and re-renders (so the Pipeline box shows that row as "parked" and the
+Findings box already shows this step's own findings -- `_render_findings` mounted it the
+moment this step's "completed" `StepEvent` arrived, before the park was ever noticed, per
+`run_steps`'s own "yield completed, then check needs_approval" ordering), then `await`s
+`self.query_one(FindingsBox).await_decision()` directly -- **no modal, as of issue #87**;
+see the Findings box section above for what that call does. Once it resolves, "skip" is
+recorded into `self._skipped_steps` (permanently, the same "stays visible for the rest of
+the run" rule reported activities and `_failed_step` already follow), `self._parked_step`
+clears back to `None`, the app re-renders again, and only then does
+`future.set_result(response)` resolve -- so the app's own rendered state already reflects
+the decision by the time the parked `run_steps` call resumes (or, on "abort", raises
+`pipeline.executor.RunAbortedError`, unwinding the run through the same generic
+`ReviewApp.error` path every other step failure already uses -- `cli.py` needs no dedicated
+`except` clause for it).
 
 **"Parked"/"skipped" are overrides of "completed", not a third `StepEvent` status** -- see
 `state.py`'s module docstring's `parked_step`/`skipped_steps` section for why (the same
@@ -232,22 +274,15 @@ happens the event stream already calls that step "completed". `ReviewApp` is the
 that knows a step is currently parked or was skipped, exactly the same "derived by the
 caller, not reported by the executor" rule `failed_step` already established.
 
-`ApprovalPromptScreen` (`screens.py`) mirrors `InputPromptScreen`'s split-out-of-`app.py`
-shape, but offers both a mouse path (`Button`s) and a keyboard path (single-key `BINDINGS`:
-"a"/"s"/"x") so a script-driven real-pty test (no mouse available) can answer it the same
-way a `Pilot`-driven test can. Every `Static` on this screen is constructed with
-`markup=False` -- `_format_outcome`'s text ultimately embeds agent-produced `Finding.
-description` text (untrusted), and rendering a real `ReviewOutput`/`TestSufficiencyOutput`
-outcome via `str(...)` (an earlier version of this function) reproduced a real `MarkupError`
-crash from Rich trying to parse that repr's own `[...]`-shaped list syntax as a style tag --
-`tests/tui/test_app.py`'s `test_review_app_parks_with_a_review_output_outcome_without_
-crashing_on_markup` pins this regression. `_format_outcome` itself now renders a
-`ReviewOutput`/`TestSufficiencyOutput` via `widgets.render_findings` (the same function
-`FindingsBox` uses) and a bare `list[Finding]` (the shape `steps/rebase.py`'s two
-`needs_approval=True` returns actually carry) via `widgets.format_finding`, falling back to
-`str(...)` only for a schema this module has no business assuming -- `markup=False` is a
-second, independent safety net for that fallback and for `Finding.description` content in
-general, not a replacement for rendering known schemas properly.
+**`ApprovalPromptScreen` (issue #87, removed)**: this seam used to push a dedicated modal
+(`screens.ApprovalPromptScreen`, offering both `Button`s and single-key "a"/"s"/"f"/"x"
+`BINDINGS`) collecting a bare `ApprovalDecision`, duplicating the same findings content
+`FindingsBox` already showed above it (via its own `_format_outcome` helper). Issue #87
+removed both the screen and that helper entirely, in favor of the inline decision selector
+described in the Findings box section above -- one of #87's five resolved design questions
+was explicitly "remove the modal entirely," so every park now resolves inline, with no
+screen ever pushed. `screens.py` now holds only `InputPromptScreen`, still used by the
+unrelated `InputRelay` seam above.
 
 First proven end to end with a hand-built, synthetic parked `StepOutcome` in
 `tests/tui/test_app.py` (a generator that calls `relay.request_approval` itself, exactly
@@ -260,34 +295,34 @@ way `_run_review_and_press_e_to_exit` does -- an earlier version that only read 
 `communicate()` reproduced an intermittent deadlock (a keypress sent during an undrained
 multi-second wait could be silently dropped, since `PipelineBox`'s own repaint ticks can
 fill the pty's output buffer and block the child's single-threaded event loop, including its
-own stdin-reading task) -- see that helper's own docstring.
+own stdin-reading task) -- see that helper's own docstring. The real-pty test's "a"/"s"/"x"
+keypresses kept working unchanged across #87's rewrite -- `_FindingOptionList` binds the
+same letters, just against `FindingsBox` instead of a modal.
 
-## The "fix" response and its `InputPromptScreen` follow-up (issue #81)
+## The "fix" response and the inline chat widget (issue #81, reworked by #87)
 
-`ApprovalPromptScreen` (`screens.py`) gained a fourth choice, "fix" (single-key binding
-"f", alongside "a"/"s"/"x"), dismissing with just the `ApprovalDecision` string -- this
-screen has no way to collect free-text instructions itself; `pipeline.step.ApprovalDecision`/
-`ApprovalResponse` are imported from `pipeline/step.py` directly (this module's own,
-narrower `Decision` Literal it used to define is gone -- the approval seam's type is no
-longer a bare Literal once "fix" needs to carry instructions alongside it).
+The fourth park response, "fix" (`pipeline.step.ApprovalDecision`/`ApprovalResponse`,
+defined in `pipeline/step.py`), originally collected free-text instructions via a second
+modal (`InputPromptScreen`) pushed right after `ApprovalPromptScreen` dismissed with "fix".
+Issue #87 replaced that two-modal round-trip with `widgets._InlineApprovalChat`: a small
+`Vertical` (prompt `Static` + `Input`) `FindingsBox` mounts on demand -- when a human
+confirms a suggestion string (seeded with that suggestion's own text) or "Type something."
+(seeded empty) from the decision cycle described above. `_open_chat` is a no-op if one is
+already mounted, so re-entering this path never stacks a second prompt. Submitting it
+resolves the pending park with `ApprovalResponse(decision="fix", instructions=<what was
+typed>)`, then the widget removes itself; every other decision resolves with
+`instructions=None`. `InputPromptScreen` itself is untouched and still exists, just no
+longer used by this seam -- it remains the unrelated `InputRelay` seam's own modal
+(issue #41).
 
-`ReviewApp._relay_approval` (`app.py`), on seeing "fix" come back from
-`ApprovalPromptScreen`, immediately pushes `InputPromptScreen` (already imported there,
-reusing its existing text-input shape per the issue body -- no new screen class) to collect
-the human's instructions, in the same worker iteration, before ever resolving the pending
-`ApprovalRelay` future -- the executor only ever awaits one future per park, so the whole
-two-screen round-trip must complete first. The future then resolves with
-`ApprovalResponse(decision="fix", instructions=<what was typed>)`; every other decision
-resolves with `instructions=None`. Because each fix-round re-run gets its own fresh
-"running"/"completed" `StepEvent` pair (`pipeline/executor.py`'s own design, see that
-module's AGENTS.md), the Findings box shows the fresh round's findings for free -- no new
-`tui/` rendering logic was needed for that half of the acceptance criteria.
+Because each fix-round re-run gets its own fresh "running"/"completed" `StepEvent` pair
+(`pipeline/executor.py`'s own design, see that module's AGENTS.md), the Findings box shows
+the fresh round's findings for free -- no new `tui/` rendering logic was needed for that
+half of the acceptance criteria, unchanged from #81.
 
-First proven with a hand-built, synthetic parked outcome and relay
-(`tests/tui/test_app.py`'s "The 'fix' response (issue #81)" section, mirroring how #80's
-own approve/skip/abort flow was first proven), asserting the full round-trip: pressing "f"
-pushes `InputPromptScreen`, typing text and pressing enter resolves the pending
-`ApprovalRelay.request_approval` call with the exact `ApprovalResponse` expected.
+First proven with a hand-built, synthetic parked outcome and relay in
+`tests/tui/test_widgets.py`/`tests/tui/test_app.py`, mirroring how #80's own approve/skip/
+abort flow and #81's original modal round-trip were each first proven.
 
 ## Non-goals landed in later issues, not here
 

@@ -26,7 +26,7 @@ from code_review.tui.activity import ActivityEvent, ActivityRelay
 from code_review.tui.app import ReviewApp, _tag_activity_events
 from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
-from code_review.tui.screens import ApprovalPromptScreen, InputPromptScreen
+from code_review.tui.screens import InputPromptScreen
 from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
@@ -395,18 +395,18 @@ def _rebase_step_parks_then_maybe_continues(relay: ApprovalRelay) -> AsyncIterat
     return _events()
 
 
-async def _wait_for_approval_prompt(pilot: Pilot[None], app: ReviewApp) -> None:
-    """Poll until `ApprovalPromptScreen` is not just pushed but has actually composed its
-    content -- `push_screen` sets `app.screen` synchronously, before the screen's own
-    `compose()`/mount has run (a separate, later message-queue turn), so an `isinstance`
-    check alone can observe the right screen type with no widgets mounted under it yet."""
+async def _wait_for_park(pilot: Pilot[None], app: ReviewApp, step_name: str) -> None:
+    """Poll until `app._parked_step` names `step_name` and the Findings box has actually
+    mounted its `OptionList` -- the inline-flow (issue #87) equivalent of the old
+    `_wait_for_approval_prompt`'s "pushed but not yet composed" concern, now for a mounted
+    widget instead of a pushed `ApprovalPromptScreen`."""
 
     for _ in range(20):
-        if isinstance(app.screen, ApprovalPromptScreen) and list(app.screen.query(Static)):
+        if app._parked_step == step_name and list(app.query(FindingsBox)):
             return
         await pilot.pause()
         await asyncio.sleep(0.01)
-    raise AssertionError("ApprovalPromptScreen never finished composing")
+    raise AssertionError(f"{step_name} never parked")
 
 
 def test_review_app_parks_on_a_synthetic_outcome_and_approve_continues_the_run() -> None:
@@ -416,11 +416,10 @@ def test_review_app_parks_on_a_synthetic_outcome_and_approve_continues_the_run()
             REGISTRY, _rebase_step_parks_then_maybe_continues(relay), approval_relay=relay
         )
         async with app.run_test() as pilot:
-            await _wait_for_approval_prompt(pilot, app)
+            await _wait_for_park(pilot, app, "RebaseStep")
 
-            prompt_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
-            assert "RebaseStep needs approval" in prompt_text
-            assert "unpushed local commits" in prompt_text
+            box = app.query_one(FindingsBox)
+            assert "unpushed local commits" in _findings_box_content(box)
 
             # While parked, the Pipeline box shows RebaseStep as "parked" even though its
             # own StepEvent already says "completed" -- the design nuance `state.py`'s
@@ -428,6 +427,7 @@ def test_review_app_parks_on_a_synthetic_outcome_and_approve_continues_the_run()
             parked_row = next(row for row in app._rows() if row.name == "RebaseStep")
             assert parked_row.status == "parked"
 
+            box.query_one(OptionList).focus()
             await pilot.press("a")
             await pilot.pause()
             await _wait_until_done(pilot, app)
@@ -448,8 +448,10 @@ def test_review_app_choosing_skip_marks_the_step_skipped_and_the_run_continues()
             REGISTRY, _rebase_step_parks_then_maybe_continues(relay), approval_relay=relay
         )
         async with app.run_test() as pilot:
-            await _wait_for_approval_prompt(pilot, app)
+            await _wait_for_park(pilot, app, "RebaseStep")
 
+            box = app.query_one(FindingsBox)
+            box.query_one(OptionList).focus()
             await pilot.press("s")
             await pilot.pause()
             await _wait_until_done(pilot, app)
@@ -471,8 +473,10 @@ def test_review_app_choosing_abort_stops_the_run_and_records_the_error() -> None
             REGISTRY, _rebase_step_parks_then_maybe_continues(relay), approval_relay=relay
         )
         async with app.run_test() as pilot:
-            await _wait_for_approval_prompt(pilot, app)
+            await _wait_for_park(pilot, app, "RebaseStep")
 
+            box = app.query_one(FindingsBox)
+            box.query_one(OptionList).focus()
             await pilot.press("x")
             await pilot.pause()
             await _wait_until_done(pilot, app)
@@ -486,16 +490,16 @@ def test_review_app_choosing_abort_stops_the_run_and_records_the_error() -> None
     asyncio.run(scenario())
 
 
-# --- The "fix" response (issue #81) ------------------------------------------------------
+# --- The "fix" response and the inline chat widget (issue #81, reworked by #87) ---------
 
 
 def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_them() -> None:
-    """Issue #81's TUI-side acceptance criterion: choosing "fix" on `ApprovalPromptScreen`
-    immediately pushes a second modal, `InputPromptScreen`, to collect the human's free-text
-    fix instructions (reusing its existing text-input shape, per the issue body), and
+    """Issue #81's TUI-side acceptance criterion, reworked by issue #87: the "f" shortcut
+    opens `_InlineApprovalChat`, mounted directly into the already-parked `FindingsBox`,
+    rather than pushing a second `InputPromptScreen` modal -- and
     `ReviewApp._relay_approval` only resolves the pending `ApprovalRelay.request_approval`
     future -- with the full `ApprovalResponse(decision="fix", instructions=...)`, not just
-    the bare decision -- once that second screen is answered."""
+    the bare decision -- once that widget's `Input` is submitted."""
 
     async def scenario() -> ApprovalResponse:
         relay = ApprovalRelay()
@@ -530,24 +534,15 @@ def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_the
 
         app = ReviewApp(REGISTRY, _events(), approval_relay=relay)
         async with app.run_test() as pilot:
-            await _wait_for_approval_prompt(pilot, app)
+            await _wait_for_park(pilot, app, "RebaseStep")
 
-            prompt_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
-            assert "[f] Fix" in prompt_text
-
+            box = app.query_one(FindingsBox)
+            box.query_one(OptionList).focus()
             await pilot.press("f")
             await pilot.pause()
 
-            for _ in range(20):
-                if isinstance(app.screen, InputPromptScreen):
-                    break
-                await pilot.pause()
-                await asyncio.sleep(0.01)
-            assert isinstance(app.screen, InputPromptScreen)
-            follow_up_text = " ".join(str(widget.content) for widget in app.screen.query(Static))
-            assert "RebaseStep" in follow_up_text
-
-            await pilot.click(Input)
+            input_widget = box.query_one(Input)
+            await pilot.click(input_widget)
             await pilot.press(*"rename the helper", "enter")
             await pilot.pause()
 
@@ -568,15 +563,14 @@ def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_the
 
 def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_markup() -> None:
     """Regression test: a real `ReviewStep`/`TestSufficiencyStep` park carries a
-    `ReviewOutput`/`TestSufficiencyOutput`, not a bare `list[Finding]` -- rendering it via
-    `str(...)` (an earlier version of `screens.py`'s `_format_outcome`) produces pydantic's
-    own repr, e.g. `ReviewOutput(findings=[Finding(...)], ...)`, whose `[...]` list syntax
-    Rich's default markup parsing tries to interpret as a style tag and raises
-    `MarkupError` on -- reproduced directly against a real end-to-end run while developing
-    this ticket. `ApprovalPromptScreen` now renders via `widgets.render_findings` for this
-    shape and disables markup parsing entirely (`Static(..., markup=False)`) as a second,
-    independent safety net, since a `Finding.description` is itself agent-produced,
-    untrusted text that can legitimately contain `[...]`-shaped substrings on its own."""
+    `ReviewOutput`/`TestSufficiencyOutput`, not a bare `list[Finding]` -- a
+    `Finding.description` is agent-produced, untrusted text that can legitimately contain
+    `[...]`-shaped substrings, which an earlier version of the (now-removed)
+    `ApprovalPromptScreen`'s `str(...)`-based rendering mis-parsed as Rich markup and
+    raised `MarkupError` on. `FindingsBox`'s `OptionList` options are built directly as
+    Rich renderables (`_finding_option_prompt`), never `str`-interpolated through a
+    markup-enabled `Static.update`, so this proves the box still mounts and renders this
+    outcome shape cleanly."""
 
     async def _events(relay: ApprovalRelay) -> AsyncIterator[StepEvent]:
         started = time.monotonic()
@@ -617,20 +611,14 @@ def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_marku
         relay = ApprovalRelay()
         app = ReviewApp(REGISTRY, _events(relay), approval_relay=relay)
         async with app.run_test() as pilot:
-            await _wait_for_approval_prompt(pilot, app)
+            await _wait_for_park(pilot, app, "ReviewStep")
 
-            # `widget.content` isn't always a plain `str` -- the `Static` showing the
-            # parked findings holds `render_findings`'s `Group` renderable (issue #77), not
-            # text -- so each widget's content is rendered through a real `Console` the
-            # same way `_pipeline_box_content`/`_findings_box_content` do, rather than
-            # `str(...)`'d directly.
-            buffer = StringIO()
-            console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
-            for widget in app.screen.query(Static):
-                console.print(widget.content)
-            prompt_text = buffer.getvalue()
-            assert "drops error handling required by the caller's contract" in prompt_text
+            box = app.query_one(FindingsBox)
+            assert "drops error handling required by the caller's contract" in (
+                _findings_box_content(box)
+            )
 
+            box.query_one(OptionList).focus()
             await pilot.press("a")
             await pilot.pause()
             await _wait_until_done(pilot, app)
