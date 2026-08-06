@@ -24,20 +24,21 @@ found that design unsound (see `_tag_activity_events`'s docstring below) once a 
 producer (`ReviewStep`) existed to expose the race. Ownership is instead derived purely
 from timestamps, at render time.
 
-`approval_relay` (issue #80, extended by issue #81) is a fourth, independent seam, the same
-"optional, its own worker" shape as `input_relay`/`activity_relay`: an optional `tui.
-approval_relay.ApprovalRelay` this app polls, in a fourth worker (`_relay_approval`), for a
-parked step's approve/skip/fix/abort request relayed via `StepContext.on_approval_needed`
-(called from `pipeline.executor.run_steps`, not from a step itself -- see that module's
-docstring's "The approval park"/"The fix-round loop" sections). Like `activity_relay`, this
-does not add a new `StepEvent` status or change `run_steps`'s per-step yield shape at all:
-`self._parked_step`/`self._skipped_steps` are this app's own bookkeeping, learned entirely
-from the relay round-trip, and passed to `state.backfill` the same way `self._failed_step`
-already is -- see `state.py`'s module docstring for why "parked"/"skipped" are overrides of
-a step already reported "completed", not a third possibility alongside
-pending/running/completed the way "failed" is. "fix" additionally drives a second modal
-(`InputPromptScreen`) inside the same worker iteration before the pending future resolves --
-see `_relay_approval`'s own docstring for the full two-screen flow.
+`approval_relay` (issue #80, extended by issue #81, and by #87) is a fourth, independent
+seam, the same "optional, its own worker" shape as `input_relay`/`activity_relay`: an
+optional `tui.approval_relay.ApprovalRelay` this app polls, in a fourth worker
+(`_relay_approval`), for a parked step's approve/skip/fix/abort request relayed via
+`StepContext.on_approval_needed` (called from `pipeline.executor.run_steps`, not from a
+step itself -- see that module's docstring's "The approval park"/"The fix-round loop"
+sections). Like `activity_relay`, this does not add a new `StepEvent` status or change
+`run_steps`'s per-step yield shape at all: `self._parked_step`/`self._skipped_steps` are
+this app's own bookkeeping, learned entirely from the relay round-trip, and passed to
+`state.backfill` the same way `self._failed_step` already is -- see `state.py`'s module
+docstring for why "parked"/"skipped" are overrides of a step already reported "completed",
+not a third possibility alongside pending/running/completed the way "failed" is. As of
+issue #87, the decision itself is collected inline by the already-mounted `FindingsList`
+(`widgets.py`'s `await_decision`) rather than a pushed `ApprovalPromptScreen`/
+`InputPromptScreen` modal pair -- see `_relay_approval`'s own docstring.
 """
 
 from __future__ import annotations
@@ -48,13 +49,13 @@ from collections.abc import AsyncIterator, Sequence
 from textual.app import App, ComposeResult
 from textual.timer import Timer
 
-from code_review.pipeline.step import ApprovalResponse, StepEvent
+from code_review.pipeline.step import StepEvent
 from code_review.tui.activity import ActivityEvent, ActivityRelay
 from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
-from code_review.tui.screens import ApprovalPromptScreen, InputPromptScreen
+from code_review.tui.screens import InputPromptScreen
 from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
-from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox
+from code_review.tui.widgets import FindingsList, PipelineBox, StatusBox
 
 # How often a running step's elapsed duration re-renders between events. Short enough to
 # look live to a human, long enough not to burn CPU on a terminal repaint loop.
@@ -134,6 +135,17 @@ class ReviewApp(App[None]):
         # `_failed_step`/reported activities already follow, not cleared once the run moves
         # past that step.
         self._skipped_steps: set[str] = set()
+        # `id()` of every `StepOutcome` a human has already resolved via `await_decision`
+        # (issue #87) -- `_render_findings` excludes these from `latest_findings`'s search
+        # once resolved, since a decided park has nothing left to show: unlike
+        # `_skipped_steps`, this is keyed by outcome identity rather than step name so a
+        # "fix" round's *later* outcome for the same step (a fresh `StepOutcome` object,
+        # not yet resolved) still displays. Without this, `latest_findings` keeps matching
+        # the same resolved outcome forever (no later step necessarily has non-empty
+        # findings to supersede it), leaving `FindingsList` mounted at its full parked
+        # height indefinitely and pushing `StatusBox` below the viewport once the run
+        # finishes.
+        self._resolved_outcome_ids: set[int] = set()
         # True once `events` is exhausted or raises -- the run itself has finished either
         # way. `action_exit_when_done` only acts once this is set; `_render_status` only
         # shows the Status box once this is set.
@@ -187,13 +199,16 @@ class ReviewApp(App[None]):
     def _render_findings(self) -> None:
         """Mount, update in place, or remove the Findings box, driven by
         `latest_findings(self._seen)` (see `state.py`). Unlike `PipelineBox`, which is
-        always composed, `FindingsBox` is mounted dynamically and only while there is
+        always composed, `FindingsList` is mounted dynamically and only while there is
         something to show -- a step with no findings must show no Findings box at all, not
         an empty one (issue #42's acceptance criteria), which a permanently-composed box
         cannot express on its own."""
 
-        result = latest_findings(self._seen)
-        boxes = list(self.query(FindingsBox))
+        visible_events = [
+            event for event in self._seen if id(event.outcome) not in self._resolved_outcome_ids
+        ]
+        result = latest_findings(visible_events)
+        boxes = list(self.query(FindingsList))
         if result is None:
             for box in boxes:
                 box.remove()
@@ -202,7 +217,7 @@ class ReviewApp(App[None]):
             if boxes:
                 boxes[0].update_findings(output, step_name)
             else:
-                self.mount(FindingsBox(output, step_name))
+                self.mount(FindingsList(output, step_name))
 
     def _render_status(self) -> None:
         """Mount, update in place, or remove the Status box, mirroring
@@ -270,26 +285,27 @@ class ReviewApp(App[None]):
 
     async def _relay_approval(self) -> None:
         """Poll `self._approval_relay` for a parked step's approve/skip/fix/abort request
-        (issue #80, extended by issue #81), relayed via `StepContext.on_approval_needed`/
-        `pipeline.executor.run_steps` (not by a step directly -- see that module's "The
-        approval park"/"The fix-round loop" sections).
+        (issue #80, extended by issue #81 and #87), relayed via
+        `StepContext.on_approval_needed`/`pipeline.executor.run_steps` (not by a step
+        directly -- see that module's "The approval park"/"The fix-round loop" sections).
 
         Runs for the app's whole lifetime (cancelled automatically on `self.exit()`, like
-        every other worker). Each iteration marks `self._parked_step`, re-renders so the
-        Pipeline box shows that row as "parked" right away, shows `ApprovalPromptScreen` to
-        collect an `ApprovalDecision`. "fix" (issue #81) immediately pushes a second modal,
-        `InputPromptScreen`, to collect the human's free-text fix instructions -- reusing
-        its existing text-input shape rather than building a dedicated one, per the issue's
-        own instruction -- so the whole two-screen round-trip completes inside this one
-        worker iteration, before the pending `request_approval` future (and so the parked
-        `run_steps` call awaiting it) is ever resolved; the executor only ever awaits one
-        future per park. "skip" records itself into `self._skipped_steps` ("approve"/"fix"/
-        "abort" leave no further bookkeeping here -- "abort" is `run_steps`'s own job, via
-        `RunAbortedError`, once the resolved future lets it resume). Clears
-        `self._parked_step` back to `None`, re-renders again, and only then resolves
-        `future` with an `ApprovalResponse` (`instructions` set only for "fix", `None`
-        otherwise) -- so by the time the parked `run_steps` call resumes, this app's own
-        rendered state already reflects the decision.
+        every other worker). Each iteration marks `self._parked_step` and re-renders, so
+        the Pipeline box shows that row as "parked" and the Findings box already shows
+        this step's own outcome (`_render_findings` mounted it the moment this step's
+        "completed" `StepEvent` arrived, before the park was ever noticed -- see
+        `pipeline.executor.run_steps`'s own docstring for why the park happens after that
+        event, not before). It then awaits the mounted `FindingsList.await_decision()`
+        (issue #87) directly -- no modal: that call is what turns the highlighted row's
+        suggestion column into a live inline approve/skip/abort/chat selector and returns
+        once a human confirms one, superseding the `ApprovalPromptScreen`/
+        `InputPromptScreen` modal pair this worker used to push. "skip" records itself into
+        `self._skipped_steps` ("approve"/"fix"/"abort" leave no further bookkeeping here --
+        "abort" is `run_steps`'s own job, via `RunAbortedError`, once the resolved future
+        lets it resume). Clears `self._parked_step` back to `None`, re-renders again, and
+        only then resolves `future` with the `ApprovalResponse` `await_decision()` returned
+        -- so by the time the parked `run_steps` call resumes, this app's own rendered
+        state already reflects the decision.
         """
 
         assert self._approval_relay is not None
@@ -297,17 +313,14 @@ class ReviewApp(App[None]):
             step_name, outcome, future = await self._approval_relay.next_request()
             self._parked_step = step_name
             self._render()
-            decision = await self.push_screen_wait(ApprovalPromptScreen(step_name, outcome))
-            instructions: str | None = None
-            if decision == "fix":
-                instructions = await self.push_screen_wait(
-                    InputPromptScreen(f"What should {step_name} fix?")
-                )
+            findings_box = self.query_one(FindingsList)
+            response = await findings_box.await_decision()
             self._parked_step = None
-            if decision == "skip":
+            self._resolved_outcome_ids.add(id(outcome))
+            if response.decision == "skip":
                 self._skipped_steps.add(step_name)
             self._render()
-            future.set_result(ApprovalResponse(decision=decision, instructions=instructions))
+            future.set_result(response)
 
 
 def _tag_activity_events(

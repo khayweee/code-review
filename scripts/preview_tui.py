@@ -10,7 +10,8 @@ through `Pilot` and asserted against.
 
 ReviewStep's outcome has `needs_approval=True`, and a real `ApprovalRelay` (issue #80/#81)
 is wired into `ReviewApp` exactly the way `cli.py` wires one for a real run -- so this
-preview also drives `ApprovalPromptScreen`: `_fake_events` awaits
+preview also drives the parked `FindingsBox`'s inline decision selector (issue #87,
+superseding the old `ApprovalPromptScreen` modal): `_fake_events` awaits
 `approval_relay.request_approval(...)` after ReviewStep's "completed" event, the same call
 `pipeline.executor.run_steps` makes, and reacts to whatever the human answers (approve/skip/
 fix/abort) the same way that executor does -- "fix" re-runs the step for one simulated round
@@ -99,8 +100,9 @@ async def _fake_events(
     ReviewStep's outcome carries `needs_approval=True`, so once its "completed" event is
     yielded this awaits `approval_relay.request_approval(...)` -- exactly the call
     `pipeline.executor.run_steps` makes at a real park -- and blocks until `ReviewApp`'s
-    approval-relay worker resolves it from a human answering `ApprovalPromptScreen`. This
-    mirrors that executor's own approve/skip/fix/abort handling: "fix" re-runs the step for
+    approval-relay worker resolves it from a human answering the parked `FindingsBox`'s
+    inline decision selector (issue #87). This mirrors that executor's own approve/skip/
+    fix/abort handling: "fix" re-runs the step for
     one simulated round (settling on `_NO_FINDINGS`, standing in for a fix that resolved the
     findings) before moving on; "abort" raises `RunAbortedError`, matching the real failure
     path this preview's `--fail` flag also exercises; "approve"/"skip" both simply continue

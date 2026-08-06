@@ -60,6 +60,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
@@ -238,25 +239,29 @@ def backfill(
 
 def latest_findings(
     events: Sequence[StepEvent],
-) -> tuple[str, ReviewOutput | TestSufficiencyOutput] | None:
+) -> tuple[str, ReviewOutput | TestSufficiencyOutput | list[Finding]] | None:
     """Return the most recently completed step's name paired with its
-    `ReviewOutput`/`TestSufficiencyOutput`, or `None` if none exists.
+    `ReviewOutput`/`TestSufficiencyOutput`/bare `list[Finding]`, or `None` if none exists.
 
-    A `"completed"` event counts only when its `outcome.findings` is a `ReviewOutput` or
-    `TestSufficiencyOutput` instance (guarding against e.g. `IntentStep`'s outcome, whose
-    `findings` is an `Intent`, never triggering a findings display -- see `pipeline/step.py`'s
-    `StepOutcome.findings`, deliberately untyped as `object`) AND that output's `findings`
-    list is non-empty. Scans `events` in order and keeps the last match, so two completed
-    steps that both carry findings resolve to whichever completed later -- regardless of
-    which of the two schemas each one is -- matching `PipelineBox`'s own "one box, most
-    recent wins" display -- not an accumulated history across steps. The step name (issue
-    #74) travels alongside the output rather than being re-derived by the caller, since
-    this is the one place that already knows which `StepEvent` the winning output came
-    from -- `FindingsBox`'s `border_title` is the current consumer (via `app.py`'s
-    `_render_findings`).
+    A `"completed"` event counts only when its `outcome.findings` is a `ReviewOutput`,
+    `TestSufficiencyOutput`, or bare `list[Finding]` (guarding against e.g. `IntentStep`'s
+    outcome, whose `findings` is an `Intent`, never triggering a findings display -- see
+    `pipeline/step.py`'s `StepOutcome.findings`, deliberately untyped as `object`) AND that
+    output's findings list is non-empty. The bare-`list[Finding]` case (issue #87) is
+    `steps/rebase.py`'s two `needs_approval=True` returns, which carry findings without
+    either wrapper schema -- without this case a `RebaseStep` park would have no
+    `FindingsBox` to interact with at all, since `ApprovalPromptScreen`'s own fallback
+    rendering no longer exists to pick up the slack. Scans `events` in order and keeps the
+    last match, so two completed steps that both carry findings resolve to whichever
+    completed later -- regardless of which shape each one is -- matching `PipelineBox`'s
+    own "one box, most recent wins" display -- not an accumulated history across steps.
+    The step name (issue #74) travels alongside the output rather than being re-derived by
+    the caller, since this is the one place that already knows which `StepEvent` the
+    winning output came from -- `FindingsBox`'s `border_title` is the current consumer
+    (via `app.py`'s `_render_findings`).
     """
 
-    result: tuple[str, ReviewOutput | TestSufficiencyOutput] | None = None
+    result: tuple[str, ReviewOutput | TestSufficiencyOutput | list[Finding]] | None = None
     for event in events:
         if event.status != "completed":
             continue
@@ -265,6 +270,8 @@ def latest_findings(
             continue
         findings = outcome.findings
         if isinstance(findings, (ReviewOutput, TestSufficiencyOutput)) and findings.findings:
+            result = (event.step_name, findings)
+        elif isinstance(findings, list) and findings and isinstance(findings[0], Finding):
             result = (event.step_name, findings)
     return result
 

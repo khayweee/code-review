@@ -1,37 +1,75 @@
 """The Pipeline box: one line per registry step, live status icon, elapsed/final duration.
 
-The Findings box (issue #42, widened for #61): the most recently completed step's
-`ReviewOutput` or `TestSufficiencyOutput`, one line per finding plus a severity-count
-summary.
+The Findings box (issue #42, widened for #61/#87, rebuilt as a widget tree by #91): the
+most recently completed step's `ReviewOutput`, `TestSufficiencyOutput`, or bare
+`list[Finding]`, one `Finding` row per finding plus a severity-count summary -- and, while
+a step is parked (issue #87), a live inline decision selector replacing the old
+`ApprovalPromptScreen` modal: each finding's own `suggestions` plus a single "Chat about
+it" entry that opens a free-text chat, always resolving with `decision="fix"`. Approve is
+no longer a reachable per-finding menu entry (issue #87 later simplified this -- just
+describe what you want in the chat instead); skip and abort survive as separate, global
+"s"/"x" key bindings, not listed options -- skip is a bare escape hatch for a park chatting
+genuinely cannot resolve (e.g. a step that ignores the chat's `fix_round` instructions
+entirely), and abort stops the run outright.
 
-Rendering-only. Every widget here takes the data it displays as plain data (`StepRow`s for
-`PipelineBox`, a `ReviewOutput`/`TestSufficiencyOutput` for `FindingsBox`, see `state.py`) --
-neither widget ever reads a `StepEvent` stream or a registry/agent output itself. That split
-keeps row/finding rendering unit-testable via `render_rows`/`render_findings` in isolation,
-and widget mounting/refresh testable via Textual's `Pilot` (`tests/tui/test_widgets.py`),
-without needing a live event stream either way.
+Every widget here takes the data it displays as plain data (`StepRow`s for `PipelineBox`,
+a `ReviewOutput`/`TestSufficiencyOutput`/`list[Finding]` for `FindingsList`, see
+`state.py`) -- neither widget ever reads a `StepEvent` stream or a registry/agent output
+itself. That split keeps row/finding rendering unit-testable via `render_rows`/the
+finding-rendering helpers in isolation, and widget mounting/refresh/interaction testable
+via Textual's `Pilot` (`tests/tui/test_widgets.py`), without needing a live event stream
+either way.
 """
 
 from __future__ import annotations
 
+import asyncio
 import colorsys
 import time
 from collections.abc import Sequence
+from typing import Literal, cast
 
 from rich.console import Group
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.widgets import OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets import Input, ListItem, ListView, Static
 
-from code_review.pipeline.findings import Finding
+from code_review.pipeline.findings import Finding as FindingData
+from code_review.pipeline.step import ApprovalDecision, ApprovalResponse
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.state import ActivityRow, Status, StepRow
+
+# `FindingsList`'s per-finding decision cycle (issue #87, kept by #91, simplified to drop
+# the fixed approve/skip/abort entries below), appended after that finding's own
+# `suggestions` -- shared by every finding row, since a park is step-scoped, not per-finding
+# (see `FindingsList.await_decision`'s docstring). A plain string, not an `ApprovalDecision`
+# value, because "Chat about it" is not itself a decision -- it opens the inline chat widget
+# rather than resolving anything on its own; confirming it (or a suggestion) always resolves
+# with `decision="fix"`, whatever the human types being the `instructions`. Rendered as the
+# numbered list's trailing free-text option (see `render_decision_cycle`), after every
+# suggestion. Approve/skip/abort used to be listed here too (three more fixed entries,
+# resolving the park directly with no chat involved) -- removed once the product call landed
+# that a human can just describe what they want in the chat instead, with no separate
+# intent-parsing needed for the common case. Skip and abort each survive as
+# `_FindingsListView`'s own global "s"/"x" bindings instead (`action_quick_skip`/
+# `action_quick_abort`), not per-finding menu entries -- skip is a bare escape hatch kept
+# for parks the chat genuinely cannot resolve (e.g. a step that ignores the chat's
+# `fix_round` instructions entirely -- `tui/AGENTS.md`'s "Findings box" section has a real
+# example); approve has no such escape hatch and is gone for good.
+_CUSTOM_ENTRY = "Chat about it"
+
+# Short static UI copy for `_CUSTOM_ENTRY`, shown as an indented detail line beneath it in
+# `render_decision_cycle` -- a suggestion's own text stays single-line, since it has no
+# further data to split a detail line from.
+_ENTRY_DETAILS: dict[str, str] = {
+    _CUSTOM_ENTRY: "Start typing to describe what you want.",
+}
 
 # One glyph per status in the deterministic text fallback. The live pipeline view uses
 # a Rich spinner renderable for the running state so it can animate without any manual
@@ -59,7 +97,7 @@ _STATUS_DOT_STYLES: dict[Status, str] = {
     "skipped": "#8a8a8a",  # gray -- deliberately bypassed by a human, not an error
 }
 
-# `FindingsBox`'s per-finding risk indicator (issue #77): a colored `_DOT_ICON`, keyed by
+# `FindingsList`'s per-finding risk indicator (issue #77): a colored `_DOT_ICON`, keyed by
 # `Finding.severity` -- the same "reuse an existing field via a colored dot" shape as
 # `_STATUS_DOT_STYLES` above, rather than inventing a new per-finding risk field (`Finding`
 # carries no such field today; only a review's overall `risk_level` verdict does).
@@ -236,7 +274,7 @@ def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> G
 
 class _BorderedBox(Static):
     """Shared base for this app's bordered, auto-height boxes (`PipelineBox`,
-    `FindingsBox`, `StatusBox`). Textual resolves `DEFAULT_CSS` against a widget's whole
+    `FindingsList`, `StatusBox`). Textual resolves `DEFAULT_CSS` against a widget's whole
     class hierarchy, not just its leaf class, so defining the shared border/padding rule
     once here -- keyed to this base class's own name -- reaches every subclass without
     repeating it per box. Factored out once a third box (`StatusBox`) needed the identical
@@ -300,7 +338,7 @@ class PipelineBox(_BorderedBox):
         self.update(render_rows_live(rows, self._spinners))
 
 
-def format_finding(finding: Finding) -> str:
+def format_finding(finding: FindingData) -> str:
     """Render one `Finding` as `<severity>: <description>`, with ` (<location>)` appended
     only when `finding.location` is not `None` -- a finding with no location renders with
     no trailing parenthetical at all, rather than an empty `()`."""
@@ -309,121 +347,491 @@ def format_finding(finding: Finding) -> str:
     return f"{finding.severity}: {finding.description}{location}"
 
 
-def _render_finding_row(finding: Finding, *, show_suggestions: bool = True) -> tuple[Text, Text]:
-    """Render one `Finding` as a `(left, right)` cell pair for `render_findings`'s grid.
+def _findings_of(
+    output: ReviewOutput | TestSufficiencyOutput | list[FindingData],
+) -> list[FindingData]:
+    """Extract the plain `list[Finding]` from whichever of `ReviewOutput`/
+    `TestSufficiencyOutput`/bare `list[Finding]` `state.py`'s `latest_findings` picked
+    (issue #87 widened it to accept `steps/rebase.py`'s bare-list shape too, see that
+    module's docstring for why) -- the one place `FindingsList`'s helpers need to branch on
+    shape, so nothing downstream does."""
 
-    Left: a colored `_DOT_ICON` (`_SEVERITY_DOT_STYLES`, keyed by `finding.severity`) --
-    the per-finding risk indicator issue #77 asks for, reusing `severity` rather than a
-    new field -- followed by `format_finding`'s existing severity/description/location
-    text. Right: `finding.suggestions`, one per line, or an empty `Text` when there are
-    none -- never a placeholder string like `"None"` (a `no-op`/`auto-fix` finding has
-    nothing for a human to choose between).
-
-    `show_suggestions=False` (issue #88, `FindingsBox`'s per-option rendering) forces an
-    empty right cell regardless of `finding.suggestions` -- used for every option except
-    the one currently under the cursor, so only the focused finding's suggestions show."""
-
-    left = Text(_DOT_ICON, style=_SEVERITY_DOT_STYLES[finding.severity])
-    left.append(f" {format_finding(finding)}")
-    right = Text("\n".join(finding.suggestions) if show_suggestions else "")
-    return left, right
+    return output if isinstance(output, list) else output.findings
 
 
-def _findings_summary(output: ReviewOutput | TestSufficiencyOutput) -> str:
-    """Render `output.findings`' severity-count summary, e.g. `1 error, 2 warning, 0
-    info` -- shared by `render_findings` and `FindingsBox`'s own summary line."""
+def _decision_entries(finding: FindingData) -> list[str]:
+    """The full per-finding decision cycle a parked `FindingsList` cycles through (issue
+    #87): that finding's own `suggestions`, then a single trailing `_CUSTOM_ENTRY` -- every
+    entry here is discussion-only, opening the inline chat widget rather than resolving
+    anything by itself (see `FindingsList.await_decision`); confirming any of them always
+    resolves the park with `decision="fix"`, seeded with that entry's own text (empty for
+    `_CUSTOM_ENTRY`). Approve/skip/abort used to also live in this list as three more fixed
+    entries, resolving the park directly with no chat step -- removed once the product call
+    landed that describing what you want in the chat covers that ground with no separate
+    intent-parsing needed, for most cases. Skip and abort remain reachable, but only as
+    global key bindings (`_FindingsListView`'s "s"/"x"), never listed entries here -- skip
+    is a bare escape hatch for a park the chat genuinely cannot resolve, e.g. a step that
+    ignores `ctx.fix_round` outright (see `tui/AGENTS.md`'s "Findings box" section);
+    approve has no equivalent escape hatch and stays gone. Rendered as a 1-based numbered
+    list by `render_decision_cycle`, so a
+    digit key (`_FindingsListView`'s `"1"`.."9"` bindings) can jump a row's
+    `_decision_cursor` straight to any entry here by that same 1-based index."""
+
+    return [*finding.suggestions, _CUSTOM_ENTRY]
+
+
+def render_description(finding: FindingData) -> Text:
+    """`FindingsDescription`'s content: a colored `_DOT_ICON` (`_SEVERITY_DOT_STYLES`,
+    keyed by `finding.severity`) -- the per-finding risk indicator issue #77 asks for,
+    reusing `severity` rather than a new field -- followed by `format_finding`'s existing
+    severity/description/location text. No `no_wrap` -- `FindingsDescription`'s own
+    `width: 1fr` (see that class's docstring) is a bounded column, not an auto-sized one, so
+    a long description wraps within it rather than needing to stay on one physical line."""
+
+    text = Text(_DOT_ICON, style=_SEVERITY_DOT_STYLES[finding.severity])
+    text.append(f" {format_finding(finding)}")
+    return text
+
+
+def render_suggestions_plain(finding: FindingData) -> Text:
+    """`FindingsSuggestion`'s content outside a decision cycle: `finding.suggestions`, one
+    per line, or an empty `Text` when there are none -- never a placeholder string like
+    `"None"` (a `no-op`/`auto-fix` finding has nothing for a human to choose between)."""
+
+    return Text("\n".join(finding.suggestions))
+
+
+def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
+    """`FindingsSuggestion`'s content while parked and this row is the highlighted one
+    (issue #87, kept by #91): every entry of `_decision_entries`, numbered from 1
+    (matching `_FindingsListView`'s digit-key shortcuts), with a leading `"> "` marking
+    whichever index `decision_cursor` names instead of a plain two-space indent.
+
+    Entry 0 is additionally labeled `" (Recommended)"` when it came from
+    `finding.suggestions` itself (i.e. this finding has at least one suggestion, so
+    `_decision_entries`'s first entry is that suggestion rather than `_CUSTOM_ENTRY`) --
+    styled after the Claude Code CLI's own interactive picker. The one fixed entry
+    (`_CUSTOM_ENTRY`) gets a short indented detail line of static UI copy
+    (`_ENTRY_DETAILS`); a suggestion's own text stays single-line, since it has no further
+    data to split a detail line from."""
+
+    entries = _decision_entries(finding)
+    text = Text()
+    for index, entry in enumerate(entries):
+        marker = "> " if index == decision_cursor else "  "
+        recommended = " (Recommended)" if index == 0 and finding.suggestions else ""
+        text.append(f"{marker}{index + 1}. {entry}{recommended}\n")
+        detail = _ENTRY_DETAILS.get(entry)
+        if detail is not None:
+            text.append(f"      {detail}\n")
+    return text
+
+
+def _findings_summary(output: ReviewOutput | TestSufficiencyOutput | list[FindingData]) -> str:
+    """Render `output`'s severity-count summary, e.g. `1 error, 2 warning, 0 info` --
+    `FindingsList`'s own summary line."""
 
     counts = {severity: 0 for severity in ("error", "warning", "info")}
-    for finding in output.findings:
+    for finding in _findings_of(output):
         counts[finding.severity] += 1
     return f"{counts['error']} error, {counts['warning']} warning, {counts['info']} info"
 
 
-def render_findings(output: ReviewOutput | TestSufficiencyOutput) -> Group:
-    """Render every finding in `output.findings` as a two-column grid (issue #77) --
-    left column each finding's severity/description/location plus a per-finding risk
-    indicator (`_render_finding_row`), right column that finding's `suggestions` -- then a
-    blank line and a severity-count summary, e.g. `1 error, 2 warning, 0 info`, below the
-    grid. `output` is whichever of `ReviewOutput`/`TestSufficiencyOutput` `state.py`'s
-    `latest_findings` picked -- both schemas share an identical `findings: list[Finding]`
-    shape, so nothing below needs to branch on which one it got.
+class FindingsDescription(Static):
+    """The left column of one `Finding` row (issue #91): severity dot, description,
+    location.
 
-    Uses `Table.grid`, one row per finding, mirroring `render_rows_live`'s per-row-grid
-    pattern (see that function's own docstring for why a single shared grid across
-    unrelated rows is the wrong shape: one finding's long text would otherwise widen every
-    other finding's columns too). Returned as a `Group` so the grid's height -- and
-    therefore `_BorderedBox`'s `height: auto` CSS -- tracks the number of findings actually
-    shown, rather than reserving a fixed size."""
+    `width: 1fr`, matching `FindingsSuggestion`'s own `1fr` -- an even, row-independent
+    split (issue #92), superseding this class's earlier `width: auto`. That earlier version
+    sized each row's description to its own content, which squeezed `FindingsSuggestion`
+    by a different amount on every row depending on that row's own description length --
+    since only one row is ever highlighted at a time (`FindingsSuggestion` is empty and
+    `display: none` on every other), the split ratio a human actually saw while browsing
+    findings changed from row to row rather than reading as one consistent grid. Matched
+    `1fr` shares fix that: every row's `_FindingsListView` shares the same row width, so two
+    equal `fr` columns land at the identical 50/50 boundary regardless of which row is
+    highlighted or how long its own description happens to be.
 
-    grid = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
-    grid.add_column()
-    grid.add_column()
-    for finding in output.findings:
-        grid.add_row(*_render_finding_row(finding))
-
-    return Group(grid, "", _findings_summary(output))
-
-
-def _finding_option_prompt(finding: Finding, *, show_suggestions: bool) -> Table:
-    """Render one `Finding` as an `OptionList.Option`'s `prompt` -- the same two-column
-    `(left, right)` shape `render_findings` uses per row, in its own small grid rather
-    than a shared one (see `render_rows_live`'s docstring for why a per-row grid, not one
-    grid spanning every option)."""
-
-    row = Table.grid(padding=(0, 1), pad_edge=False, expand=False)
-    row.add_column()
-    row.add_column()
-    row.add_row(*_render_finding_row(finding, show_suggestions=show_suggestions))
-    return row
-
-
-def _finding_options(findings: Sequence[Finding], highlighted: int | None) -> list[Option]:
-    """Build one `OptionList.Option` per finding (issue #88) -- only the option at index
-    `highlighted` shows its suggestions in the right column, every other index's right
-    column is empty. `highlighted=None` (no findings, or before Textual has highlighted
-    anything) shows no suggestions anywhere."""
-
-    return [
-        Option(_finding_option_prompt(finding, show_suggestions=index == highlighted))
-        for index, finding in enumerate(findings)
-    ]
-
-
-class FindingsBox(Vertical):
-    """A bordered box showing the most recently completed step's findings (see
-    `state.py`'s `latest_findings`, which recognizes a `ReviewOutput` (`ReviewStep`) or a
-    `TestSufficiencyOutput` (`TestSufficiencyStep`) equally): each finding's severity,
-    description, location when it has one, and risk indicator in a left column, that
-    finding's suggestions in a right column -- but only for the finding currently under
-    the cursor (issue #88); arrow keys move the cursor between findings via a child
-    `OptionList`. A trailing severity-count summary line sits below the list, unchanged
-    in wording from #77. `border_title` names the owning step (issue #74, e.g.
-    `"Findings -- ReviewStep"`) so it's clear which step's output is on display. Display
-    only -- no key or action here lets a user approve, fix, skip, or abort a finding (see
-    docs/GLOSSARY.md's "Action"; Milestone 7's fix/approval loop is a later ticket).
-
-    A `Vertical`, not a `_BorderedBox` (`Static`) subclass like `PipelineBox`/`StatusBox`
-    -- it needs two children (the `OptionList` and the summary `Static`), which a
-    `Static` can't host. `_BorderedBox`'s border/padding rule is duplicated here rather
-    than shared, since this widget can no longer extend that base alongside `Vertical`.
-    """
+    A long description now wraps within its half of the row instead of squeezing its
+    sibling -- Textual's own default word-wrap on a bounded-width `Static`, no `no_wrap`
+    override needed. No `border-right` divider either: `FindingsSuggestion` draws its own
+    full border when visible (see that class's docstring), which already marks the split
+    without a second, always-on line duplicating it for the common case (every row but the
+    highlighted one) where there is nothing on the right to divide from."""
 
     DEFAULT_CSS = """
-    FindingsBox {
-        border: round $primary;
+    FindingsDescription {
+        width: 1fr;
         padding: 0 1;
-        height: auto;
-    }
-
-    FindingsBox > OptionList {
-        height: auto;
-        border: none;
     }
     """
 
     def __init__(
         self,
-        output: ReviewOutput | TestSufficiencyOutput,
+        finding: FindingData,
+        *,
+        id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(render_description(finding), id=id, classes=classes)
+
+    def update_finding(self, finding: FindingData) -> None:
+        self.update(render_description(finding))
+
+
+class FindingsSuggestion(Static):
+    """The right column of one `Finding` row (issue #91) -- tri-state (hidden/plain/
+    decision), since only the highlighted row shows anything (issue #88, kept by #91):
+    every other row's `FindingsSuggestion` stays cleared. Mode switching is `Finding`'s
+    job (see `set_hidden`/`set_plain`/`set_decision` below), not this widget's own -- it
+    only knows how to render each of the three states, not when to be in one.
+
+    `display: none` while hidden, not just empty content (issue #92) -- an *always*-present
+    `1fr` column would reserve half of every row's width even when there is nothing to show
+    on the right, leaving the common case (every row but the highlighted one) with its
+    description text squeezed into half the row for no reason. `display: none` drops this
+    column out of `Finding`'s horizontal layout entirely, so `FindingsDescription` (also
+    `1fr`) is the only sized child left and takes the whole row -- matching this package's
+    "no box, not an empty box" instinct one level down.
+
+    The `-visible` class -- added in `show_plain`/`show_decision`, removed in `clear` --
+    both restores `display: block` and draws a full `border` around this column (issue #92):
+    a `border-right` on `FindingsDescription` used to be the only visual seam between the
+    two columns, drawn on every row regardless of whether there was anything on the right to
+    divide from; a border around `FindingsSuggestion` itself only appears when this column
+    actually has content, reading as "this is its own widget" rather than a shared divider
+    line. `border_title = "Suggestion"` is set directly in `__init__`, the same way
+    `PipelineBox`/`FindingsList`/`StatusBox` set theirs -- it only actually renders once a
+    border is present (i.e. once `-visible` is added), so it costs nothing while hidden and
+    labels the column the instant it draws its own border."""
+
+    DEFAULT_CSS = """
+    FindingsSuggestion {
+        width: 1fr;
+        padding: 0 1;
+        display: none;
+    }
+
+    FindingsSuggestion.-visible {
+        display: block;
+        border: round $primary-darken-1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
+        classes: str | None = None,
+    ) -> None:
+        super().__init__("", id=id, classes=classes)
+        self.border_title = "Suggestion"
+
+    def clear(self) -> None:
+        self.remove_class("-visible")
+        self.update("")
+
+    def show_plain(self, finding: FindingData) -> None:
+        self.add_class("-visible")
+        self.update(render_suggestions_plain(finding))
+
+    def show_decision(self, finding: FindingData, decision_cursor: int) -> None:
+        self.add_class("-visible")
+        self.update(render_decision_cycle(finding, decision_cursor))
+
+
+class Finding(ListItem):
+    """One row per finding inside `_FindingsListView` (issue #91, superseding the old
+    `FindingsBox`'s single `OptionList` of Rich-rendered options) -- composes
+    `FindingsDescription`/`FindingsSuggestion` in a horizontal split, and owns this row's
+    own display mode (`hidden`/`plain`/`decision`) and, while parked, its own
+    `_decision_cursor`. The cursor is purely a per-row browsing aid, not itself a decision
+    -- see `FindingsList.await_decision`'s docstring: every entry it can land on (a
+    suggestion, or `_CUSTOM_ENTRY`) resolves the park the same way, via the inline chat
+    widget (`decision="fix"`), regardless of which row's cursor it came from. Skip and abort
+    are not reachable through this cursor at all -- they are `_FindingsListView`'s own
+    separate global "s"/"x" bindings, each resolving the park directly with no chat step.
+
+    Named `Finding`, shadowing `pipeline.findings.Finding` (imported into this module as
+    `FindingData`) -- deliberate: this widget's identity in `widgets.py` *is* "one finding,
+    rendered", the same way `PipelineBox`'s rows aren't given a separate `StepRowWidget`
+    name of their own. `ListItem.can_focus=False`, so this class carries no key bindings of
+    its own -- all of #87's parked-mode bindings live on `_FindingsListView` instead (the
+    only focusable node in this whole subtree; see that class's docstring)."""
+
+    DEFAULT_CSS = """
+    Finding {
+        layout: horizontal;
+        height: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        finding: FindingData,
+        *,
+        id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(id=id, classes=classes)
+        self.finding = finding
+        self._decision_cursor = 0
+        self._mode: Literal["hidden", "plain", "decision"] = "hidden"
+
+    def compose(self) -> ComposeResult:
+        yield FindingsDescription(self.finding)
+        suggestion = FindingsSuggestion()
+        yield suggestion
+        # Prime it from whatever `_mode`/`_decision_cursor` already are -- a `set_hidden`/
+        # `set_plain`/`set_decision`/`update_finding` call can legitimately land on this
+        # row before this `compose()` has actually run (see `_render_suggestion`'s
+        # docstring), in which case those calls updated `_mode`/`_decision_cursor` but
+        # could not reach a `FindingsSuggestion` that didn't exist yet -- this is what
+        # makes that state show up correctly once it finally does. A fresh `Finding`, never
+        # touched by any of those, is `_mode="hidden"` by construction, matching
+        # `FindingsSuggestion`'s own already-empty default -- so this is a no-op for the
+        # ordinary "just mounted, nothing has happened yet" case.
+        self._apply_mode(suggestion)
+
+    def set_hidden(self) -> None:
+        self._mode = "hidden"
+        self._render_suggestion()
+
+    def set_plain(self) -> None:
+        self._mode = "plain"
+        self._render_suggestion()
+
+    def set_decision(self) -> None:
+        self._mode = "decision"
+        self._render_suggestion()
+
+    def _apply_mode(self, suggestion: FindingsSuggestion) -> None:
+        if self._mode == "hidden":
+            suggestion.clear()
+        elif self._mode == "plain":
+            suggestion.show_plain(self.finding)
+        else:
+            suggestion.show_decision(self.finding, self._decision_cursor)
+
+    def _render_suggestion(self) -> None:
+        """Apply the current `_mode` to this row's `FindingsSuggestion`, unless this row's
+        own `compose()` (yielding `FindingsDescription`/`FindingsSuggestion`) hasn't
+        actually run yet -- a freshly mounted `Finding` (e.g. from `FindingsList.
+        update_findings`'s own growth path, or the highlighted row `FindingsList.
+        await_decision`/`on_list_view_highlighted` prime the instant they're highlighted)
+        can receive a `set_hidden`/`set_plain`/`set_decision` call before that happens, the
+        same "mount attaches immediately, composing its children is a later, async step"
+        gap `FindingsList.update_findings` already guards against one level up. `_mode` is
+        already updated by the caller regardless, so skipping the render here isn't lossy
+        -- `compose()`'s own `_apply_mode` call picks it up once it does run."""
+
+        try:
+            suggestion = self.query_one(FindingsSuggestion)
+        except NoMatches:
+            return
+        self._apply_mode(suggestion)
+
+    def reset_decision(self) -> None:
+        """Reset `_decision_cursor` back to 0 -- called whenever this row becomes the
+        highlighted one under a park (issue #87), so each finding's own decision cycle
+        always starts fresh rather than carrying over whatever index a previous highlight
+        left it on."""
+
+        self._decision_cursor = 0
+
+    def update_finding(self, finding: FindingData) -> None:
+        """Data changed in place, same list position (`FindingsList.update_findings`'s
+        in-place path) -- refresh both children, preserving whichever display mode this
+        row is currently in rather than forcing one. Skipped, like `_render_suggestion`,
+        when this row hasn't composed yet -- `self.finding` is still updated below
+        regardless, so the eventual real `compose()` reflects this call's data anyway."""
+
+        self.finding = finding
+        try:
+            description = self.query_one(FindingsDescription)
+        except NoMatches:
+            return
+        description.update_finding(finding)
+        self._render_suggestion()
+
+    def cycle_decision(self, delta: int) -> None:
+        entries = _decision_entries(self.finding)
+        self._decision_cursor = (self._decision_cursor + delta) % len(entries)
+        self.set_decision()
+
+    def jump_decision(self, index: int) -> None:
+        """Jump `_decision_cursor` straight to `index` (0-based) -- the digit-key
+        counterpart to `cycle_decision`'s relative left/right step. A no-op when `index`
+        is past this finding's own `_decision_entries` (a finding with fewer suggestions
+        than another has a shorter list, so not every digit is valid for every row)."""
+
+        entries = _decision_entries(self.finding)
+        if not 0 <= index < len(entries):
+            return
+        self._decision_cursor = index
+        self.set_decision()
+
+    def confirmed_entry(self) -> str:
+        return _decision_entries(self.finding)[self._decision_cursor]
+
+
+class _FindingsListView(ListView):
+    """Direct successor to `FindingsBox`'s old private `_FindingOptionList` (issue #91).
+    `ListView(can_focus=True, can_focus_children=False)`: the `ListView` itself holds
+    keyboard focus, its `ListItem` children can never be individually focused, and its own
+    `action_cursor_up/down`/`watch_index`/`highlighted_child` all index/assert against
+    `self._nodes` unfiltered -- so every one of #87's parked-mode key bindings on top of
+    up/down/enter (which `ListView`'s own `BINDINGS` already give this for free) lives
+    here, never on `Finding` itself: left/right cycle the highlighted finding's
+    `_decision_entries`, the single-key "s"/"x" shortcuts jump straight to skip/abort
+    regardless of cursor position (the two remaining global, step-scoped controls -- unlike
+    approve, neither was ever a listed per-finding menu entry, and skip's binding is a bare
+    escape hatch for a park chatting genuinely cannot resolve, e.g. a step that ignores
+    `ctx.fix_round` entirely -- see `tui/AGENTS.md`'s "Findings box" section), "f" jumps
+    straight to the inline chat the same way, and digit keys "1".."9" jump straight to that
+    1-based entry (matching `render_decision_cycle`'s numbering). All of these delegate to
+    the owning `FindingsList`, which no-ops them while not parked -- this class holds no
+    decision state of its own."""
+
+    BINDINGS = [
+        Binding("left", "cycle_prev", "Previous suggestion", show=False),
+        Binding("right", "cycle_next", "Next suggestion", show=False),
+        Binding("s", "quick_skip", "Skip", show=False),
+        Binding("x", "quick_abort", "Abort", show=False),
+        Binding("f", "open_chat", "Chat", show=False),
+        *(
+            Binding(str(digit), f"jump_decision({digit})", f"Option {digit}", show=False)
+            for digit in range(1, 10)
+        ),
+    ]
+
+    def __init__(self, *items: Finding, owner: FindingsList) -> None:
+        # `ListView` assumes every mounted child is a `ListItem` and indexes into
+        # `self._nodes` unfiltered -- a summary/footer `Static` (or any other non-`Finding`
+        # widget) mounted as a *child of this* would silently corrupt that indexing, not
+        # raise anywhere near the mistake. Asserted here, at the one place every row this
+        # class will ever host is constructed, rather than trusted implicitly.
+        assert all(isinstance(item, Finding) for item in items), (
+            "_FindingsListView only ever hosts Finding rows."
+        )
+        super().__init__(*items)
+        self._owner = owner
+
+    def action_cycle_prev(self) -> None:
+        self._owner._cycle_decision(-1)
+
+    def action_cycle_next(self) -> None:
+        self._owner._cycle_decision(1)
+
+    def action_quick_skip(self) -> None:
+        self._owner._quick_decision("skip")
+
+    def action_quick_abort(self) -> None:
+        self._owner._quick_decision("abort")
+
+    def action_open_chat(self) -> None:
+        self._owner._open_chat("")
+
+    def action_jump_decision(self, digit: int) -> None:
+        self._owner._jump_decision(digit - 1)
+
+
+class _InlineApprovalChat(Vertical):
+    """A small inline free-text widget (issue #87), mounted into a parked `FindingsList`
+    on demand -- when a human confirms a suggestion (seeded with that suggestion's own
+    text) or `_CUSTOM_ENTRY` (seeded empty), or the moment the decision cursor arrives at
+    `_CUSTOM_ENTRY` at all (`FindingsList._cycle_decision`/`_jump_decision`, so left/right
+    or a digit key landing on "Chat about it" opens it immediately, no extra Enter needed --
+    see those methods' own docstrings). Replaces `ApprovalPromptScreen`'s "fix" path pushing
+    `InputPromptScreen`: there is no modal host for an `Input` in this design (issue #87
+    removes the modal entirely), so this widget plays that role directly, mounted as a
+    sibling of `_FindingsListView` rather than on a separate screen."""
+
+    DEFAULT_CSS = """
+    _InlineApprovalChat {
+        height: auto;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, prefill: str, *, owner: FindingsList) -> None:
+        super().__init__()
+        self._prefill = prefill
+        self._owner = owner
+
+    def compose(self) -> ComposeResult:
+        yield Static("What should this step do?")
+        yield Input(value=self._prefill)
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._owner._resolve_chat(event.value)
+        self.remove()
+
+
+_FOOTER_HINT = (
+    "Enter to confirm  |  left/right or 1-9 browse options  |  f to chat"
+    "  |  s to skip  |  x to abort"
+)
+
+
+class FindingsList(Vertical):
+    """A bordered box showing the most recently completed step's findings (see
+    `state.py`'s `latest_findings`, which recognizes a `ReviewOutput` (`ReviewStep`), a
+    `TestSufficiencyOutput` (`TestSufficiencyStep`), or a bare `list[Finding]`
+    (`RebaseStep`, issue #87's widening) equally): one `Finding` row per finding inside a
+    child `_FindingsListView`, plus a trailing severity-count summary line, unchanged in
+    wording from #77. `border_title` names the owning step (issue #74, e.g.
+    `"Findings -- ReviewStep"`) so it's clear which step's output is on display.
+
+    Issue #91 rebuilt this as a true widget-composition tree (`FindingsList` hosting
+    `_FindingsListView` hosting one `Finding` per finding, each composing
+    `FindingsDescription`/`FindingsSuggestion`) in place of the old `FindingsBox`'s single
+    `OptionList` of Rich-rendered options -- see `tui/AGENTS.md`'s "Findings box" section
+    for the full design rationale. Only the finding currently under the cursor shows
+    anything in its `FindingsSuggestion` column (issue #88, deliberately preserved, not
+    revisited by #91); arrow keys move the cursor via `_FindingsListView`'s own built-in
+    up/down bindings.
+
+    No longer display-only (issue #87, superseding #42/#61's "no key or action here lets
+    a user approve, fix, skip, or abort a finding" -- see docs/GLOSSARY.md's "Action"):
+    while a step is actually parked, `await_decision` turns the highlighted row's
+    `FindingsSuggestion` into a live decision selector -- see that method's docstring, and
+    `_FindingsListView`/`_InlineApprovalChat` above -- replacing `ApprovalPromptScreen`'s
+    modal entirely. Outside a park, the box behaves exactly as #88 already shipped:
+    read-only, only the highlighted finding's suggestions shown, no key here does
+    anything. A `#findings-footer` `Static` beneath the summary line shows bound-key copy
+    only while parked, matching this package's "no box, not an empty box" instinct applied
+    at the sub-widget level.
+
+    A `Vertical`, not a `_BorderedBox` (`Static`) subclass like `PipelineBox`/`StatusBox`
+    -- it needs three children (`_FindingsListView`, the summary `Static`, the footer-hint
+    `Static`), which a `Static` can't host. `_BorderedBox`'s border/padding rule is
+    duplicated here rather than shared, since this widget can no longer extend that base
+    alongside `Vertical`.
+    """
+
+    DEFAULT_CSS = """
+    FindingsList {
+        border: round $primary;
+        padding: 0 1;
+        height: auto;
+    }
+
+    FindingsList > _FindingsListView {
+        height: auto;
+    }
+
+    FindingsList .footer-hint {
+        color: $text-muted;
+    }
+    """
+
+    def __init__(
+        self,
+        output: ReviewOutput | TestSufficiencyOutput | list[FindingData],
         step_name: str,
         *,
         id: (str | None) = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
@@ -432,45 +840,331 @@ class FindingsBox(Vertical):
         super().__init__(id=id, classes=classes)
         self._output = output
         self.border_title = f"Findings -- {step_name}"
+        # Set only for the duration of `await_decision` -- see that method's docstring.
+        self._parked = False
+        self._pending: asyncio.Future[ApprovalResponse] | None = None
+        # The `Finding` row `on_list_view_highlighted` most recently hid -- tracked so the
+        # handler can un-highlight it without re-deriving it from `_FindingsListView`'s own
+        # (already-advanced) `index`. `None` before anything has ever been highlighted.
+        self._last_highlighted: Finding | None = None
+        # This box's own authoritative list of `Finding` rows, in order -- `update_findings`
+        # reconciles against *this*, never against `_FindingsListView.children` fresh each
+        # call. See that method's docstring for why: a widget's constructor-supplied
+        # children (here, these same `Finding` instances, passed to `_FindingsListView`
+        # below) are only flushed into Textual's own `_nodes` once that widget's `Compose`
+        # message is later processed by the message pump -- `update_findings` can run
+        # before that happens, at which point `_FindingsListView.children` would (still,
+        # briefly) undercount them.
+        self._rows = [Finding(finding) for finding in _findings_of(output)]
 
     def compose(self) -> ComposeResult:
-        yield OptionList(*_finding_options(self._output.findings, highlighted=0))
-        yield Static(_findings_summary(self._output))
+        yield _FindingsListView(*self._rows, owner=self)
+        yield Static(_findings_summary(self._output), id="findings-summary")
+        yield Static("", id="findings-footer", classes="footer-hint")
 
-    def update_findings(self, output: ReviewOutput | TestSufficiencyOutput, step_name: str) -> None:
-        """Replace the displayed findings with `output`'s, re-rendered, and update
-        `border_title` to name `step_name` (issue #74).
+    def on_mount(self) -> None:
+        # Safety net: `_FindingsListView`'s own initial `index=0` may or may not have
+        # already posted `Highlighted` (and therefore reached `on_list_view_highlighted`
+        # below) by the time this runs -- explicitly prime row 0 rather than depend on
+        # message-delivery ordering between two independently-mounted widgets.
+        self._prime_highlighted()
+
+    def update_findings(
+        self, output: ReviewOutput | TestSufficiencyOutput | list[FindingData], step_name: str
+    ) -> None:
+        """Replace the displayed findings with `output`'s, and update `border_title` to
+        name `step_name` (issue #74).
 
         `app.py`'s `_render` runs on a periodic timer, so a freshly `self.mount()`ed
-        `FindingsBox` can receive an `update_findings` call before Textual has actually
+        `FindingsList` can receive an `update_findings` call before Textual has actually
         finished mounting its own `compose()`-yielded children -- `self.mount()` returns
         as soon as the widget is attached to the DOM, not once its subtree is fully
         mounted. `self._output`/`border_title` are always updated regardless (neither
-        needs a mounted child), and the `OptionList`/`Static` rebuild is skipped rather
-        than raised when they aren't there yet -- `compose()` already renders from
-        `self._output`, so once mounting does finish it reflects this call's data anyway.
+        needs a mounted child), and the child rebuild is skipped rather than raised when
+        `_FindingsListView` itself isn't there yet -- `compose()` already renders from
+        `self._rows`, so once mounting does finish it reflects this call's data anyway.
+
+        Since that same periodic timer calls this on every tick regardless of whether
+        `output` actually changed, the common case (finding count unchanged) updates every
+        existing `Finding` row in place via `update_finding` -- touching no DOM structure
+        at all, so `_FindingsListView.index`, every row's own `_decision_cursor`/`_mode`,
+        and any mounted `_InlineApprovalChat` (a sibling of `_FindingsListView`, untouched
+        by this method regardless) all survive completely untouched. Only the finding
+        count actually growing or shrinking mounts or removes rows, and only the ones
+        beyond the overlap with the old list -- every retained row, including the
+        highlighted one, is still updated in place first.
+
+        Reconciles against `self._rows` (this box's own authoritative row list, extended/
+        trimmed in step below), never against a fresh `_FindingsListView.children` read --
+        two independent races rule that out, both confirmed empirically against this
+        Textual version, not just reasoned about:
+
+        - Removal is asynchronous (`ListItem.remove()` posts a `Prune` message, actually
+          dropped from `self._nodes` only once that message is later dispatched), but this
+          method runs synchronously from `app.py`'s non-async `_render()` with no `await`
+          point to let that settle. The more obvious-looking "rebuild" shape --
+          `_FindingsListView.clear()` followed by `.extend(...)` -- leaves `_nodes` briefly
+          containing *both* the old (still-pruning) and new rows, so setting `.index` right
+          after would highlight a stale, about-to-be-removed row instead of the intended
+          new one. Reconciling the overlap/tail directly (update retained rows in place,
+          mount/remove only the non-overlapping tail) sidesteps this, since it never asks
+          `.index` to point past a row that might not have settled into `_nodes` yet.
+        - Mounting is *also* asynchronous in the other direction: a widget's constructor-
+          supplied children (here, `_FindingsListView(*self._rows, owner=self)` in
+          `compose()`) are only flushed into its own `_nodes` once that widget's own
+          `Compose` message is later processed -- `update_findings` can run before that
+          happens (the same "freshly mounted, not yet composed" gap as the paragraph
+          above, just one level deeper). Reading `_FindingsListView.children` at that
+          moment would undercount `self._rows` and mount duplicate `Finding` widgets for
+          rows that already exist, just not yet flushed. `self._rows` itself is immune to
+          this, since it's a plain list this class alone owns and mutates, not a live view
+          into Textual's own mount queue.
         """
 
         self._output = output
         self.border_title = f"Findings -- {step_name}"
         try:
-            option_list = self.query_one(OptionList)
-            summary = self.query_one(Static)
+            list_view = self.query_one(_FindingsListView)
+            summary = self.query_one("#findings-summary", Static)
         except NoMatches:
             return
-        option_list.clear_options()
-        option_list.add_options(_finding_options(output.findings, highlighted=0))
+
+        new_findings = _findings_of(output)
+        overlap = min(len(self._rows), len(new_findings))
+        for item, finding in zip(self._rows[:overlap], new_findings[:overlap], strict=True):
+            item.update_finding(finding)
+
+        if len(new_findings) > overlap:
+            added = [Finding(finding) for finding in new_findings[overlap:]]
+            list_view.extend(added)
+            self._rows.extend(added)
+        elif len(self._rows) > overlap:
+            removed = self._rows[overlap:]
+            del self._rows[overlap:]
+            for item in removed:
+                item.remove()
+            # If the row `on_list_view_highlighted` most recently hid is one of the rows
+            # just removed, drop the reference now rather than leaving it to that handler:
+            # `.index`'s reassignment below posts a fresh `Highlighted` message (dispatched
+            # later, once this row has actually been pruned from the DOM), and calling
+            # `.set_hidden()` on an already-unmounted `Finding` there raises `NoMatches`
+            # instead of a merely stale render.
+            if self._last_highlighted in removed:
+                self._last_highlighted = None
+            if list_view.index is not None and list_view.index >= len(new_findings):
+                list_view.index = len(new_findings) - 1 if new_findings else None
+
+        if new_findings and list_view.index is None:
+            list_view.index = 0
+
         summary.update(_findings_summary(output))
 
-    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        """Rebuild every option's prompt so only `event.option_index`'s row shows its
-        suggestions -- see the module docstring's rationale for a full rebuild over
-        diffing old-vs-new highlighted index."""
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        """Hide the previously-highlighted row's suggestions and show the newly
+        highlighted one's (issue #88, kept by #91) -- `plain` outside a park, or `decision`
+        (with `_decision_cursor` reset to 0 first, issue #87) while parked, since moving to
+        a different finding always starts its own decision cycle fresh rather than
+        carrying over whatever index the previous row happened to be on."""
 
-        for index, finding in enumerate(self._output.findings):
-            event.option_list.replace_option_prompt_at_index(
-                index, _finding_option_prompt(finding, show_suggestions=index == event.option_index)
-            )
+        if self._last_highlighted is not None:
+            self._last_highlighted.set_hidden()
+        item = event.item
+        self._last_highlighted = item if isinstance(item, Finding) else None
+        if self._last_highlighted is None:
+            return
+        if self._parked:
+            self._last_highlighted.reset_decision()
+            self._last_highlighted.set_decision()
+        else:
+            self._last_highlighted.set_plain()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Confirm whatever `_decision_cursor` currently points at for the selected row's
+        finding (issue #87) -- a no-op outside a park, matching every other interactive
+        binding here. Every entry `_decision_entries` can produce is now discussion-only
+        (a suggestion, or `_CUSTOM_ENTRY`), so this always opens the inline chat, seeded
+        with that entry's own text (empty for `_CUSTOM_ENTRY`) -- a redundant-but-harmless
+        second path once `_cycle_decision`/`_jump_decision` already auto-open it the moment
+        the cursor arrives at `_CUSTOM_ENTRY`, kept because Enter must still work regardless
+        of how the cursor got there (e.g. a fresh row highlight, never cycled at all)."""
+
+        if not self._parked:
+            return
+        item = event.item
+        assert isinstance(item, Finding)
+        entry = item.confirmed_entry()
+        if entry == _CUSTOM_ENTRY:
+            self._open_chat("")
+        else:
+            self._open_chat(entry)
+
+    def _prime_highlighted(self) -> None:
+        item = self._highlighted_finding()
+        if item is None:
+            return
+        item.set_decision() if self._parked else item.set_plain()
+        self._last_highlighted = item
+
+    def _list_view(self) -> _FindingsListView | None:
+        """This box's `_FindingsListView`, or `None` when it hasn't composed yet -- the
+        same "freshly mounted, not yet composed" gap `update_findings`/`Finding`'s own
+        guards defend against, here for the one level above those (`FindingsList` itself).
+        Every caller below treats `None` as "nothing to do yet, will settle on its own"."""
+
+        try:
+            return self.query_one(_FindingsListView)
+        except NoMatches:
+            return None
+
+    async def _await_list_view(self) -> _FindingsListView | None:
+        """Give `_FindingsListView` a few event-loop turns to exist if it doesn't yet
+        (`_list_view`'s docstring), rather than the fire-and-forget "skip, settles on its
+        own" every synchronous caller of `_list_view()` uses -- `await_decision` (the only
+        async caller) needs its `.focus()` call to actually land once `_FindingsListView`
+        does exist, not silently never happen for the rest of that park just because this
+        coroutine started running a beat before this box finished composing. Bounded, not
+        indefinite: if it never turns up (box already torn down, or some future bug), give
+        up and return `None` rather than hang the whole park."""
+
+        for _ in range(10):
+            list_view = self._list_view()
+            if list_view is not None:
+                return list_view
+            await asyncio.sleep(0)
+        return None
+
+    def _highlighted_finding(self) -> Finding | None:
+        list_view = self._list_view()
+        if list_view is None:
+            return None
+        item = list_view.highlighted_child
+        # `_FindingsListView.__init__` asserts every mounted child is a `Finding`, and this
+        # module never mounts anything else into it -- see that class's docstring.
+        return cast("Finding | None", item)
+
+    def _cycle_decision(self, delta: int) -> None:
+        """Move the highlighted row's `_decision_cursor` by `delta` (left/right), then open
+        the inline chat the moment it *lands* on `_CUSTOM_ENTRY` -- so browsing onto "Chat
+        about it" already puts the human straight into typing, no extra Enter/"f" needed.
+        Checked here, at `FindingsList` level, rather than inside `Finding.cycle_decision`
+        itself: that method stays a pure cursor move with no Textual side effect of its own
+        (matching this module's pure/impure split), and `_open_chat` already needs a live
+        `FindingsList` (`self._parked`, `self.mount`) that `Finding` has no access to."""
+
+        if not self._parked:
+            return
+        item = self._highlighted_finding()
+        if item is None:
+            return
+        item.cycle_decision(delta)
+        if item.confirmed_entry() == _CUSTOM_ENTRY:
+            self._open_chat("")
+
+    def _jump_decision(self, index: int) -> None:
+        """Digit-key counterpart to `_cycle_decision` -- same "open the chat the instant the
+        cursor lands on `_CUSTOM_ENTRY`" behavior, including when `Finding.jump_decision`
+        itself no-ops (an out-of-range digit): `confirmed_entry()` is checked after the call
+        regardless, so an already-open chat (cursor already on `_CUSTOM_ENTRY` before this
+        no-op jump) is simply re-confirmed rather than skipped -- harmless, since
+        `_open_chat` is itself a no-op once one is already mounted."""
+
+        if not self._parked:
+            return
+        item = self._highlighted_finding()
+        if item is None:
+            return
+        item.jump_decision(index)
+        if item.confirmed_entry() == _CUSTOM_ENTRY:
+            self._open_chat("")
+
+    def _quick_decision(self, decision: ApprovalDecision) -> None:
+        if not self._parked or self._pending is None:
+            return
+        self._pending.set_result(ApprovalResponse(decision=decision, instructions=None))
+
+    def _open_chat(self, prefill: str) -> None:
+        if not self._parked or self.query(_InlineApprovalChat):
+            return
+        self.mount(_InlineApprovalChat(prefill, owner=self))
+
+    def _resolve_chat(self, instructions: str) -> None:
+        if self._pending is not None:
+            self._pending.set_result(ApprovalResponse(decision="fix", instructions=instructions))
+
+    def _set_footer_hint(self, parked: bool) -> None:
+        try:
+            footer = self.query_one("#findings-footer", Static)
+        except NoMatches:
+            return
+        footer.update(_FOOTER_HINT if parked else "")
+
+    async def await_decision(self) -> ApprovalResponse:
+        """Turn the highlighted row's `FindingsSuggestion` into a live decision selector
+        until a human resolves the park -- via the inline chat widget (confirming a
+        suggestion or "Chat about it" and submitting, always resolving with
+        `decision="fix"`), or via `_FindingsListView`'s two separate global bindings, "s"
+        (skip, a bare escape hatch for a park the chat genuinely cannot resolve) and "x"
+        (abort, stopping the whole run) -- the inline replacement for
+        `ReviewApp._relay_approval`'s old `push_screen_wait(ApprovalPromptScreen(...))`
+        (issue #87).
+
+        The decision is step-scoped, not per-finding (an explicit design call, since a
+        park is a single step-level event): confirming the chat, skipping, or aborting from
+        *any* finding's row resolves the one pending future here, regardless of which row
+        the cursor was on -- each row's own `_decision_cursor`/left-right cycling is purely
+        a per-row browsing aid, not separate state per finding. Only one `await_decision`
+        call can be pending at a time in practice (`ReviewApp._relay_approval` awaits one
+        park at a time), so a single `self._pending` future, not a queue, is enough.
+
+        Resets the highlighted row's `_decision_cursor` to 0 and switches it into decision
+        mode before waiting, so a park always starts that finding's cycle fresh, then
+        restores `self._parked = False` and that row back to `set_plain()` in a `finally`
+        -- once resolved, the box reverts to #88's plain read-only display for whatever
+        `update_findings` call comes next, as if it had never been parked.
+
+        Also focuses `_FindingsListView` -- unlike the old `ApprovalPromptScreen`, becoming
+        the active screen on `push_screen` and so implicitly receiving every keypress, this
+        box is just one mounted widget among others; without an explicit `.focus()` here, a
+        real run's "s"/"x"/"f"/left/right/digit keypresses would land on whatever (if
+        anything) last had focus instead of `_FindingsListView`'s bindings, and nothing
+        would happen at all.
+        Awaits `_await_list_view()` first (rather than the plain `_list_view()` every other
+        caller in this class uses) specifically so this focus call -- unlike a merely
+        stale render elsewhere, a silently-skipped focus would leave every keypress for the
+        rest of this park going nowhere -- actually lands once `_FindingsListView` exists,
+        even if this coroutine started running while `FindingsList` was still composing.
+
+        `_set_footer_hint(True)` runs *after* that same await, not before it -- the ordinary
+        case in production is `_relay_approval` calling this immediately after
+        `_render_findings` mounted a brand-new `FindingsList` for this step's first park,
+        with no intervening `await` of its own, so `FindingsList.compose()` (which yields
+        `#findings-footer`) has typically not run yet either. `_set_footer_hint` itself only
+        guards against `NoMatches` and gives up silently (the plain, synchronous pattern
+        every other caller in this class uses, correct for a merely stale render) -- but
+        nothing else ever calls it again for the rest of this park, unlike `Finding`'s own
+        `_apply_mode`-on-compose catch-up, so calling it before the box has settled would
+        leave the footer hint blank for the entire park, not just one frame.
+        """
+
+        self._parked = True
+        list_view = await self._await_list_view()
+        self._set_footer_hint(True)
+        item = self._highlighted_finding()
+        if item is not None:
+            item.reset_decision()
+            item.set_decision()
+            self._last_highlighted = item
+        if list_view is not None:
+            list_view.focus()
+        self._pending = asyncio.get_running_loop().create_future()
+        try:
+            return await self._pending
+        finally:
+            self._parked = False
+            self._pending = None
+            if item is not None:
+                item.set_plain()
+            self._set_footer_hint(False)
 
 
 class StatusBox(_BorderedBox):
@@ -478,7 +1172,7 @@ class StatusBox(_BorderedBox):
     `app.py`'s `_render_status`/`state.py`'s `final_status_message`): a one-line outcome
     plus the reminder that "e" now closes the app. Mounted dynamically, only once the run
     is done -- a still-running pipeline shows no Status box at all, mirroring
-    `FindingsBox`'s own dynamic mount pattern (`app.py`'s `_render_findings`)."""
+    `FindingsList`'s own dynamic mount pattern (`app.py`'s `_render_findings`)."""
 
     def __init__(
         self,
