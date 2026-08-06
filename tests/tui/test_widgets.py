@@ -1,11 +1,11 @@
-"""Widget-level tests for `PipelineBox`/`FindingsBox`, driven with Textual's
+"""Widget-level tests for `PipelineBox`/`FindingsList`, driven with Textual's
 `Pilot`/`run_test()`.
 
 `render_rows`/`format_row`/`format_duration`/`format_finding` are exercised directly for
-the pure formatting rules; `PipelineBox`/`FindingsBox` themselves are mounted in a minimal
-`App` and driven through `run_test()` to prove `update_rows`/`update_findings` -- and, for
-`FindingsBox`, the parked-mode interactive decision flow (issue #87) -- actually reach the
-rendered widget content.
+the pure formatting rules; `PipelineBox`/`FindingsList` themselves are mounted in a
+minimal `App` and driven through `run_test()` to prove `update_rows`/`update_findings` --
+and, for `FindingsList`, the parked-mode interactive decision flow (issue #87) -- actually
+reach the rendered widget content.
 """
 
 from __future__ import annotations
@@ -17,25 +17,32 @@ import pytest
 from rich.console import Console
 from rich.spinner import Spinner
 from textual.app import App, ComposeResult
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Input, ListItem, Static
 
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import ApprovalResponse
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.state import ActivityRow, StepRow
+from code_review.tui.widgets import Finding as FindingItem
 from code_review.tui.widgets import (
-    FindingsBox,
+    FindingsDescription,
+    FindingsList,
+    FindingsSuggestion,
     PipelineBox,
     StatusBox,
+    _FindingsListView,
     _render_row,
     format_activity_row,
     format_duration,
     format_finding,
     format_row,
     gradient_text,
+    render_decision_cycle,
+    render_description,
     render_rows,
     render_rows_live,
+    render_suggestions_plain,
 )
 
 
@@ -46,12 +53,18 @@ def _render_content(renderable: object) -> str:
     return buffer.getvalue().rstrip()
 
 
-def _option_list_content(option_list: OptionList) -> list[str]:
-    """Render every option's `prompt` in `option_list` to plain text, one entry per
-    option -- the `FindingsBox`-equivalent of `_render_content`, since an `OptionList`
-    has no single renderable `.content` the way `_BorderedBox`-based widgets do."""
+def _finding_rows_content(findings_list: FindingsList) -> list[str]:
+    """Render every mounted `Finding` row's `FindingsDescription`+`FindingsSuggestion`
+    content to plain text, one entry per row -- the `FindingsList`-equivalent of
+    `_option_list_content`'s old per-`Option` rendering, since a `_FindingsListView` has
+    no single renderable `.content` the way `_BorderedBox`-based widgets do."""
 
-    return [_render_content(option.prompt) for option in option_list.options]
+    rows = []
+    for item in findings_list.query(FindingItem):
+        description = _render_content(item.query_one(FindingsDescription).content)
+        suggestion = _render_content(item.query_one(FindingsSuggestion).content)
+        rows.append(f"{description}\n{suggestion}")
+    return rows
 
 
 # --- pure formatting -------------------------------------------------------------------
@@ -557,11 +570,89 @@ def test_format_finding_includes_location_when_present() -> None:
     )
 
 
-# --- FindingsBox, mounted and driven through Pilot ----------------------------------------
+# --- render_description/render_suggestions_plain/render_decision_cycle: pure formatting -
+
+
+def test_render_description_includes_a_severity_dot_and_format_finding() -> None:
+    finding = Finding(
+        severity="warning",
+        description="unclear naming",
+        review_scope="source",
+        location="widgets.py:42",
+    )
+
+    text = render_description(finding)
+
+    assert text.plain == "● warning: unclear naming (widgets.py:42)"
+
+
+def test_render_suggestions_plain_joins_suggestions_one_per_line() -> None:
+    finding = Finding(
+        severity="warning",
+        description="unclear naming",
+        review_scope="source",
+        suggestions=["rename it", "add a docstring"],
+    )
+
+    assert render_suggestions_plain(finding).plain == "rename it\nadd a docstring"
+
+
+def test_render_suggestions_plain_is_empty_with_no_suggestions() -> None:
+    finding = Finding(severity="info", description="fine as-is", review_scope="source")
+
+    assert render_suggestions_plain(finding).plain == ""
+
+
+def test_render_decision_cycle_labels_only_entry_0_as_recommended_when_it_is_a_suggestion() -> None:
+    """Issue #91: a finding with its own `suggestions` gets " (Recommended)" appended to
+    entry 0 only -- every other entry (further suggestions, `_CUSTOM_ENTRY`,
+    `_DECISION_ENTRIES`) never carries that label, regardless of cursor position."""
+
+    finding = Finding(
+        severity="warning",
+        description="unclear naming",
+        review_scope="source",
+        suggestions=["rename it", "add a docstring"],
+    )
+
+    text = render_decision_cycle(finding, decision_cursor=0)
+
+    lines = text.plain.splitlines()
+    assert "1. rename it (Recommended)" in lines[0]
+    assert not any("(Recommended)" in line for line in lines[1:])
+
+
+def test_render_decision_cycle_has_no_recommended_label_with_no_suggestions() -> None:
+    """Entry 0 is `_CUSTOM_ENTRY` ("Type something.") when a finding has no suggestions of
+    its own -- it never earns the "(Recommended)" label either."""
+
+    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+
+    text = render_decision_cycle(finding, decision_cursor=0)
+
+    assert "(Recommended)" not in text.plain
+    assert "1. Type something." in text.plain
+
+
+def test_render_decision_cycle_gives_the_four_fixed_entries_a_detail_line() -> None:
+    """A suggestion's own text stays single-line; the four fixed entries
+    (`_CUSTOM_ENTRY`/`_DECISION_ENTRIES`) each get a short indented detail line."""
+
+    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+
+    text = render_decision_cycle(finding, decision_cursor=0)
+
+    assert "Open a free-text prompt" in text.plain
+    assert "Accept this finding's outcome" in text.plain
+    assert "Leave this finding unresolved" in text.plain
+    assert "Stop the pipeline run entirely" in text.plain
+
+
+# --- FindingsList, mounted and driven through Pilot ----------------------------------------
 
 
 class _FindingsHostApp(App[None]):
-    """Minimal host app: mounts one `FindingsBox` so `Pilot` can drive it directly,
+    """Minimal host app: mounts one `FindingsList` so `Pilot` can drive it directly,
     independent of `ReviewApp`'s event-consuming worker."""
 
     def __init__(
@@ -572,10 +663,23 @@ class _FindingsHostApp(App[None]):
         self._step_name = step_name
 
     def compose(self) -> ComposeResult:
-        yield FindingsBox(self._initial_output, self._step_name)
+        yield FindingsList(self._initial_output, self._step_name)
 
 
-def test_findings_box_renders_its_initial_findings_on_mount() -> None:
+def test_findings_list_view_rejects_a_non_finding_child() -> None:
+    """`_FindingsListView.__init__` asserts every mounted child is a `Finding` -- `ListView`
+    itself assumes this (see that class's docstring) and would otherwise fail silently,
+    far from the actual mistake."""
+
+    owner = FindingsList(
+        ReviewOutput(findings=[], risk_level="low", risk_rationale="fine"), "ReviewStep"
+    )
+
+    with pytest.raises(AssertionError):
+        _FindingsListView(ListItem(Static("not a finding")), owner=owner)
+
+
+def test_findings_list_renders_its_initial_findings_on_mount() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -587,16 +691,18 @@ def test_findings_box_renders_its_initial_findings_on_mount() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            lines = _option_list_content(box.query_one(OptionList))
+            box = app.query_one(FindingsList)
+            lines = _finding_rows_content(box)
             assert len(lines) == 1
             assert "warning: unclear naming" in lines[0]
-            assert box.query_one(Static).content == "0 error, 1 warning, 0 info"
+            assert box.query_one("#findings-summary", Static).content == (
+                "0 error, 1 warning, 0 info"
+            )
 
     asyncio.run(scenario())
 
 
-def test_findings_box_highlights_index_0_by_default_and_shows_only_its_suggestions() -> None:
+def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggestions() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -619,17 +725,17 @@ def test_findings_box_highlights_index_0_by_default_and_shows_only_its_suggestio
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            option_list = box.query_one(OptionList)
-            assert option_list.highlighted == 0
-            lines = _option_list_content(option_list)
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            assert list_view.index == 0
+            lines = _finding_rows_content(box)
             assert "fix the first one" in lines[0]
             assert "fix the second one" not in lines[1]
 
     asyncio.run(scenario())
 
 
-def test_findings_box_arrow_key_down_moves_which_finding_shows_its_suggestions() -> None:
+def test_findings_list_arrow_key_down_moves_which_finding_shows_its_suggestions() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -652,22 +758,22 @@ def test_findings_box_arrow_key_down_moves_which_finding_shows_its_suggestions()
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             await pilot.pause()
             await pilot.press("down")
             await pilot.pause()
 
-            option_list = box.query_one(OptionList)
-            assert option_list.highlighted == 1
-            lines = _option_list_content(option_list)
+            list_view = box.query_one(_FindingsListView)
+            assert list_view.index == 1
+            lines = _finding_rows_content(box)
             assert "fix the first one" not in lines[0]
             assert "fix the second one" in lines[1]
 
     asyncio.run(scenario())
 
 
-def test_findings_box_update_findings_preserves_a_browsed_to_highlight() -> None:
+def test_findings_list_update_findings_preserves_a_browsed_to_highlight() -> None:
     """Regression test: `app.py`'s `_render` calls `update_findings` on every render tick
     regardless of whether the underlying output changed. A human who has arrowed down to
     browse a later finding's suggestions must not see the highlight snap back to finding 0
@@ -695,8 +801,8 @@ def test_findings_box_update_findings_preserves_a_browsed_to_highlight() -> None
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             await pilot.pause()
             await pilot.press("down")
             await pilot.pause()
@@ -706,16 +812,16 @@ def test_findings_box_update_findings_preserves_a_browsed_to_highlight() -> None
             box.update_findings(output, "ReviewStep")
             await pilot.pause()
 
-            option_list = box.query_one(OptionList)
-            assert option_list.highlighted == 1
-            lines = _option_list_content(option_list)
+            list_view = box.query_one(_FindingsListView)
+            assert list_view.index == 1
+            lines = _finding_rows_content(box)
             assert "fix the first one" not in lines[0]
             assert "fix the second one" in lines[1]
 
     asyncio.run(scenario())
 
 
-def test_findings_box_update_findings_replaces_the_rendered_options() -> None:
+def test_findings_list_update_findings_replaces_the_rendered_rows() -> None:
     async def scenario() -> None:
         initial = ReviewOutput(
             findings=[Finding(severity="info", description="first", review_scope="source")],
@@ -725,7 +831,7 @@ def test_findings_box_update_findings_replaces_the_rendered_options() -> None:
         app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
+            box = app.query_one(FindingsList)
 
             updated = ReviewOutput(
                 findings=[Finding(severity="error", description="second", review_scope="source")],
@@ -735,16 +841,120 @@ def test_findings_box_update_findings_replaces_the_rendered_options() -> None:
             box.update_findings(updated, "ReviewStep")
             await pilot.pause()
 
-            lines = _option_list_content(box.query_one(OptionList))
+            lines = _finding_rows_content(box)
             assert len(lines) == 1
             assert "error: second" in lines[0]
             assert "first" not in "".join(lines)
-            assert box.query_one(Static).content == "1 error, 0 warning, 0 info"
+            assert box.query_one("#findings-summary", Static).content == (
+                "1 error, 0 warning, 0 info"
+            )
 
     asyncio.run(scenario())
 
 
-def test_findings_box_renders_a_test_sufficiency_output_on_mount() -> None:
+def test_findings_list_update_findings_growing_the_finding_count_keeps_the_old_highlight() -> None:
+    """Regression test for the in-place reconciliation `update_findings` uses when the
+    finding count changes: growing the list must not disturb the row -- or its mode/cursor
+    -- that was already highlighted, only add the extra rows."""
+
+    async def scenario() -> None:
+        initial = ReviewOutput(
+            findings=[Finding(severity="info", description="first", review_scope="source")],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(initial, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+
+            grown = ReviewOutput(
+                findings=[
+                    Finding(
+                        severity="info",
+                        description="first",
+                        review_scope="source",
+                        suggestions=["keep it"],
+                    ),
+                    Finding(
+                        severity="error",
+                        description="second",
+                        review_scope="source",
+                        suggestions=["fix it"],
+                    ),
+                ],
+                risk_level="high",
+                risk_rationale="bad",
+            )
+            box.update_findings(grown, "ReviewStep")
+            await pilot.pause()
+
+            list_view = box.query_one(_FindingsListView)
+            assert list_view.index == 0
+            lines = _finding_rows_content(box)
+            assert len(lines) == 2
+            assert "keep it" in lines[0]
+            assert "fix it" not in lines[1]
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_update_findings_shrinking_the_finding_count_clamps_the_highlight() -> None:
+    """The other half of the in-place reconciliation regression above: shrinking the list
+    below a browsed-to highlight must clamp it to the new last row, not leave it pointing
+    past the end or silently snap back to a stale/removed row."""
+
+    async def scenario() -> None:
+        initial = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="info", description="first", review_scope="source", suggestions=["a"]
+                ),
+                Finding(
+                    severity="error",
+                    description="second",
+                    review_scope="source",
+                    suggestions=["b"],
+                ),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(initial, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+            assert box.query_one(_FindingsListView).index == 1
+
+            shrunk = ReviewOutput(
+                findings=[
+                    Finding(
+                        severity="info",
+                        description="first",
+                        review_scope="source",
+                        suggestions=["a"],
+                    )
+                ],
+                risk_level="low",
+                risk_rationale="fine",
+            )
+            box.update_findings(shrunk, "ReviewStep")
+            await pilot.pause()
+
+            list_view = box.query_one(_FindingsListView)
+            assert list_view.index == 0
+            lines = _finding_rows_content(box)
+            assert len(lines) == 1
+            assert "a" in lines[0]
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_renders_a_test_sufficiency_output_on_mount() -> None:
     async def scenario() -> None:
         output = TestSufficiencyOutput(
             findings=[
@@ -761,33 +971,35 @@ def test_findings_box_renders_a_test_sufficiency_output_on_mount() -> None:
         app = _FindingsHostApp(output, "TestSufficiencyStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            lines = _option_list_content(box.query_one(OptionList))
+            box = app.query_one(FindingsList)
+            lines = _finding_rows_content(box)
             assert "warning: no test covers the retry path" in lines[0]
-            assert box.query_one(Static).content == "0 error, 1 warning, 0 info"
+            assert box.query_one("#findings-summary", Static).content == (
+                "0 error, 1 warning, 0 info"
+            )
 
     asyncio.run(scenario())
 
 
-def test_findings_box_border_title_names_the_owning_step() -> None:
+def test_findings_list_border_title_names_the_owning_step() -> None:
     async def scenario() -> None:
         output = ReviewOutput(findings=[], risk_level="low", risk_rationale="fine")
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
+            box = app.query_one(FindingsList)
             assert box.border_title == "Findings -- ReviewStep"
 
     asyncio.run(scenario())
 
 
-def test_findings_box_update_findings_updates_the_border_title_to_the_new_step() -> None:
+def test_findings_list_update_findings_updates_the_border_title_to_the_new_step() -> None:
     async def scenario() -> None:
         initial = ReviewOutput(findings=[], risk_level="low", risk_rationale="fine")
         app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
+            box = app.query_one(FindingsList)
 
             updated = TestSufficiencyOutput(
                 findings=[], tested=[], testing_summary="fine", artifacts=[]
@@ -800,7 +1012,7 @@ def test_findings_box_update_findings_updates_the_border_title_to_the_new_step()
     asyncio.run(scenario())
 
 
-def test_findings_box_accepts_a_bare_list_of_findings() -> None:
+def test_findings_list_accepts_a_bare_list_of_findings() -> None:
     async def scenario() -> None:
         findings = [
             Finding(
@@ -810,18 +1022,78 @@ def test_findings_box_accepts_a_bare_list_of_findings() -> None:
         app = _FindingsHostApp(findings, "RebaseStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            lines = _option_list_content(box.query_one(OptionList))
+            box = app.query_one(FindingsList)
+            lines = _finding_rows_content(box)
             assert "error: rebase left a conflict marker" in lines[0]
-            assert box.query_one(Static).content == "1 error, 0 warning, 0 info"
+            assert box.query_one("#findings-summary", Static).content == (
+                "1 error, 0 warning, 0 info"
+            )
 
     asyncio.run(scenario())
 
 
-# --- FindingsBox, parked-mode interactive decision flow (issue #87) --------------------
+# --- FindingsList, parked-mode interactive decision flow (issue #87) --------------------
 
 
-def test_findings_box_await_decision_marks_the_highlighted_row_s_decision_cursor() -> None:
+def test_findings_list_await_decision_populates_the_footer_hint_when_called_right_after_mount() -> (
+    None
+):
+    """Regression test: `await_decision()` used to call `_set_footer_hint(True)` before
+    awaiting `_await_list_view()`'s compose-settle retry -- calling it immediately after
+    mount, with no intervening `await` of its own (the ordinary production shape: `app.py`'s
+    `_relay_approval` calls `_render_findings()` -- which does the mount -- then
+    `await_decision()` right after, in the same synchronous stretch of that one coroutine,
+    the moment a step's very first park mounts a brand-new `FindingsList`), silently no-op'd
+    via `_set_footer_hint`'s own `NoMatches` guard -- and, unlike `Finding`'s own
+    `_apply_mode`-on-compose catch-up or the highlighted row's decision cycle/focus (both of
+    which already awaited `_await_list_view()` before this fix), nothing else ever primed
+    the footer again for the rest of that park, leaving it blank the whole time.
+
+    Mounting `FindingsList` via `_FindingsHostApp.compose()` (every other test in this file)
+    doesn't reproduce this: that box is composed as part of the app's own initial-screen
+    startup, which `run_test()` already lets settle before a test body ever runs, so its
+    `#findings-footer` already exists by the time any test calls `await_decision()` on it.
+    This test instead mounts `FindingsList` dynamically, inside the same coroutine that
+    immediately calls `await_decision()` on it with zero intervening `await` -- mirroring
+    `_relay_approval`'s own shape exactly -- so `FindingsList.compose()` provably has not
+    run by the time `await_decision()`'s first synchronous statements do."""
+
+    class _EmptyHostApp(App[None]):
+        def compose(self) -> ComposeResult:
+            return
+            yield  # pragma: no cover - makes this a generator function
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="unclear naming", review_scope="source")
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _EmptyHostApp()
+
+        async def _mount_and_park() -> ApprovalResponse:
+            box = FindingsList(output, "ReviewStep")
+            app.mount(box)  # no `await` between this and `await_decision()` below
+            return await box.await_decision()
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            task = asyncio.ensure_future(_mount_and_park())
+            await pilot.pause()
+
+            box = app.query_one(FindingsList)
+            footer = box.query_one("#findings-footer", Static)
+            assert footer.content != ""
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_await_decision_marks_the_highlighted_row_s_decision_cursor() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -838,11 +1110,11 @@ def test_findings_box_await_decision_marks_the_highlighted_row_s_decision_cursor
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
+            box = app.query_one(FindingsList)
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
-            lines = _option_list_content(box.query_one(OptionList))
+            lines = _finding_rows_content(box)
             assert "> 1. rename it" in lines[0]
 
             box._quick_decision("abort")
@@ -851,7 +1123,7 @@ def test_findings_box_await_decision_marks_the_highlighted_row_s_decision_cursor
     asyncio.run(scenario())
 
 
-def test_findings_box_arrow_keys_cycle_the_decision_cursor_while_parked() -> None:
+def test_findings_list_arrow_keys_cycle_the_decision_cursor_while_parked() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -868,19 +1140,19 @@ def test_findings_box_arrow_keys_cycle_the_decision_cursor_while_parked() -> Non
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
             await pilot.press("right")
             await pilot.pause()
-            lines = _option_list_content(box.query_one(OptionList))
+            lines = _finding_rows_content(box)
             assert "> 2. Type something." in lines[0]
 
             await pilot.press("right")
             await pilot.pause()
-            lines = _option_list_content(box.query_one(OptionList))
+            lines = _finding_rows_content(box)
             assert "> 3. approve" in lines[0]
 
             box._quick_decision("abort")
@@ -889,7 +1161,7 @@ def test_findings_box_arrow_keys_cycle_the_decision_cursor_while_parked() -> Non
     asyncio.run(scenario())
 
 
-def test_findings_box_enter_confirms_the_cursor_and_resolves_the_pending_decision() -> None:
+def test_findings_list_enter_confirms_the_cursor_and_resolves_the_pending_decision() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -901,8 +1173,8 @@ def test_findings_box_enter_confirms_the_cursor_and_resolves_the_pending_decisio
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
@@ -919,7 +1191,7 @@ def test_findings_box_enter_confirms_the_cursor_and_resolves_the_pending_decisio
     asyncio.run(scenario())
 
 
-def test_findings_box_digit_shortcut_jumps_the_decision_cursor_while_parked() -> None:
+def test_findings_list_digit_shortcut_jumps_the_decision_cursor_while_parked() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -936,14 +1208,14 @@ def test_findings_box_digit_shortcut_jumps_the_decision_cursor_while_parked() ->
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
             await pilot.press("2")
             await pilot.pause()
-            lines = _option_list_content(box.query_one(OptionList))
+            lines = _finding_rows_content(box)
             assert "> 2. add a docstring" in lines[0]
 
             box._quick_decision("abort")
@@ -952,7 +1224,7 @@ def test_findings_box_digit_shortcut_jumps_the_decision_cursor_while_parked() ->
     asyncio.run(scenario())
 
 
-def test_findings_box_digit_shortcut_past_the_entry_count_is_a_no_op() -> None:
+def test_findings_list_digit_shortcut_past_the_entry_count_is_a_no_op() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -969,15 +1241,15 @@ def test_findings_box_digit_shortcut_past_the_entry_count_is_a_no_op() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
             # Only 5 entries exist (1 suggestion + "Type something." + approve/skip/abort).
             await pilot.press("9")
             await pilot.pause()
-            lines = _option_list_content(box.query_one(OptionList))
+            lines = _finding_rows_content(box)
             assert "> 1. rename it" in lines[0]
 
             box._quick_decision("abort")
@@ -986,7 +1258,7 @@ def test_findings_box_digit_shortcut_past_the_entry_count_is_a_no_op() -> None:
     asyncio.run(scenario())
 
 
-def test_findings_box_opening_the_chat_widget_twice_mounts_only_one() -> None:
+def test_findings_list_opening_the_chat_widget_twice_mounts_only_one() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -998,8 +1270,8 @@ def test_findings_box_opening_the_chat_widget_twice_mounts_only_one() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
@@ -1015,7 +1287,7 @@ def test_findings_box_opening_the_chat_widget_twice_mounts_only_one() -> None:
     asyncio.run(scenario())
 
 
-def test_findings_box_letter_shortcuts_resolve_directly_while_parked() -> None:
+def test_findings_list_letter_shortcuts_resolve_directly_while_parked() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1027,8 +1299,8 @@ def test_findings_box_letter_shortcuts_resolve_directly_while_parked() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
@@ -1041,7 +1313,7 @@ def test_findings_box_letter_shortcuts_resolve_directly_while_parked() -> None:
     asyncio.run(scenario())
 
 
-def test_findings_box_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
+def test_findings_list_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1053,8 +1325,8 @@ def test_findings_box_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
@@ -1072,7 +1344,7 @@ def test_findings_box_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
     asyncio.run(scenario())
 
 
-def test_findings_box_confirming_a_suggestion_opens_the_inline_chat_prefilled() -> None:
+def test_findings_list_confirming_a_suggestion_opens_the_inline_chat_prefilled() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1089,8 +1361,8 @@ def test_findings_box_confirming_a_suggestion_opens_the_inline_chat_prefilled() 
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
@@ -1108,7 +1380,7 @@ def test_findings_box_confirming_a_suggestion_opens_the_inline_chat_prefilled() 
     asyncio.run(scenario())
 
 
-def test_findings_box_letter_shortcuts_are_no_ops_while_not_parked() -> None:
+def test_findings_list_letter_shortcuts_are_no_ops_while_not_parked() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1120,14 +1392,101 @@ def test_findings_box_letter_shortcuts_are_no_ops_while_not_parked() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsBox)
-            box.query_one(OptionList).focus()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
 
             await pilot.press("s")
             await pilot.pause()
 
             assert box._pending is None
             assert not list(app.query(Input))
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_update_findings_preserves_the_decision_cursor_across_a_redundant_tick() -> (
+    None
+):
+    """Strengthens the old `FindingsBox` regression above: while parked, an in-progress
+    per-row `_decision_cursor` must survive a same-length redundant `update_findings` tick
+    untouched, exactly like a browsed-to highlight already does outside a park."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="unclear naming",
+                    review_scope="source",
+                    suggestions=["rename it", "add a docstring"],
+                )
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("right")
+            await pilot.pause()
+            lines = _finding_rows_content(box)
+            assert "> 2. add a docstring" in lines[0]
+
+            # Simulate two redundant render ticks with the exact same output while parked.
+            box.update_findings(output, "ReviewStep")
+            box.update_findings(output, "ReviewStep")
+            await pilot.pause()
+
+            lines = _finding_rows_content(box)
+            assert "> 2. add a docstring" in lines[0]
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redundant_tick() -> None:
+    """Strengthens the old `FindingsBox` regression above (which never mounted a widget it
+    had to survive a rebuild): a mounted `_InlineApprovalChat` -- and whatever a human has
+    already typed into it -- must survive a same-length redundant `update_findings` tick
+    untouched, since it's a sibling of `_FindingsListView`, not one of its rows."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="unclear naming", review_scope="source")
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            box._open_chat("draft instructions")
+            await pilot.pause()
+            assert box.query_one(Input).value == "draft instructions"
+
+            box.update_findings(output, "ReviewStep")
+            box.update_findings(output, "ReviewStep")
+            await pilot.pause()
+
+            assert len(box.query(Input)) == 1
+            assert box.query_one(Input).value == "draft instructions"
+
+            box._resolve_chat(box.query_one(Input).value)
+            response = await task
+            assert response == ApprovalResponse(decision="fix", instructions="draft instructions")
 
     asyncio.run(scenario())
 

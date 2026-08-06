@@ -36,7 +36,7 @@ this app's own bookkeeping, learned entirely from the relay round-trip, and pass
 `state.backfill` the same way `self._failed_step` already is -- see `state.py`'s module
 docstring for why "parked"/"skipped" are overrides of a step already reported "completed",
 not a third possibility alongside pending/running/completed the way "failed" is. As of
-issue #87, the decision itself is collected inline by the already-mounted `FindingsBox`
+issue #87, the decision itself is collected inline by the already-mounted `FindingsList`
 (`widgets.py`'s `await_decision`) rather than a pushed `ApprovalPromptScreen`/
 `InputPromptScreen` modal pair -- see `_relay_approval`'s own docstring.
 """
@@ -55,7 +55,7 @@ from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
-from code_review.tui.widgets import FindingsBox, PipelineBox, StatusBox
+from code_review.tui.widgets import FindingsList, PipelineBox, StatusBox
 
 # How often a running step's elapsed duration re-renders between events. Short enough to
 # look live to a human, long enough not to burn CPU on a terminal repaint loop.
@@ -142,7 +142,7 @@ class ReviewApp(App[None]):
         # "fix" round's *later* outcome for the same step (a fresh `StepOutcome` object,
         # not yet resolved) still displays. Without this, `latest_findings` keeps matching
         # the same resolved outcome forever (no later step necessarily has non-empty
-        # findings to supersede it), leaving `FindingsBox` mounted at its full parked
+        # findings to supersede it), leaving `FindingsList` mounted at its full parked
         # height indefinitely and pushing `StatusBox` below the viewport once the run
         # finishes.
         self._resolved_outcome_ids: set[int] = set()
@@ -199,7 +199,7 @@ class ReviewApp(App[None]):
     def _render_findings(self) -> None:
         """Mount, update in place, or remove the Findings box, driven by
         `latest_findings(self._seen)` (see `state.py`). Unlike `PipelineBox`, which is
-        always composed, `FindingsBox` is mounted dynamically and only while there is
+        always composed, `FindingsList` is mounted dynamically and only while there is
         something to show -- a step with no findings must show no Findings box at all, not
         an empty one (issue #42's acceptance criteria), which a permanently-composed box
         cannot express on its own."""
@@ -208,7 +208,7 @@ class ReviewApp(App[None]):
             event for event in self._seen if id(event.outcome) not in self._resolved_outcome_ids
         ]
         result = latest_findings(visible_events)
-        boxes = list(self.query(FindingsBox))
+        boxes = list(self.query(FindingsList))
         if result is None:
             for box in boxes:
                 box.remove()
@@ -217,7 +217,7 @@ class ReviewApp(App[None]):
             if boxes:
                 boxes[0].update_findings(output, step_name)
             else:
-                self.mount(FindingsBox(output, step_name))
+                self.mount(FindingsList(output, step_name))
 
     def _render_status(self) -> None:
         """Mount, update in place, or remove the Status box, mirroring
@@ -295,17 +295,17 @@ class ReviewApp(App[None]):
         this step's own outcome (`_render_findings` mounted it the moment this step's
         "completed" `StepEvent` arrived, before the park was ever noticed -- see
         `pipeline.executor.run_steps`'s own docstring for why the park happens after that
-        event, not before). It then awaits the mounted `FindingsBox.await_decision()`
-        (issue #87) directly -- no modal: that call is what turns the box's right column
-        into a live inline approve/skip/abort/chat selector and returns once a human
-        confirms one, superseding the `ApprovalPromptScreen`/`InputPromptScreen` modal pair
-        this worker used to push. "skip" records itself into `self._skipped_steps`
-        ("approve"/"fix"/"abort" leave no further bookkeeping here -- "abort" is
-        `run_steps`'s own job, via `RunAbortedError`, once the resolved future lets it
-        resume). Clears `self._parked_step` back to `None`, re-renders again, and only then
-        resolves `future` with the `ApprovalResponse` `await_decision()` returned -- so by
-        the time the parked `run_steps` call resumes, this app's own rendered state already
-        reflects the decision.
+        event, not before). It then awaits the mounted `FindingsList.await_decision()`
+        (issue #87) directly -- no modal: that call is what turns the highlighted row's
+        suggestion column into a live inline approve/skip/abort/chat selector and returns
+        once a human confirms one, superseding the `ApprovalPromptScreen`/
+        `InputPromptScreen` modal pair this worker used to push. "skip" records itself into
+        `self._skipped_steps` ("approve"/"fix"/"abort" leave no further bookkeeping here --
+        "abort" is `run_steps`'s own job, via `RunAbortedError`, once the resolved future
+        lets it resume). Clears `self._parked_step` back to `None`, re-renders again, and
+        only then resolves `future` with the `ApprovalResponse` `await_decision()` returned
+        -- so by the time the parked `run_steps` call resumes, this app's own rendered
+        state already reflects the decision.
         """
 
         assert self._approval_relay is not None
@@ -313,7 +313,7 @@ class ReviewApp(App[None]):
             step_name, outcome, future = await self._approval_relay.next_request()
             self._parked_step = step_name
             self._render()
-            findings_box = self.query_one(FindingsBox)
+            findings_box = self.query_one(FindingsList)
             response = await findings_box.await_decision()
             self._parked_step = None
             self._resolved_outcome_ids.add(id(outcome))
