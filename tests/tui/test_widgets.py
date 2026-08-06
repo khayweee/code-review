@@ -38,7 +38,9 @@ from code_review.tui.widgets import (
     format_finding,
     format_row,
     gradient_text,
+    render_custom_entry_line,
     render_decision_cycle,
+    render_decision_cycle_head,
     render_description,
     render_rows,
     render_rows_live,
@@ -57,13 +59,26 @@ def _finding_rows_content(findings_list: FindingsList) -> list[str]:
     """Render every mounted `Finding` row's `FindingsDescription`+`FindingsSuggestion`
     content to plain text, one entry per row -- the `FindingsList`-equivalent of
     `_option_list_content`'s old per-`Option` rendering, since a `_FindingsListView` has
-    no single renderable `.content` the way `_BorderedBox`-based widgets do."""
+    no single renderable `.content` the way `_BorderedBox`-based widgets do.
+
+    `FindingsSuggestion` is itself a small container (issue #92), not a single `Static`
+    the way it was pre-#92 -- its own two `Static` children (every entry before the
+    trailing `_CUSTOM_ENTRY`, then that entry's own line) are rendered and joined here,
+    same as reading one shared `.content` used to. Whichever of those `Static`s is
+    currently swapped out for a live `Input` (`FindingsSuggestion.ensure_input`)
+    contributes nothing to this text -- exactly like the old sibling `_InlineApprovalChat`
+    never appeared in this helper's output either, since it lived outside
+    `FindingsSuggestion` entirely; a mounted chat's own state is asserted separately via
+    `box.query_one(Input)` in every test that opens one."""
 
     rows = []
     for item in findings_list.query(FindingItem):
         description = _render_content(item.query_one(FindingsDescription).content)
-        suggestion = _render_content(item.query_one(FindingsSuggestion).content)
-        rows.append(f"{description}\n{suggestion}")
+        suggestion = item.query_one(FindingsSuggestion)
+        suggestion_text = "\n".join(
+            _render_content(static.content) for static in suggestion.query(Static)
+        )
+        rows.append(f"{description}\n{suggestion_text}")
     return rows
 
 
@@ -643,6 +658,57 @@ def test_render_decision_cycle_gives_the_one_fixed_entry_a_detail_line() -> None
     text = render_decision_cycle(finding, decision_cursor=0)
 
     assert "Start typing to describe what you want." in text.plain
+
+
+def test_render_decision_cycle_head_excludes_the_trailing_custom_entry() -> None:
+    """`FindingsSuggestion`'s `_entries` `Static` (issue #92) renders every entry except the
+    trailing `_CUSTOM_ENTRY` -- that one is drawn separately (`render_custom_entry_line`, or
+    a live `Input` once the chat is open), never duplicated here."""
+
+    finding = Finding(
+        severity="warning",
+        description="unclear naming",
+        review_scope="source",
+        suggestions=["rename it", "add a docstring"],
+    )
+
+    text = render_decision_cycle_head(finding, decision_cursor=0)
+
+    assert "1. rename it (Recommended)" in text.plain
+    assert "2. add a docstring" in text.plain
+    assert "Chat about it" not in text.plain
+
+
+def test_render_decision_cycle_head_is_empty_with_no_suggestions() -> None:
+    """A finding with no suggestions of its own has only `_CUSTOM_ENTRY` in its decision
+    cycle -- entirely excluded from the head, which is left with nothing to render."""
+
+    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+
+    text = render_decision_cycle_head(finding, decision_cursor=0)
+
+    assert text.plain == ""
+
+
+def test_render_custom_entry_line_marks_the_cursor_and_keeps_the_detail_line() -> None:
+    """`render_custom_entry_line` renders exactly the one line (plus detail) that
+    `render_decision_cycle` would have rendered for `_CUSTOM_ENTRY` -- marked when the
+    cursor is on it, plain otherwise -- so `FindingsSuggestion` can show it standing alone,
+    swapped for a live `Input` once a human opens the chat."""
+
+    finding = Finding(
+        severity="warning",
+        description="unclear naming",
+        review_scope="source",
+        suggestions=["rename it"],
+    )
+
+    unmarked = render_custom_entry_line(finding, decision_cursor=0)
+    assert "  2. Chat about it" in unmarked.plain
+    assert "Start typing to describe what you want." in unmarked.plain
+
+    marked = render_custom_entry_line(finding, decision_cursor=1)
+    assert "> 2. Chat about it" in marked.plain
 
 
 # --- FindingsList, mounted and driven through Pilot ----------------------------------------
@@ -1231,9 +1297,16 @@ def test_findings_list_arrow_keys_cycle_the_decision_cursor_while_parked() -> No
 
             await pilot.press("right")
             await pilot.pause()
+            # Landing on `_CUSTOM_ENTRY` (issue #92) replaces its plain numbered line with a
+            # live `Input` in place, inside the highlighted row's own `FindingsSuggestion` --
+            # so the marked text itself is gone from `lines[0]`, superseded by the `Input`'s
+            # own placeholder (see `test_findings_list_cursor_arriving_at_chat_about_it_via_
+            # digit_jump_auto_opens_it` for a dedicated proof of the placeholder/focus).
             lines = _finding_rows_content(box)
-            assert "> 3. Chat about it" in lines[0]
-            assert box.query_one(Input).value == ""
+            assert "Chat about it" not in lines[0]
+            chat_input = box.query_one(Input)
+            assert chat_input.value == ""
+            assert chat_input.placeholder == "Chat about it"
 
             box._quick_decision("abort")
             await task
@@ -1381,8 +1454,10 @@ def test_findings_list_cursor_arriving_at_chat_about_it_via_digit_jump_auto_open
             await pilot.press("2")
             await pilot.pause()
 
+            # As with the right-arrow case, `_CUSTOM_ENTRY`'s own marked line is replaced by
+            # the live `Input` in place (issue #92), so it no longer shows up as text.
             lines = _finding_rows_content(box)
-            assert "> 2. Chat about it" in lines[0]
+            assert "Chat about it" not in lines[0]
             chat_input = box.query_one(Input)
             assert chat_input.value == ""
             assert chat_input.has_focus
@@ -1638,9 +1713,20 @@ def test_findings_list_update_findings_preserves_the_decision_cursor_across_a_re
 
 def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redundant_tick() -> None:
     """Strengthens the old `FindingsBox` regression above (which never mounted a widget it
-    had to survive a rebuild): a mounted `_InlineApprovalChat` -- and whatever a human has
-    already typed into it -- must survive a same-length redundant `update_findings` tick
-    untouched, since it's a sibling of `_FindingsListView`, not one of its rows."""
+    had to survive a rebuild): a mounted chat `Input` -- and whatever a human has already
+    typed into it -- must survive a same-length redundant `update_findings` tick untouched.
+
+    Issue #92 moved this `Input` from a sibling of `_FindingsListView` (untouched by
+    `update_findings` regardless of what that method did) into the highlighted row's own
+    `FindingsSuggestion` -- which *is* reached by `update_findings`' per-row
+    `update_finding` -> `_render_suggestion` -> `show_decision` on every tick, redundant or
+    not. This is the load-bearing correctness requirement of that move: `show_decision`
+    must recognize an already-open `Input` and leave it alone rather than reconstruct it,
+    or a human's in-progress typed text would be silently wiped on the very next periodic
+    render (`app.py`'s `_render` calls this on an 0.25s timer regardless of whether the
+    output actually changed). Asserts the `Input` is found specifically inside the
+    highlighted row's own `FindingsSuggestion` (not merely "somewhere in the box"), so this
+    proves the *new* in-place location, not just that a chat still exists somewhere."""
 
     async def scenario() -> None:
         output = ReviewOutput(
@@ -1660,16 +1746,19 @@ def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redunda
 
             box._open_chat("draft instructions")
             await pilot.pause()
-            assert box.query_one(Input).value == "draft instructions"
+            highlighted = box.query_one(_FindingsListView).highlighted_child
+            assert isinstance(highlighted, FindingItem)
+            suggestion = highlighted.query_one(FindingsSuggestion)
+            assert suggestion.query_one(Input).value == "draft instructions"
 
             box.update_findings(output, "ReviewStep")
             box.update_findings(output, "ReviewStep")
             await pilot.pause()
 
             assert len(box.query(Input)) == 1
-            assert box.query_one(Input).value == "draft instructions"
+            assert suggestion.query_one(Input).value == "draft instructions"
 
-            box._resolve_chat(box.query_one(Input).value)
+            box._resolve_chat(suggestion.query_one(Input).value)
             response = await task
             assert response == ApprovalResponse(decision="fix", instructions="draft instructions")
 

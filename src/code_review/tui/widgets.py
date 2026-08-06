@@ -401,30 +401,82 @@ def render_suggestions_plain(finding: FindingData) -> Text:
     return Text("\n".join(finding.suggestions))
 
 
-def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
-    """`FindingsSuggestion`'s content while parked and this row is the highlighted one
-    (issue #87, kept by #91): every entry of `_decision_entries`, numbered from 1
-    (matching `_FindingsListView`'s digit-key shortcuts), with a leading `"> "` marking
-    whichever index `decision_cursor` names instead of a plain two-space indent.
+def _render_decision_entry(
+    index: int, entry: str, decision_cursor: int, *, has_own_suggestions: bool
+) -> Text:
+    """One line (plus, for `_CUSTOM_ENTRY`, its indented detail line) of a decision cycle --
+    factored out of `render_decision_cycle` (issue #92) once `FindingsSuggestion` needed to
+    render the trailing `_CUSTOM_ENTRY` line separately from every entry before it (see that
+    class's docstring for why): `render_decision_cycle_head`/`render_custom_entry_line`
+    below both call this same per-entry renderer, so the numbering/marker/"(Recommended)"/
+    detail-line rules stay defined in exactly one place regardless of which of the three
+    callers is asking for a given entry."""
 
-    Entry 0 is additionally labeled `" (Recommended)"` when it came from
+    marker = "> " if index == decision_cursor else "  "
+    recommended = " (Recommended)" if index == 0 and has_own_suggestions else ""
+    text = Text(f"{marker}{index + 1}. {entry}{recommended}\n")
+    detail = _ENTRY_DETAILS.get(entry)
+    if detail is not None:
+        text.append(f"      {detail}\n")
+    return text
+
+
+def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
+    """The full decision cycle (issue #87, kept by #91): every entry of `_decision_entries`,
+    numbered from 1 (matching `_FindingsListView`'s digit-key shortcuts), with a leading
+    `"> "` marking whichever index `decision_cursor` names instead of a plain two-space
+    indent. Entry 0 is additionally labeled `" (Recommended)"` when it came from
     `finding.suggestions` itself (i.e. this finding has at least one suggestion, so
     `_decision_entries`'s first entry is that suggestion rather than `_CUSTOM_ENTRY`) --
-    styled after the Claude Code CLI's own interactive picker. The one fixed entry
-    (`_CUSTOM_ENTRY`) gets a short indented detail line of static UI copy
-    (`_ENTRY_DETAILS`); a suggestion's own text stays single-line, since it has no further
-    data to split a detail line from."""
+    styled after the Claude Code CLI's own interactive picker.
+
+    No longer `FindingsSuggestion`'s own content while parked (issue #92 split that column's
+    rendering into `render_decision_cycle_head` (entries before `_CUSTOM_ENTRY`) plus
+    `render_custom_entry_line` (that trailing entry alone), so the last one can be replaced
+    in place by a live `Input` -- see `FindingsSuggestion`'s docstring). Kept as the one
+    function that renders the whole cycle in one call, since it's still the simplest pure
+    surface to unit-test the shared per-entry rules (`_render_decision_entry`) against."""
 
     entries = _decision_entries(finding)
     text = Text()
     for index, entry in enumerate(entries):
-        marker = "> " if index == decision_cursor else "  "
-        recommended = " (Recommended)" if index == 0 and finding.suggestions else ""
-        text.append(f"{marker}{index + 1}. {entry}{recommended}\n")
-        detail = _ENTRY_DETAILS.get(entry)
-        if detail is not None:
-            text.append(f"      {detail}\n")
+        text.append(
+            _render_decision_entry(
+                index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
+            )
+        )
     return text
+
+
+def render_decision_cycle_head(finding: FindingData, decision_cursor: int) -> Text:
+    """`FindingsSuggestion`'s entries `Static` (issue #92): every `_decision_entries` entry
+    except the trailing `_CUSTOM_ENTRY`, rendered exactly as `render_decision_cycle` would --
+    the entry after this list is drawn separately, by `render_custom_entry_line`/a live
+    `Input`, so it is deliberately excluded here rather than included and then hidden."""
+
+    entries = _decision_entries(finding)
+    text = Text()
+    for index, entry in enumerate(entries[:-1]):
+        text.append(
+            _render_decision_entry(
+                index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
+            )
+        )
+    return text
+
+
+def render_custom_entry_line(finding: FindingData, decision_cursor: int) -> Text:
+    """The trailing `_CUSTOM_ENTRY`'s own line (issue #92), rendered exactly as
+    `render_decision_cycle` would -- `FindingsSuggestion` shows this instead of a live
+    `Input` whenever that `Input` isn't (yet) mounted, i.e. whenever the cursor hasn't been
+    deliberately moved onto this entry via a confirm/cycle/jump that opens the chat (see
+    `FindingsSuggestion.show_decision`'s docstring)."""
+
+    entries = _decision_entries(finding)
+    index = len(entries) - 1
+    return _render_decision_entry(
+        index, entries[index], decision_cursor, has_own_suggestions=bool(finding.suggestions)
+    )
 
 
 def _findings_summary(output: ReviewOutput | TestSufficiencyOutput | list[FindingData]) -> str:
@@ -479,12 +531,24 @@ class FindingsDescription(Static):
         self.update(render_description(finding))
 
 
-class FindingsSuggestion(Static):
+class FindingsSuggestion(Vertical):
     """The right column of one `Finding` row (issue #91) -- tri-state (hidden/plain/
     decision), since only the highlighted row shows anything (issue #88, kept by #91):
     every other row's `FindingsSuggestion` stays cleared. Mode switching is `Finding`'s
     job (see `set_hidden`/`set_plain`/`set_decision` below), not this widget's own -- it
     only knows how to render each of the three states, not when to be in one.
+
+    A `Vertical` composing two children, not a plain `Static` (issue #92, superseding #91's
+    single-`Static` shape) -- decision mode needs to replace its trailing `_CUSTOM_ENTRY`
+    line with a live `Input` in place, and a `Static`'s `renderable` has no way to host a
+    real child widget. `self._entries` (a `Static`) renders every entry before
+    `_CUSTOM_ENTRY` (`render_decision_cycle_head`/`render_suggestions_plain`); `self._custom`
+    (another `Static`) renders `_CUSTOM_ENTRY`'s own line (`render_custom_entry_line`) --
+    swapped out for `self._input`, a real `Input`, the moment a human actually opens the chat
+    (see `show_decision`'s docstring for exactly when that is). This replaces issue #87's
+    `_InlineApprovalChat`, which used to mount as a sibling of `_FindingsListView` below the
+    whole box instead of inside this column -- see `tui/AGENTS.md`'s "Findings box" section
+    for the full rationale.
 
     `display: none` while hidden, not just empty content (issue #92) -- an *always*-present
     `1fr` column would reserve half of every row's width even when there is nothing to show
@@ -510,6 +574,7 @@ class FindingsSuggestion(Static):
         width: 1fr;
         padding: 0 1;
         display: none;
+        height: auto;
     }
 
     FindingsSuggestion.-visible {
@@ -524,20 +589,95 @@ class FindingsSuggestion(Static):
         id: str | None = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
-        super().__init__("", id=id, classes=classes)
+        super().__init__(id=id, classes=classes)
         self.border_title = "Suggestion"
+        self._entries = Static("")
+        self._custom = Static("")
+        # Set only once a human deliberately opens the chat (`ensure_input`) -- `None`
+        # covers both "not parked"/"plain mode" and "parked, cursor on `_CUSTOM_ENTRY`, but
+        # nobody has opened it yet", both of which render `self._custom`'s plain text
+        # instead (see `show_decision`).
+        self._input: Input | None = None
+
+    def compose(self) -> ComposeResult:
+        yield self._entries
+        yield self._custom
 
     def clear(self) -> None:
         self.remove_class("-visible")
-        self.update("")
+        self._entries.update("")
+        self._custom.update("")
+        self._remove_input()
 
     def show_plain(self, finding: FindingData) -> None:
         self.add_class("-visible")
-        self.update(render_suggestions_plain(finding))
+        self._entries.update(render_suggestions_plain(finding))
+        self._custom.update("")
+        self._remove_input()
 
     def show_decision(self, finding: FindingData, decision_cursor: int) -> None:
+        """Render decision mode: `self._entries` always gets every entry before
+        `_CUSTOM_ENTRY` (`render_decision_cycle_head`); the trailing `_CUSTOM_ENTRY` slot
+        itself shows `self._custom`'s plain text (`render_custom_entry_line`) UNLESS a chat
+        is already open on this row (`self._input is not None`, set by `ensure_input`), in
+        which case that live `Input` stays exactly as it is -- untouched, not rebuilt -- and
+        `self._custom` is left empty so it contributes nothing while hidden behind it.
+
+        Deliberately never opens the chat itself, even when `decision_cursor` already points
+        at `_CUSTOM_ENTRY` (e.g. a finding with no suggestions of its own, whose entry 0 is
+        `_CUSTOM_ENTRY`, or a redundant `update_findings` re-render while parked) -- only a
+        human's deliberate confirm/cycle/jump onto that entry does that, via `ensure_input`
+        (see `Finding.open_chat`/`tui/AGENTS.md`'s "Findings box" section for why merely
+        landing on it via a plain highlight must never yank focus into a chat box). This is
+        also what makes a redundant `show_decision` call at the same cursor safe to call
+        over and over from `update_findings`' every-tick re-render: with no already-open
+        `Input` to touch, it just re-renders the same plain text again; with one already
+        open, it renders `self._entries` fresh but leaves that `Input` -- and whatever a
+        human has typed into it -- completely alone."""
+
         self.add_class("-visible")
-        self.update(render_decision_cycle(finding, decision_cursor))
+        self._entries.update(render_decision_cycle_head(finding, decision_cursor))
+        entries = _decision_entries(finding)
+        on_custom_entry = decision_cursor == len(entries) - 1
+        if self._input is not None:
+            if on_custom_entry:
+                self._custom.update("")
+                return
+            # The cursor moved off `_CUSTOM_ENTRY` while its `Input` was still open (not
+            # reachable via this row's own left/right/digit bindings today, since those keys
+            # go to the focused `Input` itself rather than bubbling to `_FindingsListView`
+            # once the chat has focus -- but a defensive cleanup regardless, so a stale
+            # `Input` never lingers pointed at the wrong entry).
+            self._remove_input()
+        self._custom.update(render_custom_entry_line(finding, decision_cursor))
+
+    def ensure_input(self, prefill: str) -> Input:
+        """Mount (if not already mounted) this row's live `Input` for `_CUSTOM_ENTRY`,
+        seeded with `prefill`, and return it -- a human deliberately opening the chat
+        (`Finding.open_chat`, in turn `FindingsList._open_chat`), never `show_decision`'s own
+        redundant re-renders. Idempotent: if one is already mounted, it is returned
+        untouched, `prefill` ignored -- this is the load-bearing half of "an already-open
+        chat's typed value must survive a redundant `update_findings` tick" (see
+        `FindingsList.await_decision`'s docstring): re-entering this path (whether from a
+        second explicit open, or a fresh `show_decision` call after a same-cursor tick) must
+        never reconstruct the `Input`, which would wipe out whatever a human has typed so
+        far. Placeholder text is the literal `_CUSTOM_ENTRY` string ("Chat about it") --
+        issue #92 dropped `_InlineApprovalChat`'s separate `"What should this step do?"`
+        prompt `Static` entirely, so the placeholder is now the only copy explaining what
+        this field is for, shown only while it's empty (Textual's own `Input.placeholder`
+        behavior)."""
+
+        if self._input is not None:
+            return self._input
+        self._custom.update("")
+        self._input = Input(value=prefill, placeholder=_CUSTOM_ENTRY)
+        self.mount(self._input)
+        return self._input
+
+    def _remove_input(self) -> None:
+        if self._input is not None:
+            self._input.remove()
+            self._input = None
 
 
 class Finding(ListItem):
@@ -674,6 +814,30 @@ class Finding(ListItem):
     def confirmed_entry(self) -> str:
         return _decision_entries(self.finding)[self._decision_cursor]
 
+    def open_chat(self, prefill: str) -> Input | None:
+        """A human deliberately opened the chat on this row (issue #92) -- via Enter/"f",
+        or `_cycle_decision`/`_jump_decision` landing the cursor on `_CUSTOM_ENTRY` (see
+        `FindingsList._open_chat`, the sole caller). Moves `_decision_cursor` straight to
+        `_CUSTOM_ENTRY` (always the last entry, per `_decision_entries`) regardless of where
+        it already was -- confirming a plain suggestion opens the chat *seeded with that
+        suggestion's own text*, which only ever has somewhere to render once the cursor
+        itself is on the one entry `FindingsSuggestion` can turn into a live `Input` (see
+        that class's docstring); confirming `_CUSTOM_ENTRY` directly is already a no-op
+        move, landing on the same index it started at. Returns the `FindingsSuggestion`'s
+        `Input` (so the caller can focus it) once this row's `FindingsSuggestion` exists, or
+        `None` when this row hasn't composed yet -- the same "skip now, the eventual real
+        render reflects the already-updated cursor/mode anyway" guard `_render_suggestion`
+        already uses, since `_decision_cursor`/`_mode` are updated unconditionally above."""
+
+        entries = _decision_entries(self.finding)
+        self._decision_cursor = len(entries) - 1
+        self.set_decision()
+        try:
+            suggestion = self.query_one(FindingsSuggestion)
+        except NoMatches:
+            return None
+        return suggestion.ensure_input(prefill)
+
 
 class _FindingsListView(ListView):
     """Direct successor to `FindingsBox`'s old private `_FindingOptionList` (issue #91).
@@ -736,41 +900,6 @@ class _FindingsListView(ListView):
         self._owner._jump_decision(digit - 1)
 
 
-class _InlineApprovalChat(Vertical):
-    """A small inline free-text widget (issue #87), mounted into a parked `FindingsList`
-    on demand -- when a human confirms a suggestion (seeded with that suggestion's own
-    text) or `_CUSTOM_ENTRY` (seeded empty), or the moment the decision cursor arrives at
-    `_CUSTOM_ENTRY` at all (`FindingsList._cycle_decision`/`_jump_decision`, so left/right
-    or a digit key landing on "Chat about it" opens it immediately, no extra Enter needed --
-    see those methods' own docstrings). Replaces `ApprovalPromptScreen`'s "fix" path pushing
-    `InputPromptScreen`: there is no modal host for an `Input` in this design (issue #87
-    removes the modal entirely), so this widget plays that role directly, mounted as a
-    sibling of `_FindingsListView` rather than on a separate screen."""
-
-    DEFAULT_CSS = """
-    _InlineApprovalChat {
-        height: auto;
-        margin-top: 1;
-    }
-    """
-
-    def __init__(self, prefill: str, *, owner: FindingsList) -> None:
-        super().__init__()
-        self._prefill = prefill
-        self._owner = owner
-
-    def compose(self) -> ComposeResult:
-        yield Static("What should this step do?")
-        yield Input(value=self._prefill)
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._owner._resolve_chat(event.value)
-        self.remove()
-
-
 _FOOTER_HINT = (
     "Enter to confirm  |  left/right or 1-9 browse options  |  f to chat"
     "  |  s to skip  |  x to abort"
@@ -799,7 +928,7 @@ class FindingsList(Vertical):
     a user approve, fix, skip, or abort a finding" -- see docs/GLOSSARY.md's "Action"):
     while a step is actually parked, `await_decision` turns the highlighted row's
     `FindingsSuggestion` into a live decision selector -- see that method's docstring, and
-    `_FindingsListView`/`_InlineApprovalChat` above -- replacing `ApprovalPromptScreen`'s
+    `_FindingsListView`/`FindingsSuggestion` above -- replacing `ApprovalPromptScreen`'s
     modal entirely. Outside a park, the box behaves exactly as #88 already shipped:
     read-only, only the highlighted finding's suggestions shown, no key here does
     anything. A `#findings-footer` `Static` beneath the summary line shows bound-key copy
@@ -811,6 +940,13 @@ class FindingsList(Vertical):
     `Static`), which a `Static` can't host. `_BorderedBox`'s border/padding rule is
     duplicated here rather than shared, since this widget can no longer extend that base
     alongside `Vertical`.
+
+    `on_input_submitted` handles `Input.Submitted` here, not on `FindingsSuggestion`/
+    `Finding` (issue #92) -- Textual messages bubble up the DOM from wherever they're
+    posted, so a handler defined at this level still catches the event fired by whichever
+    row's `FindingsSuggestion` currently hosts the live `Input`, exactly the same as
+    #87's now-removed `_InlineApprovalChat` handled it on itself before the `Input` moved
+    inside the row tree -- only the handler's *location*, not its reach, needed to move.
     """
 
     DEFAULT_CSS = """
@@ -887,12 +1023,17 @@ class FindingsList(Vertical):
         Since that same periodic timer calls this on every tick regardless of whether
         `output` actually changed, the common case (finding count unchanged) updates every
         existing `Finding` row in place via `update_finding` -- touching no DOM structure
-        at all, so `_FindingsListView.index`, every row's own `_decision_cursor`/`_mode`,
-        and any mounted `_InlineApprovalChat` (a sibling of `_FindingsListView`, untouched
-        by this method regardless) all survive completely untouched. Only the finding
-        count actually growing or shrinking mounts or removes rows, and only the ones
-        beyond the overlap with the old list -- every retained row, including the
-        highlighted one, is still updated in place first.
+        at the `_FindingsListView` level at all, so `_FindingsListView.index` and every
+        row's own `_decision_cursor`/`_mode` survive completely untouched. `update_finding`
+        does still reach every row's own `FindingsSuggestion.show_decision` on each such
+        tick (issue #92 moved the live chat `Input` inside that column, so it is no longer
+        a sibling this method simply never touches) -- but `show_decision` is specifically
+        built to leave an already-open `Input` (and whatever a human has typed into it)
+        completely alone on a same-cursor re-render; see that method's and
+        `FindingsSuggestion.ensure_input`'s docstrings for how. Only the finding count
+        actually growing or shrinking mounts or removes rows, and only the ones beyond the
+        overlap with the old list -- every retained row, including the highlighted one, is
+        still updated in place first.
 
         Reconciles against `self._rows` (this box's own authoritative row list, extended/
         trimmed in step below), never against a fresh `_FindingsListView.children` read --
@@ -1048,8 +1189,8 @@ class FindingsList(Vertical):
         about it" already puts the human straight into typing, no extra Enter/"f" needed.
         Checked here, at `FindingsList` level, rather than inside `Finding.cycle_decision`
         itself: that method stays a pure cursor move with no Textual side effect of its own
-        (matching this module's pure/impure split), and `_open_chat` already needs a live
-        `FindingsList` (`self._parked`, `self.mount`) that `Finding` has no access to."""
+        (matching this module's pure/impure split), and `_open_chat` already needs
+        `FindingsList`'s own `self._parked` guard, which `Finding` has no access to."""
 
         if not self._parked:
             return
@@ -1083,9 +1224,38 @@ class FindingsList(Vertical):
         self._pending.set_result(ApprovalResponse(decision=decision, instructions=None))
 
     def _open_chat(self, prefill: str) -> None:
-        if not self._parked or self.query(_InlineApprovalChat):
+        """Open the highlighted row's chat, seeded with `prefill` (issue #92: in place,
+        inside that row's own `FindingsSuggestion`, rather than mounting a sibling
+        `_InlineApprovalChat` below the whole box). Delegates the actual cursor move/`Input`
+        creation to `Finding.open_chat` -- idempotent the same way the old sibling widget
+        was (`Finding.open_chat` → `FindingsSuggestion.ensure_input` both no-op once a
+        chat is already open on this row), so calling this twice in a row, or once via a
+        cycle/jump auto-open and again via a redundant Enter/"f", never stacks or resets
+        anything; see `FindingsSuggestion.ensure_input`'s docstring. Focuses the returned
+        `Input` here rather than in `Finding`/`FindingsSuggestion` themselves, matching
+        `await_decision`'s own `list_view.focus()` -- moving focus is this class's job, the
+        row/column below only build the widget to focus."""
+
+        if not self._parked:
             return
-        self.mount(_InlineApprovalChat(prefill, owner=self))
+        item = self._highlighted_finding()
+        if item is None:
+            return
+        input_widget = item.open_chat(prefill)
+        if input_widget is not None:
+            input_widget.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle the highlighted row's live chat `Input` being submitted (issue #92) --
+        wherever it currently lives in the row tree, this `Message` bubbles up to
+        `FindingsList` regardless (see this class's own docstring for why the handler moved
+        here rather than staying on a since-removed `_InlineApprovalChat`). Resolving via
+        `_resolve_chat` is enough on its own: `await_decision`'s `finally` clause reverts the
+        highlighted row back to `set_plain()` once the pending future actually resolves,
+        which in turn tears the `Input` down (`FindingsSuggestion.show_plain` →
+        `_remove_input`) -- no explicit cleanup needed in this handler itself."""
+
+        self._resolve_chat(event.value)
 
     def _resolve_chat(self, instructions: str) -> None:
         if self._pending is not None:

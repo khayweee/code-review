@@ -55,13 +55,20 @@ def _findings_list_content(box: FindingsList) -> str:
     content to plain text, joined -- `FindingsList` is a `Vertical` with a
     `_FindingsListView` child, not a single renderable `.content` the way `PipelineBox` is
     (issue #88), so this renders each row's two columns individually rather than reading
-    one shared attribute."""
+    one shared attribute.
+
+    `FindingsSuggestion` is itself a small container, not a single `Static` (issue #92) --
+    its own `Static` children are printed individually here, same as `test_widgets.py`'s
+    `_finding_rows_content`. A live chat `Input`, when one is mounted in place of one of
+    those `Static`s, contributes nothing to this text -- tests that open one assert its
+    state directly via `box.query_one(Input)` instead."""
 
     buffer = StringIO()
     console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
     for item in box.query(FindingItem):
         console.print(item.query_one(FindingsDescription).content)
-        console.print(item.query_one(FindingsSuggestion).content)
+        for static in item.query_one(FindingsSuggestion).query(Static):
+            console.print(static.content)
     return buffer.getvalue().rstrip()
 
 
@@ -533,16 +540,18 @@ def test_review_app_choosing_abort_stops_the_run_and_records_the_error() -> None
     asyncio.run(scenario())
 
 
-# --- The "fix" response and the inline chat widget (issue #81, reworked by #87) ---------
+# --- The "fix" response and the inline chat widget (issue #81, reworked by #87/#92) -----
 
 
 def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_them() -> None:
-    """Issue #81's TUI-side acceptance criterion, reworked by issue #87: the "f" shortcut
-    opens `_InlineApprovalChat`, mounted directly into the already-parked `FindingsList`,
-    rather than pushing a second `InputPromptScreen` modal -- and
-    `ReviewApp._relay_approval` only resolves the pending `ApprovalRelay.request_approval`
-    future -- with the full `ApprovalResponse(decision="fix", instructions=...)`, not just
-    the bare decision -- once that widget's `Input` is submitted."""
+    """Issue #81's TUI-side acceptance criterion, reworked by issue #87, relocated in place
+    by issue #92: the "f" shortcut opens a live `Input` inside the highlighted row's own
+    `FindingsSuggestion` column (no longer `_InlineApprovalChat`, a sibling widget mounted
+    below the whole `FindingsList` -- see `tui/AGENTS.md`'s "Findings box" section), rather
+    than pushing a second `InputPromptScreen` modal -- and `ReviewApp._relay_approval` only
+    resolves the pending `ApprovalRelay.request_approval` future -- with the full
+    `ApprovalResponse(decision="fix", instructions=...)`, not just the bare decision -- once
+    that `Input` is submitted."""
 
     async def scenario() -> ApprovalResponse:
         relay = ApprovalRelay()
@@ -576,11 +585,11 @@ def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_the
             yield  # pragma: no cover - unreachable, only makes this an async generator
 
         app = ReviewApp(REGISTRY, _events(), approval_relay=relay)
-        # `size=(80, 50)`, not the default 80x24 -- issue #92's border around a highlighted
+        # `size=(80, 50)`, not the default 80x24 -- the border around a highlighted
         # `FindingsSuggestion` adds two rows (top/bottom) to the decision cycle's own height,
-        # which at the default size pushed `_InlineApprovalChat`'s `Input` below the fold:
-        # `pilot.click` requires its target to be within the visible screen, with no
-        # auto-scroll of its own.
+        # which at the default size pushed the chat's `Input` below the fold: `pilot.click`
+        # requires its target to be within the visible screen, with no auto-scroll of its
+        # own.
         async with app.run_test(size=(80, 50)) as pilot:
             await _wait_for_park(pilot, app, "RebaseStep")
 
