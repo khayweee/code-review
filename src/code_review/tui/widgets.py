@@ -3,8 +3,14 @@
 The Findings box (issue #42, widened for #61/#87, rebuilt as a widget tree by #91): the
 most recently completed step's `ReviewOutput`, `TestSufficiencyOutput`, or bare
 `list[Finding]`, one `Finding` row per finding plus a severity-count summary -- and, while
-a step is parked (issue #87), a live inline approve/skip/abort/chat decision selector
-replacing the old `ApprovalPromptScreen` modal.
+a step is parked (issue #87), a live inline decision selector replacing the old
+`ApprovalPromptScreen` modal: each finding's own `suggestions` plus a single "Chat about
+it" entry that opens a free-text chat, always resolving with `decision="fix"`. Approve is
+no longer a reachable per-finding menu entry (issue #87 later simplified this -- just
+describe what you want in the chat instead); skip and abort survive as separate, global
+"s"/"x" key bindings, not listed options -- skip is a bare escape hatch for a park chatting
+genuinely cannot resolve (e.g. a step that ignores the chat's `fix_round` instructions
+entirely), and abort stops the run outright.
 
 Every widget here takes the data it displays as plain data (`StepRow`s for `PipelineBox`,
 a `ReviewOutput`/`TestSufficiencyOutput`/`list[Finding]` for `FindingsList`, see
@@ -39,24 +45,30 @@ from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.state import ActivityRow, Status, StepRow
 
-# `FindingsList`'s per-finding decision cycle (issue #87, kept by #91), appended after that
-# finding's own `suggestions` -- shared by every finding row, since the decision itself is
-# step-scoped, not per-finding (see `FindingsList.await_decision`'s docstring). Plain
-# strings, not `ApprovalDecision` values, because "Type something." is not itself a
-# decision -- it opens the inline chat widget rather than resolving anything. Rendered as
-# the numbered list's trailing free-text option (see `render_decision_cycle`), after every
-# suggestion.
-_CUSTOM_ENTRY = "Type something."
-_DECISION_ENTRIES = ("approve", "skip", "abort")
+# `FindingsList`'s per-finding decision cycle (issue #87, kept by #91, simplified to drop
+# the fixed approve/skip/abort entries below), appended after that finding's own
+# `suggestions` -- shared by every finding row, since a park is step-scoped, not per-finding
+# (see `FindingsList.await_decision`'s docstring). A plain string, not an `ApprovalDecision`
+# value, because "Chat about it" is not itself a decision -- it opens the inline chat widget
+# rather than resolving anything on its own; confirming it (or a suggestion) always resolves
+# with `decision="fix"`, whatever the human types being the `instructions`. Rendered as the
+# numbered list's trailing free-text option (see `render_decision_cycle`), after every
+# suggestion. Approve/skip/abort used to be listed here too (three more fixed entries,
+# resolving the park directly with no chat involved) -- removed once the product call landed
+# that a human can just describe what they want in the chat instead, with no separate
+# intent-parsing needed for the common case. Skip and abort each survive as
+# `_FindingsListView`'s own global "s"/"x" bindings instead (`action_quick_skip`/
+# `action_quick_abort`), not per-finding menu entries -- skip is a bare escape hatch kept
+# for parks the chat genuinely cannot resolve (e.g. a step that ignores the chat's
+# `fix_round` instructions entirely -- `tui/AGENTS.md`'s "Findings box" section has a real
+# example); approve has no such escape hatch and is gone for good.
+_CUSTOM_ENTRY = "Chat about it"
 
-# Short static UI copy for the four fixed decision-cycle entries above (issue #91), shown
-# as an indented detail line beneath each in `render_decision_cycle` -- a suggestion's own
-# text stays single-line, since it has no further data to split a detail line from.
+# Short static UI copy for `_CUSTOM_ENTRY`, shown as an indented detail line beneath it in
+# `render_decision_cycle` -- a suggestion's own text stays single-line, since it has no
+# further data to split a detail line from.
 _ENTRY_DETAILS: dict[str, str] = {
-    _CUSTOM_ENTRY: "Open a free-text prompt for this finding.",
-    "approve": "Accept this finding's outcome and continue.",
-    "skip": "Leave this finding unresolved and continue.",
-    "abort": "Stop the pipeline run entirely.",
+    _CUSTOM_ENTRY: "Start typing to describe what you want.",
 }
 
 # One glyph per status in the deterministic text fallback. The live pipeline view uses
@@ -349,16 +361,23 @@ def _findings_of(
 
 def _decision_entries(finding: FindingData) -> list[str]:
     """The full per-finding decision cycle a parked `FindingsList` cycles through (issue
-    #87): that finding's own `suggestions`, then `_CUSTOM_ENTRY`, then the step-scoped
-    `_DECISION_ENTRIES` -- one unified list, not two separate concerns, per the design
-    call that landed #87 (confirming a suggestion or `_CUSTOM_ENTRY` is discussion-only
-    and opens the inline chat widget; confirming a `_DECISION_ENTRIES` value resolves the
-    whole step's park immediately, regardless of which finding's row it was confirmed
-    from -- see `FindingsList.await_decision`). Rendered as a 1-based numbered list by
-    `render_decision_cycle`, so a digit key (`_FindingsListView`'s `"1"`.."9"` bindings) can
-    jump a row's `_decision_cursor` straight to any entry here by that same 1-based index."""
+    #87): that finding's own `suggestions`, then a single trailing `_CUSTOM_ENTRY` -- every
+    entry here is discussion-only, opening the inline chat widget rather than resolving
+    anything by itself (see `FindingsList.await_decision`); confirming any of them always
+    resolves the park with `decision="fix"`, seeded with that entry's own text (empty for
+    `_CUSTOM_ENTRY`). Approve/skip/abort used to also live in this list as three more fixed
+    entries, resolving the park directly with no chat step -- removed once the product call
+    landed that describing what you want in the chat covers that ground with no separate
+    intent-parsing needed, for most cases. Skip and abort remain reachable, but only as
+    global key bindings (`_FindingsListView`'s "s"/"x"), never listed entries here -- skip
+    is a bare escape hatch for a park the chat genuinely cannot resolve, e.g. a step that
+    ignores `ctx.fix_round` outright (see `tui/AGENTS.md`'s "Findings box" section);
+    approve has no equivalent escape hatch and stays gone. Rendered as a 1-based numbered
+    list by `render_decision_cycle`, so a
+    digit key (`_FindingsListView`'s `"1"`.."9"` bindings) can jump a row's
+    `_decision_cursor` straight to any entry here by that same 1-based index."""
 
-    return [*finding.suggestions, _CUSTOM_ENTRY, *_DECISION_ENTRIES]
+    return [*finding.suggestions, _CUSTOM_ENTRY]
 
 
 def render_description(finding: FindingData) -> Text:
@@ -391,10 +410,10 @@ def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
     Entry 0 is additionally labeled `" (Recommended)"` when it came from
     `finding.suggestions` itself (i.e. this finding has at least one suggestion, so
     `_decision_entries`'s first entry is that suggestion rather than `_CUSTOM_ENTRY`) --
-    styled after the Claude Code CLI's own interactive picker. The four fixed entries
-    (`_CUSTOM_ENTRY`/`_DECISION_ENTRIES`) each get a short indented detail line of static
-    UI copy (`_ENTRY_DETAILS`); a suggestion's own text stays single-line, since it has no
-    further data to split a detail line from."""
+    styled after the Claude Code CLI's own interactive picker. The one fixed entry
+    (`_CUSTOM_ENTRY`) gets a short indented detail line of static UI copy
+    (`_ENTRY_DETAILS`); a suggestion's own text stays single-line, since it has no further
+    data to split a detail line from."""
 
     entries = _decision_entries(finding)
     text = Text()
@@ -481,7 +500,10 @@ class FindingsSuggestion(Static):
     two columns, drawn on every row regardless of whether there was anything on the right to
     divide from; a border around `FindingsSuggestion` itself only appears when this column
     actually has content, reading as "this is its own widget" rather than a shared divider
-    line."""
+    line. `border_title = "Suggestion"` is set directly in `__init__`, the same way
+    `PipelineBox`/`FindingsList`/`StatusBox` set theirs -- it only actually renders once a
+    border is present (i.e. once `-visible` is added), so it costs nothing while hidden and
+    labels the column the instant it draws its own border."""
 
     DEFAULT_CSS = """
     FindingsSuggestion {
@@ -503,6 +525,7 @@ class FindingsSuggestion(Static):
         classes: str | None = None,
     ) -> None:
         super().__init__("", id=id, classes=classes)
+        self.border_title = "Suggestion"
 
     def clear(self) -> None:
         self.remove_class("-visible")
@@ -523,8 +546,11 @@ class Finding(ListItem):
     `FindingsDescription`/`FindingsSuggestion` in a horizontal split, and owns this row's
     own display mode (`hidden`/`plain`/`decision`) and, while parked, its own
     `_decision_cursor`. The cursor is purely a per-row browsing aid, not itself a decision
-    -- see `FindingsList.await_decision`'s docstring: confirming approve/skip/abort
-    resolves the whole step's park regardless of which row's cursor it came from.
+    -- see `FindingsList.await_decision`'s docstring: every entry it can land on (a
+    suggestion, or `_CUSTOM_ENTRY`) resolves the park the same way, via the inline chat
+    widget (`decision="fix"`), regardless of which row's cursor it came from. Skip and abort
+    are not reachable through this cursor at all -- they are `_FindingsListView`'s own
+    separate global "s"/"x" bindings, each resolving the park directly with no chat step.
 
     Named `Finding`, shadowing `pipeline.findings.Finding` (imported into this module as
     `FindingData`) -- deliberate: this widget's identity in `widgets.py` *is* "one finding,
@@ -657,19 +683,22 @@ class _FindingsListView(ListView):
     `self._nodes` unfiltered -- so every one of #87's parked-mode key bindings on top of
     up/down/enter (which `ListView`'s own `BINDINGS` already give this for free) lives
     here, never on `Finding` itself: left/right cycle the highlighted finding's
-    `_decision_entries`, single-key "a"/"s"/"x"/"f" shortcuts jump straight to
-    Approve/Skip/Abort/free-text regardless of cursor position, and digit keys "1".."9"
-    jump straight to that 1-based entry (matching `render_decision_cycle`'s numbering).
-    All of these delegate to the owning `FindingsList`, which no-ops them while not parked
-    -- this class holds no decision state of its own."""
+    `_decision_entries`, the single-key "s"/"x" shortcuts jump straight to skip/abort
+    regardless of cursor position (the two remaining global, step-scoped controls -- unlike
+    approve, neither was ever a listed per-finding menu entry, and skip's binding is a bare
+    escape hatch for a park chatting genuinely cannot resolve, e.g. a step that ignores
+    `ctx.fix_round` entirely -- see `tui/AGENTS.md`'s "Findings box" section), "f" jumps
+    straight to the inline chat the same way, and digit keys "1".."9" jump straight to that
+    1-based entry (matching `render_decision_cycle`'s numbering). All of these delegate to
+    the owning `FindingsList`, which no-ops them while not parked -- this class holds no
+    decision state of its own."""
 
     BINDINGS = [
         Binding("left", "cycle_prev", "Previous suggestion", show=False),
         Binding("right", "cycle_next", "Next suggestion", show=False),
-        Binding("a", "quick_approve", "Approve", show=False),
         Binding("s", "quick_skip", "Skip", show=False),
         Binding("x", "quick_abort", "Abort", show=False),
-        Binding("f", "open_chat", "Type something", show=False),
+        Binding("f", "open_chat", "Chat", show=False),
         *(
             Binding(str(digit), f"jump_decision({digit})", f"Option {digit}", show=False)
             for digit in range(1, 10)
@@ -694,9 +723,6 @@ class _FindingsListView(ListView):
     def action_cycle_next(self) -> None:
         self._owner._cycle_decision(1)
 
-    def action_quick_approve(self) -> None:
-        self._owner._quick_decision("approve")
-
     def action_quick_skip(self) -> None:
         self._owner._quick_decision("skip")
 
@@ -713,10 +739,13 @@ class _FindingsListView(ListView):
 class _InlineApprovalChat(Vertical):
     """A small inline free-text widget (issue #87), mounted into a parked `FindingsList`
     on demand -- when a human confirms a suggestion (seeded with that suggestion's own
-    text) or `_CUSTOM_ENTRY` (seeded empty). Replaces `ApprovalPromptScreen`'s "fix" path
-    pushing `InputPromptScreen`: there is no modal host for an `Input` in this design
-    (issue #87 removes the modal entirely), so this widget plays that role directly,
-    mounted as a sibling of `_FindingsListView` rather than on a separate screen."""
+    text) or `_CUSTOM_ENTRY` (seeded empty), or the moment the decision cursor arrives at
+    `_CUSTOM_ENTRY` at all (`FindingsList._cycle_decision`/`_jump_decision`, so left/right
+    or a digit key landing on "Chat about it" opens it immediately, no extra Enter needed --
+    see those methods' own docstrings). Replaces `ApprovalPromptScreen`'s "fix" path pushing
+    `InputPromptScreen`: there is no modal host for an `Input` in this design (issue #87
+    removes the modal entirely), so this widget plays that role directly, mounted as a
+    sibling of `_FindingsListView` rather than on a separate screen."""
 
     DEFAULT_CSS = """
     _InlineApprovalChat {
@@ -743,8 +772,8 @@ class _InlineApprovalChat(Vertical):
 
 
 _FOOTER_HINT = (
-    "Enter to confirm  |  left/right or 1-9 browse options  |  a/s/x approve/skip/abort"
-    "  |  f to type"
+    "Enter to confirm  |  left/right or 1-9 browse options  |  f to chat"
+    "  |  s to skip  |  x to abort"
 )
 
 
@@ -952,16 +981,19 @@ class FindingsList(Vertical):
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Confirm whatever `_decision_cursor` currently points at for the selected row's
         finding (issue #87) -- a no-op outside a park, matching every other interactive
-        binding here."""
+        binding here. Every entry `_decision_entries` can produce is now discussion-only
+        (a suggestion, or `_CUSTOM_ENTRY`), so this always opens the inline chat, seeded
+        with that entry's own text (empty for `_CUSTOM_ENTRY`) -- a redundant-but-harmless
+        second path once `_cycle_decision`/`_jump_decision` already auto-open it the moment
+        the cursor arrives at `_CUSTOM_ENTRY`, kept because Enter must still work regardless
+        of how the cursor got there (e.g. a fresh row highlight, never cycled at all)."""
 
         if not self._parked:
             return
         item = event.item
         assert isinstance(item, Finding)
         entry = item.confirmed_entry()
-        if entry in _DECISION_ENTRIES:
-            self._quick_decision(cast(ApprovalDecision, entry))
-        elif entry == _CUSTOM_ENTRY:
+        if entry == _CUSTOM_ENTRY:
             self._open_chat("")
         else:
             self._open_chat(entry)
@@ -1011,20 +1043,39 @@ class FindingsList(Vertical):
         return cast("Finding | None", item)
 
     def _cycle_decision(self, delta: int) -> None:
+        """Move the highlighted row's `_decision_cursor` by `delta` (left/right), then open
+        the inline chat the moment it *lands* on `_CUSTOM_ENTRY` -- so browsing onto "Chat
+        about it" already puts the human straight into typing, no extra Enter/"f" needed.
+        Checked here, at `FindingsList` level, rather than inside `Finding.cycle_decision`
+        itself: that method stays a pure cursor move with no Textual side effect of its own
+        (matching this module's pure/impure split), and `_open_chat` already needs a live
+        `FindingsList` (`self._parked`, `self.mount`) that `Finding` has no access to."""
+
         if not self._parked:
             return
         item = self._highlighted_finding()
         if item is None:
             return
         item.cycle_decision(delta)
+        if item.confirmed_entry() == _CUSTOM_ENTRY:
+            self._open_chat("")
 
     def _jump_decision(self, index: int) -> None:
+        """Digit-key counterpart to `_cycle_decision` -- same "open the chat the instant the
+        cursor lands on `_CUSTOM_ENTRY`" behavior, including when `Finding.jump_decision`
+        itself no-ops (an out-of-range digit): `confirmed_entry()` is checked after the call
+        regardless, so an already-open chat (cursor already on `_CUSTOM_ENTRY` before this
+        no-op jump) is simply re-confirmed rather than skipped -- harmless, since
+        `_open_chat` is itself a no-op once one is already mounted."""
+
         if not self._parked:
             return
         item = self._highlighted_finding()
         if item is None:
             return
         item.jump_decision(index)
+        if item.confirmed_entry() == _CUSTOM_ENTRY:
+            self._open_chat("")
 
     def _quick_decision(self, decision: ApprovalDecision) -> None:
         if not self._parked or self._pending is None:
@@ -1049,16 +1100,19 @@ class FindingsList(Vertical):
 
     async def await_decision(self) -> ApprovalResponse:
         """Turn the highlighted row's `FindingsSuggestion` into a live decision selector
-        until a human confirms Approve/Skip/Abort (directly, or via the inline chat widget
-        resolving with `decision="fix"`) -- the inline replacement for
+        until a human resolves the park -- via the inline chat widget (confirming a
+        suggestion or "Chat about it" and submitting, always resolving with
+        `decision="fix"`), or via `_FindingsListView`'s two separate global bindings, "s"
+        (skip, a bare escape hatch for a park the chat genuinely cannot resolve) and "x"
+        (abort, stopping the whole run) -- the inline replacement for
         `ReviewApp._relay_approval`'s old `push_screen_wait(ApprovalPromptScreen(...))`
         (issue #87).
 
         The decision is step-scoped, not per-finding (an explicit design call, since a
-        park is a single step-level event): confirming Approve/Skip/Abort from *any*
-        finding's row resolves the one pending future here, regardless of which row the
-        cursor was on -- each row's own `_decision_cursor`/left-right cycling is purely a
-        per-row browsing aid, not separate state per finding. Only one `await_decision`
+        park is a single step-level event): confirming the chat, skipping, or aborting from
+        *any* finding's row resolves the one pending future here, regardless of which row
+        the cursor was on -- each row's own `_decision_cursor`/left-right cycling is purely
+        a per-row browsing aid, not separate state per finding. Only one `await_decision`
         call can be pending at a time in practice (`ReviewApp._relay_approval` awaits one
         park at a time), so a single `self._pending` future, not a queue, is enough.
 
@@ -1071,8 +1125,9 @@ class FindingsList(Vertical):
         Also focuses `_FindingsListView` -- unlike the old `ApprovalPromptScreen`, becoming
         the active screen on `push_screen` and so implicitly receiving every keypress, this
         box is just one mounted widget among others; without an explicit `.focus()` here, a
-        real run's "a"/"s"/"x"/"f" keypresses would land on whatever (if anything) last had
-        focus instead of `_FindingsListView`'s bindings, and nothing would happen at all.
+        real run's "s"/"x"/"f"/left/right/digit keypresses would land on whatever (if
+        anything) last had focus instead of `_FindingsListView`'s bindings, and nothing
+        would happen at all.
         Awaits `_await_list_view()` first (rather than the plain `_list_view()` every other
         caller in this class uses) specifically so this focus call -- unlike a merely
         stale render elsewhere, a silently-skipped focus would leave every keypress for the

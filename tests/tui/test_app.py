@@ -352,8 +352,14 @@ def _rebase_step_parks_then_maybe_continues(relay: ApprovalRelay) -> AsyncIterat
     `needs_approval=True` outcome and calls `relay.request_approval` itself -- exactly what
     `run_steps` does once `StepContext.on_approval_needed` is wired to
     `relay.request_approval` for real. "abort" raises `RunAbortedError`, matching
-    `run_steps`'s own behavior; any other decision ("approve" or "skip") lets a third step,
-    `ReviewStep`, run to completion -- proving later steps still run either way.
+    `run_steps`'s own behavior; any other decision ("fix" or "skip" -- "approve" is no
+    longer a reachable decision from this UI at all) lets a third step, `ReviewStep`, run
+    to completion -- proving later steps still run either way. Unlike the real
+    `pipeline.executor.run_steps` (see that module's "The approval park" section), this
+    synthetic double does not re-run `RebaseStep` on "fix" -- it always advances to
+    `ReviewStep` regardless of decision (short of abort), so "fix" here is safe to use as a
+    stand-in for what "approve" used to prove, even though the two are not equivalent
+    against the real executor for every step (see `tui/AGENTS.md`'s "Findings box" section).
     """
 
     async def _events() -> AsyncIterator[StepEvent]:
@@ -436,7 +442,15 @@ async def _wait_for_park(pilot: Pilot[None], app: ReviewApp, step_name: str) -> 
     raise AssertionError(f"{step_name} never parked")
 
 
-def test_review_app_parks_on_a_synthetic_outcome_and_approve_continues_the_run() -> None:
+def test_review_app_parks_on_a_synthetic_outcome_and_resolving_via_chat_continues_the_run() -> None:
+    """Was `..._and_approve_continues_the_run`: approve is no longer a reachable decision
+    from this UI at all, removed for good with no replacement. Resolving via the inline
+    chat (`decision="fix"`) proves the same thing that test proved -- a non-skip, non-abort
+    resolution leaves the step `"completed"`, not `"skipped"`, and the run continues -- the
+    one assertion this test adds over its sibling
+    `test_review_app_choosing_skip_marks_the_step_skipped_and_the_run_continues` below,
+    which resolves the identical park via skip and asserts `"skipped"` instead."""
+
     async def scenario() -> None:
         relay = ApprovalRelay()
         app = ReviewApp(
@@ -455,7 +469,9 @@ def test_review_app_parks_on_a_synthetic_outcome_and_approve_continues_the_run()
             assert parked_row.status == "parked"
 
             box.query_one(_FindingsListView).focus()
-            await pilot.press("a")
+            await pilot.press("f")
+            await pilot.pause()
+            await pilot.press(*"looks good", "enter")
             await pilot.pause()
             await _wait_until_done(pilot, app)
 
@@ -652,7 +668,11 @@ def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_marku
             )
 
             box.query_one(_FindingsListView).focus()
-            await pilot.press("a")
+            # Any resolution works here -- this test is only about the markup-safe render,
+            # not about which decision resolves the park -- so "s" (skip), the simplest
+            # single-keypress global control, is as good as any (approve, which this test
+            # used before, is no longer a reachable decision from this UI at all).
+            await pilot.press("s")
             await pilot.pause()
             await _wait_until_done(pilot, app)
 

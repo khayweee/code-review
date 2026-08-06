@@ -623,7 +623,7 @@ def test_render_decision_cycle_labels_only_entry_0_as_recommended_when_it_is_a_s
 
 
 def test_render_decision_cycle_has_no_recommended_label_with_no_suggestions() -> None:
-    """Entry 0 is `_CUSTOM_ENTRY` ("Type something.") when a finding has no suggestions of
+    """Entry 0 is `_CUSTOM_ENTRY` ("Chat about it") when a finding has no suggestions of
     its own -- it never earns the "(Recommended)" label either."""
 
     finding = Finding(severity="warning", description="unclear naming", review_scope="source")
@@ -631,21 +631,18 @@ def test_render_decision_cycle_has_no_recommended_label_with_no_suggestions() ->
     text = render_decision_cycle(finding, decision_cursor=0)
 
     assert "(Recommended)" not in text.plain
-    assert "1. Type something." in text.plain
+    assert "1. Chat about it" in text.plain
 
 
-def test_render_decision_cycle_gives_the_four_fixed_entries_a_detail_line() -> None:
-    """A suggestion's own text stays single-line; the four fixed entries
-    (`_CUSTOM_ENTRY`/`_DECISION_ENTRIES`) each get a short indented detail line."""
+def test_render_decision_cycle_gives_the_one_fixed_entry_a_detail_line() -> None:
+    """A suggestion's own text stays single-line; the one fixed entry (`_CUSTOM_ENTRY`)
+    gets a short indented detail line."""
 
     finding = Finding(severity="warning", description="unclear naming", review_scope="source")
 
     text = render_decision_cycle(finding, decision_cursor=0)
 
-    assert "Open a free-text prompt" in text.plain
-    assert "Accept this finding's outcome" in text.plain
-    assert "Leave this finding unresolved" in text.plain
-    assert "Stop the pipeline run entirely" in text.plain
+    assert "Start typing to describe what you want." in text.plain
 
 
 # --- FindingsList, mounted and driven through Pilot ----------------------------------------
@@ -731,6 +728,30 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
             lines = _finding_rows_content(box)
             assert "fix the first one" in lines[0]
             assert "fix the second one" not in lines[1]
+
+    asyncio.run(scenario())
+
+
+def test_findings_suggestion_has_a_suggestion_border_title() -> None:
+    """`FindingsSuggestion.border_title` is set directly in `__init__`, the same mechanism
+    `PipelineBox`/`FindingsList`/`StatusBox` already use -- it only actually renders once a
+    border is drawn (the `-visible` class), but the attribute itself is set unconditionally,
+    same as those other widgets' own `border_title`."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="unclear naming", review_scope="source")
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            suggestion = box.query_one(FindingsSuggestion)
+            assert suggestion.border_title == "Suggestion"
 
     asyncio.run(scenario())
 
@@ -1123,7 +1144,64 @@ def test_findings_list_await_decision_marks_the_highlighted_row_s_decision_curso
     asyncio.run(scenario())
 
 
+def test_findings_list_plain_up_down_highlighting_never_auto_opens_the_chat_while_parked() -> None:
+    """Arrow-key-*browsing between finding rows* (`up`/`down`, `ListView`'s own built-in
+    cursor movement -- distinct from `left`/`right`/digit keys, which move a row's own
+    `_decision_cursor`) must never yank focus into the inline chat, even when the newly
+    highlighted finding has zero suggestions of its own (so `_CUSTOM_ENTRY` is that row's
+    entry 0). `on_list_view_highlighted`/`_prime_highlighted` call `reset_decision()`/
+    `set_decision()` directly, never `_cycle_decision`/`_jump_decision` -- only a deliberate
+    intra-row cursor move auto-opens the chat, per those methods' own docstrings."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="first finding",
+                    review_scope="source",
+                    suggestions=["rename it"],
+                ),
+                Finding(
+                    severity="error",
+                    description="second finding, no suggestions",
+                    review_scope="source",
+                ),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("down")
+            await pilot.pause()
+
+            lines = _finding_rows_content(box)
+            # The newly highlighted (second) row's only entry is `_CUSTOM_ENTRY` at cursor
+            # 0 -- yet no chat opened from merely browsing onto it.
+            assert "> 1. Chat about it" in lines[1]
+            assert not list(box.query(Input))
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
 def test_findings_list_arrow_keys_cycle_the_decision_cursor_while_parked() -> None:
+    """Only two entries remain for a finding with one suggestion (that suggestion, then
+    `_CUSTOM_ENTRY`), so one right press already lands on "Chat about it" and auto-opens
+    the inline chat -- see `test_findings_list_cursor_arriving_at_chat_about_it_auto_opens_
+    and_focuses_the_input` below for a dedicated proof of that. This test uses a finding
+    with two suggestions instead, so the first right press stays on a plain suggestion (no
+    chat yet) and only the second lands on "Chat about it"."""
+
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1131,7 +1209,7 @@ def test_findings_list_arrow_keys_cycle_the_decision_cursor_while_parked() -> No
                     severity="warning",
                     description="unclear naming",
                     review_scope="source",
-                    suggestions=["rename it"],
+                    suggestions=["rename it", "add a docstring"],
                 )
             ],
             risk_level="low",
@@ -1148,12 +1226,14 @@ def test_findings_list_arrow_keys_cycle_the_decision_cursor_while_parked() -> No
             await pilot.press("right")
             await pilot.pause()
             lines = _finding_rows_content(box)
-            assert "> 2. Type something." in lines[0]
+            assert "> 2. add a docstring" in lines[0]
+            assert not list(box.query(Input))
 
             await pilot.press("right")
             await pilot.pause()
             lines = _finding_rows_content(box)
-            assert "> 3. approve" in lines[0]
+            assert "> 3. Chat about it" in lines[0]
+            assert box.query_one(Input).value == ""
 
             box._quick_decision("abort")
             await task
@@ -1162,6 +1242,11 @@ def test_findings_list_arrow_keys_cycle_the_decision_cursor_while_parked() -> No
 
 
 def test_findings_list_enter_confirms_the_cursor_and_resolves_the_pending_decision() -> None:
+    """Approve/skip are gone entirely, so confirming the cursor now always resolves via the
+    inline chat (`decision="fix"`), never directly -- this reworks the old "resolves via
+    approve" scenario around that, submitting the auto-opened chat's `Input` to actually
+    resolve the pending future."""
+
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1178,15 +1263,18 @@ def test_findings_list_enter_confirms_the_cursor_and_resolves_the_pending_decisi
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
-            # No suggestions here -- cursor starts on "Type something."; one right press
-            # reaches "approve".
-            await pilot.press("right")
+            # No suggestions here -- cursor starts on "Chat about it" (entry 0), so it's
+            # already auto-opened by `await_decision`'s own initial `set_decision()`... but
+            # that priming call doesn't auto-open (only a deliberate cursor move does, see
+            # `_cycle_decision`'s docstring) -- Enter is what actually opens it here.
+            await pilot.press("enter")
             await pilot.pause()
+            box.query_one(Input).value = "looks good, thanks"
             await pilot.press("enter")
             await pilot.pause()
 
             response = await task
-            assert response == ApprovalResponse(decision="approve", instructions=None)
+            assert response == ApprovalResponse(decision="fix", instructions="looks good, thanks")
 
     asyncio.run(scenario())
 
@@ -1217,6 +1305,8 @@ def test_findings_list_digit_shortcut_jumps_the_decision_cursor_while_parked() -
             await pilot.pause()
             lines = _finding_rows_content(box)
             assert "> 2. add a docstring" in lines[0]
+            # Landed on a plain suggestion, not `_CUSTOM_ENTRY` -- no auto-opened chat.
+            assert not list(box.query(Input))
 
             box._quick_decision("abort")
             await task
@@ -1246,11 +1336,56 @@ def test_findings_list_digit_shortcut_past_the_entry_count_is_a_no_op() -> None:
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
-            # Only 5 entries exist (1 suggestion + "Type something." + approve/skip/abort).
+            # Only 2 entries exist (1 suggestion + "Chat about it").
             await pilot.press("9")
             await pilot.pause()
             lines = _finding_rows_content(box)
             assert "> 1. rename it" in lines[0]
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_cursor_arriving_at_chat_about_it_via_digit_jump_auto_opens_it() -> None:
+    """A digit-key jump landing on `_CUSTOM_ENTRY` auto-opens and focuses the inline chat's
+    `Input`, with no further keypress -- `FindingsList._jump_decision`'s counterpart to
+    `_cycle_decision`'s left/right behavior (see `test_findings_list_arrow_keys_cycle_the_
+    decision_cursor_while_parked` above for the right-arrow case)."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="unclear naming",
+                    review_scope="source",
+                    suggestions=["rename it"],
+                )
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            assert not list(box.query(Input))
+
+            # Entry 2 ("Chat about it") is the digit-key jump's target here.
+            await pilot.press("2")
+            await pilot.pause()
+
+            lines = _finding_rows_content(box)
+            assert "> 2. Chat about it" in lines[0]
+            chat_input = box.query_one(Input)
+            assert chat_input.value == ""
+            assert chat_input.has_focus
 
             box._quick_decision("abort")
             await task
@@ -1287,7 +1422,14 @@ def test_findings_list_opening_the_chat_widget_twice_mounts_only_one() -> None:
     asyncio.run(scenario())
 
 
-def test_findings_list_letter_shortcuts_resolve_directly_while_parked() -> None:
+def test_findings_list_s_shortcut_resolves_directly_while_parked() -> None:
+    """ "s" resolves the park directly with `decision="skip"` via `action_quick_skip` -- a
+    restored global escape hatch (not a listed per-finding entry, same treatment "x"/abort
+    already gets), kept for a park the inline chat genuinely cannot resolve (e.g. a step
+    that ignores the chat's `fix_round` instructions entirely -- see `tui/AGENTS.md`'s
+    "Findings box" section). "a" (approve) has no equivalent escape hatch and stays gone --
+    see `test_findings_list_a_shortcut_is_a_no_op_while_parked` below."""
+
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1309,6 +1451,41 @@ def test_findings_list_letter_shortcuts_resolve_directly_while_parked() -> None:
 
             response = await task
             assert response == ApprovalResponse(decision="skip", instructions=None)
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_a_shortcut_is_a_no_op_while_parked() -> None:
+    """ "a" used to resolve the park directly (Approve) via `action_quick_approve` --
+    removed entirely, not remapped to some other outcome, so pressing it while parked now
+    does nothing at all: no chat opens, and the pending park is left unresolved (the abort
+    below is what actually resolves it, so this test can complete)."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="unclear naming", review_scope="source")
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("a")
+            await pilot.pause()
+
+            assert not task.done()
+            assert not list(box.query(Input))
+
+            box._quick_decision("abort")
+            response = await task
+            assert response == ApprovalResponse(decision="abort", instructions=None)
 
     asyncio.run(scenario())
 
@@ -1381,6 +1558,12 @@ def test_findings_list_confirming_a_suggestion_opens_the_inline_chat_prefilled()
 
 
 def test_findings_list_letter_shortcuts_are_no_ops_while_not_parked() -> None:
+    """ "a" has no binding at all anymore (approve was removed for good); "s" is bound again
+    (`action_quick_skip`, a restored global escape hatch alongside "x") but its handler,
+    `FindingsList._quick_decision`, itself no-ops outside a park -- so pressing either
+    outside a park does nothing, same as every other interactive binding here, just via two
+    different mechanisms."""
+
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1395,6 +1578,8 @@ def test_findings_list_letter_shortcuts_are_no_ops_while_not_parked() -> None:
             box = app.query_one(FindingsList)
             box.query_one(_FindingsListView).focus()
 
+            await pilot.press("a")
+            await pilot.pause()
             await pilot.press("s")
             await pilot.pause()
 

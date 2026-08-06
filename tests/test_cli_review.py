@@ -28,8 +28,15 @@ Issue #80's approval park adds a real end-to-end proof against an already-shippe
 guard fires for real, and `_run_review_with_keypresses` (generalizing
 `_run_review_and_press_e_to_exit` to an ordered sequence of keypresses, not just the final
 "e") answers the resulting parked `FindingsBox` (issue #87's inline decision selector,
-superseding the `ApprovalPromptScreen` modal this docstring originally described) with
-"a"/"s"/"x" over a real pty. Once
+superseding the `ApprovalPromptScreen` modal this docstring originally described) over a
+real pty. Its per-finding menu was later simplified to drop approve as a reachable option
+entirely, with no replacement -- every other outcome now goes through either the inline
+chat ("f" jumps to it, typed text plus Enter submits it, always resolving with
+`decision="fix"`) or one of two global, non-listed key bindings: "s" (skip) and "x" (abort).
+Skip was briefly removed alongside approve, then restored once it became clear chat cannot
+resolve every park -- `RebaseStep.run` never reads `ctx.fix_round` at all, so answering its
+issue #24 guard with "fix" just re-parks on the identical finding forever; skip is the one
+non-abort way past that specific park (see `tui/AGENTS.md`'s "Findings box" section). Once
 `ReviewStep`/`TestSufficiencyStep` set `needs_approval` from `has_blocking_finding` (already
 shipped, `steps/review.py`/`steps/test_sufficiency.py`), `test_review_surfaces_a_blocking_
 finding_without_crashing` below changed too: a blocking finding now genuinely parks the run
@@ -423,14 +430,23 @@ def _run_review_with_keypresses(
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Like `_run_review_and_press_e_to_exit`, generalized to send an ordered sequence of
-    `(delay_seconds, key)` pairs -- issue #80's approval park needs a single keypress
-    ("a"/"s"/"x") answered on the parked `FindingsBox` *before* the run reaches its own
-    Status box, unlike
-    every prior full-run test here, which only ever needs the final "e". Each `key` is
-    written directly to the child's stdin after sleeping `delay_seconds` -- the same
-    "generous margin over the run's own real duration, not a tight one" reasoning
-    `_run_review_and_press_e_to_exit` already documents. `final_wait` is the margin before
-    the closing "e".
+    `(delay_seconds, key)` pairs -- issue #80's approval park needs at least one keypress
+    answered on the parked `FindingsBox` *before* the run reaches its own Status box, unlike
+    every prior full-run test here, which only ever needs the final "e". `key` is written
+    directly to the child's stdin after sleeping `delay_seconds`, and need not be a single
+    character -- e.g. resolving via the inline chat's `Input` writes the typed text plus a
+    trailing `"\r"` (Enter, submitting it) as one `key` string. It must NOT also include the
+    "f" that opens the chat in that same string, though: "f" only mounts and focuses the
+    chat's `Input` asynchronously, so text written in the very same `stdin.write()` call can
+    arrive (and be silently dropped, with nothing yet focused to receive it) before that
+    mount has actually happened -- confirmed empirically against this Textual version, not
+    just reasoned about. "f" and the typed text must be two separate tuples, e.g. `(3.0,
+    "f")` then `(0.5, "looks good\r")`, giving the chat a moment to actually open before
+    anything is typed into it. A single `"s"` or `"x"` needs no such split -- each resolves
+    a park directly (skip/abort, the two global bindings besides chat), with no widget to
+    mount or focus first. The same "generous margin over the run's own real duration, not a
+    tight one" reasoning `_run_review_and_press_e_to_exit` already documents applies to
+    every `delay_seconds` here. `final_wait` is the margin before the closing "e".
 
     Unlike `_run_review_and_press_e_to_exit` (a single `time.sleep` immediately followed by
     `communicate()`), this drains `stdout`/`stderr` continuously on background threads for
@@ -548,7 +564,7 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     _assert_no_leftover_code_review_process()
 
 
-def test_review_surfaces_a_blocking_finding_and_approving_both_parks_completes_the_run(
+def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_the_run(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
     """Acceptance criterion 3 from issue #60, updated for issue #80: a blocking ("ask-user")
@@ -557,10 +573,15 @@ def test_review_surfaces_a_blocking_finding_and_approving_both_parks_completes_t
     genuinely parks the run (`BLOCKING_FAKE_CLAUDE`'s own module docstring already
     anticipated this: "both steps report needs_approval=True from this one script", since
     `TestSufficiencyStep` resolves the same fake `claude` on `PATH` and parks a second time
-    right after). Answering both parks with "approve" ("a") lets the run reach its own
-    "Pipeline ran successfully." Status message, proving a blocking finding still does not
-    crash the run -- it now genuinely pauses for a human instead of being silently
-    ignored."""
+    right after). This is no longer proving "approve" as a distinct outcome -- approve was
+    removed for good, with no replacement -- and chat can't stand in for it here either:
+    `BLOCKING_FAKE_CLAUDE` ignores whatever prompt it's given and always answers with the
+    same blocking finding (see its own module docstring), so a "fix" response would just
+    re-park both steps on the identical finding forever. "s" (skip) is the one mechanism
+    left that actually moves past a park like this, so both parks are answered with it here
+    -- proving a blocking finding still does not crash the run, and a human can move past it
+    and reach "Pipeline ran successfully.", the same acceptance criterion the original
+    "approve" version of this test proved before approve was removed."""
 
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(BLOCKING_FAKE_CLAUDE, tmp_path)
@@ -568,7 +589,7 @@ def test_review_surfaces_a_blocking_finding_and_approving_both_parks_completes_t
     result = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
-        keypresses=[(3.0, "a"), (2.0, "a")],
+        keypresses=[(3.0, "s"), (2.0, "s")],
         env=env,
     )
     output = _plain(result.stdout)
@@ -576,7 +597,15 @@ def test_review_surfaces_a_blocking_finding_and_approving_both_parks_completes_t
     assert result.returncode == 0
     assert "Traceback" not in output
     assert "Pipeline ran successfully." in output
-    assert "drops error handling required by the caller's contract" in output
+    # A short fragment, not the full finding text -- `FindingsDescription`'s column is
+    # narrow enough (this sandbox's default 80x24 pty, `_plain`'s regex only stripping SGR
+    # color codes, not cursor-repositioning ones) that the full 54-character description
+    # wraps across two physical terminal lines, splitting the literal substring across a
+    # `\x1b[<row>;<col>H` escape sequence -- confirmed independent of this test's own
+    # keypresses (reproduced identically against the pre-#87-simplification "a"/"a" version
+    # of this test too), so this is a pre-existing environment-dependent fragility in the
+    # assertion itself, not something this change introduced.
+    assert "drops error handling" in output
 
     _assert_no_leftover_code_review_process()
 
@@ -588,10 +617,13 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     repo_with_unpushed_local_default_commits: tuple[Path, str, str],
 ) -> None:
     """This is the ticket's own headline acceptance criterion: a branch whose history
-    includes unpushed local-default commits parks at `RebaseStep` and presents approve/
-    skip/abort through the TUI, instead of silently rebasing as it did before #80. Aborting
-    proves this without needing a fake `claude` on `PATH` -- `ReviewStep`/
-    `TestSufficiencyStep` never run."""
+    includes unpushed local-default commits parks at `RebaseStep` and presents the inline
+    chat/skip/abort decision through the TUI, instead of silently rebasing as it did before
+    #80 (approve is no longer reachable at all, a later simplification -- "chat", the
+    global "s" skip, and the global "x" abort are what's left). Aborting proves this
+    without needing a fake `claude` on `PATH` -- `ReviewStep`/`TestSufficiencyStep` never
+    run; see `test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continues`
+    below for the non-abort path past this same guard."""
 
     repo, branch, unpushed_sha = repo_with_unpushed_local_default_commits
 
@@ -615,17 +647,26 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     _assert_no_leftover_code_review_process()
 
 
-def test_review_choosing_approve_at_the_rebase_park_continues_the_run(
+def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continues(
     repo_with_unpushed_local_default_commits: tuple[Path, str, str],
     tmp_path: Path,
 ) -> None:
+    """Skip is not an error: later steps still run, and the run still finishes cleanly.
+
+    Approve is no longer a reachable outcome from this UI at all (removed for good, with no
+    replacement), and chat can't stand in for it here either: `RebaseStep.run` never reads
+    `ctx.fix_round`, so a "fix" response just re-parks on the identical finding forever (see
+    `tui/AGENTS.md`'s "Findings box" section) -- "s" (skip), restored as a bare global escape
+    hatch alongside "x" (abort) for exactly this kind of park, is the only way past this
+    specific guard short of aborting the whole run."""
+
     repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
     env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
 
     result = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
-        keypresses=[(3.0, "a")],
+        keypresses=[(3.0, "s")],
         env=env,
     )
     output = _plain(result.stdout)
@@ -661,32 +702,6 @@ def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         wait_before_keypress=5.0,  # one extra fake-claude call over the other full-run tests
-        env=env,
-    )
-    output = _plain(result.stdout)
-
-    assert result.returncode == 0
-    assert "Traceback" not in output
-    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep"):
-        assert step_name in output
-    assert "Pipeline ran successfully." in output
-
-    _assert_no_leftover_code_review_process()
-
-
-def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continues(
-    repo_with_unpushed_local_default_commits: tuple[Path, str, str],
-    tmp_path: Path,
-) -> None:
-    """Skip is not an error: later steps still run, and the run still finishes cleanly."""
-
-    repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
-    env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
-
-    result = _run_review_with_keypresses(
-        [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
-        cwd=repo,
-        keypresses=[(3.0, "s")],
         env=env,
     )
     output = _plain(result.stdout)

@@ -157,38 +157,68 @@ alternative of always showing every row's suggestions was explicitly rejected (i
 to avoid clutter when a step has many findings -- #91's rebuild kept this rule unchanged,
 just reimplemented against the new tree.
 
-**No longer display-only (issue #87)**: while a step is parked, `FindingsList.await_decision`
-(awaited by `app.py`'s `_relay_approval`, see below) turns the highlighted row's
-`FindingsSuggestion` into a live decision selector cycling through `[*finding.suggestions,
-"Type something.", "approve", "skip", "abort"]` (`_decision_entries`, `_CUSTOM_ENTRY`/
-`_DECISION_ENTRIES`) — left/right arrow keys move that row's `_decision_cursor` through that
-list (reset to 0 whenever the highlighted finding changes), Enter confirms whatever it's on,
-and single-key "a"/"s"/"x"/"f" shortcuts (`_FindingsListView`'s extra `BINDINGS`, the direct
-successor to the old `_FindingOptionList`'s) jump straight to Approve/Skip/Abort/free-text
-regardless of cursor position — mirroring the removed `ApprovalPromptScreen`'s own bindings,
-so existing muscle memory and most of the pre-#87 approval tests kept working unchanged.
-`render_decision_cycle` renders this list 1-based ("1. rename it", "2. Type something.", …),
-labeling entry 0 " (Recommended)" when it came from the finding's own `suggestions` (styled
-after the Claude Code CLI's own interactive picker), and the four fixed entries
-(`_CUSTOM_ENTRY`/`_DECISION_ENTRIES`) each get a short indented detail line of static UI
-copy (`_ENTRY_DETAILS`) a suggestion's own text doesn't get, since it has no further data to
-split one from. Digit keys "1".."9" (`_FindingsListView`'s `jump_decision(n)` bindings,
-delegating to `FindingsList._jump_decision` → the highlighted `Finding.jump_decision`) jump
+**No longer display-only (issue #87, its menu simplified since)**: while a step is parked,
+`FindingsList.await_decision` (awaited by `app.py`'s `_relay_approval`, see below) turns the
+highlighted row's `FindingsSuggestion` into a live decision selector cycling through
+`[*finding.suggestions, "Chat about it"]` (`_decision_entries`, `_CUSTOM_ENTRY`) — left/right
+arrow keys move that row's `_decision_cursor` through that list (reset to 0 whenever the
+highlighted finding changes), Enter confirms whatever it's on, and digit keys "1".."9"
+(`_FindingsListView`'s `jump_decision(n)` bindings, delegating to
+`FindingsList._jump_decision` → the highlighted `Finding.jump_decision`) jump
 `_decision_cursor` straight to that entry — a no-op if the digit is past the highlighted
 finding's own entry count, since a finding with fewer suggestions than another has a shorter
-list. The decision itself is step-scoped, not per-finding: confirming approve/skip/abort
-from *any* finding's row resolves the one pending park, regardless of which row the cursor
-was browsing — `_decision_cursor` is purely a per-row display aid. Confirming a suggestion
-string or "Type something." is discussion-only (it does not auto-apply anything — issue
-#78's `EditStep`/apply machinery is still out of scope): it mounts `_InlineApprovalChat`, a
-small `Vertical` with a prompt `Static` and an `Input` seeded with that suggestion's text
-(or empty, for "Type something."), submitting which resolves the park with
-`ApprovalResponse(decision="fix", instructions=<what was typed>)` — `_open_chat` is a no-op
-if one is already mounted, so re-entering this path (e.g. an errant second Enter/"f") never
-stacks a second prompt. A `#findings-footer` `Static` beneath the summary line shows
-bound-key copy only while parked, matching this package's "no box, not an empty box"
-instinct applied at the sub-widget level -- no "Esc to cancel" clause, since no such binding
-exists. Outside a park, the box behaves exactly as #88 already shipped: read-only, only the
+list. `render_decision_cycle` renders this list 1-based ("1. rename it", "2. Chat about it",
+…), labeling entry 0 " (Recommended)" when it came from the finding's own `suggestions`
+(styled after the Claude Code CLI's own interactive picker), and the one fixed entry
+(`_CUSTOM_ENTRY`) gets a short indented detail line of static UI copy (`_ENTRY_DETAILS`) a
+suggestion's own text doesn't get, since it has no further data to split one from.
+
+Every entry in this list is discussion-only (it does not auto-apply anything — issue #78's
+`EditStep`/apply machinery is still out of scope): confirming a suggestion or "Chat about it"
+mounts `_InlineApprovalChat`, a small `Vertical` with a prompt `Static` and an `Input` seeded
+with that suggestion's text (or empty, for "Chat about it"), submitting which resolves the
+park with `ApprovalResponse(decision="fix", instructions=<what was typed>)` — `_open_chat` is
+a no-op if one is already mounted, so re-entering this path never stacks a second prompt.
+`_FindingsListView`'s "f" binding (`action_open_chat`) jumps straight to it regardless of
+cursor position, mirroring the removed `ApprovalPromptScreen`'s own "f"; unlike before, the
+decision cursor itself also opens it automatically the moment left/right or a digit key moves
+it *onto* "Chat about it" (`FindingsList._cycle_decision`/`_jump_decision`, not
+`Finding.cycle_decision`/`jump_decision` themselves, which stay pure cursor moves with no
+Textual side effect) — so browsing onto that entry already starts typing, no extra Enter/"f"
+needed. This auto-open is deliberately *not* wired into the plain per-row highlight reset
+path (`on_list_view_highlighted`/`_prime_highlighted`, which calls `reset_decision()`/
+`set_decision()` directly, no cursor-move call at all): a finding with zero suggestions has
+"Chat about it" at cursor 0, and merely arrow-key-browsing between finding rows must never
+yank focus into a chat box — only a deliberate intra-row cursor move does that.
+
+Approve/skip/abort used to also live in `_decision_entries` as three more fixed cycle-through
+entries (`_DECISION_ENTRIES`), each resolving the park directly with no chat step, with
+matching single-key "a"/"s"/"x"/"f" shortcuts on `_FindingsListView` mirroring
+`ApprovalPromptScreen`'s own. That menu was later simplified once the product call landed
+that a human can just describe what they want in the chat instead — every decision that
+reaches this box now resolves via that same chat mechanism (`decision="fix"`), with no
+separate intent-parsing needed for the common case. Approve is no longer reachable from this
+UI at all, in any form — it was removed for good, with no replacement. Skip and abort each
+survive, kept as separate global controls rather than listed per-finding options:
+`_FindingsListView`'s "s"/"x" bindings (`action_quick_skip`/`action_quick_abort` →
+`FindingsList._quick_decision("skip"/"abort")`) still resolve the park directly, unchanged,
+since both are step-level decisions with no discussion step of their own. Skip's binding was
+briefly removed alongside approve/skip's per-finding menu entries, then restored as a bare
+escape hatch once it became clear the chat mechanism cannot resolve every park: a step whose
+own `run` ignores `ctx.fix_round` entirely (`steps/rebase.py`'s issue #24 guard is exactly
+this — see `pipeline/executor.py`'s "The approval park" section for why `decision="fix"`
+unconditionally re-runs the *same* step rather than advancing) re-parks on the identical
+finding no matter what a human types, so without skip the only way past that specific park
+would be abort. Approve never had an equivalent need — a step already completes and advances
+on its own without a human approving it, so there was nothing left for that key to do once
+its listed menu entry was removed. The decision itself stays step-scoped, not per-finding
+either way: confirming the chat, skipping, or aborting from *any* finding's row resolves the
+one pending park, regardless of which row the cursor was browsing — `_decision_cursor` is
+purely a per-row display aid. A `#findings-footer` `Static` beneath the summary line shows
+bound-key copy ("Enter to confirm, left/right or 1-9 browse options, f to chat, s to skip, x
+to abort") only while parked, matching this package's "no box, not an empty box" instinct
+applied at the sub-widget level -- no "Esc to cancel" clause, since no such binding exists.
+Outside a park, the box behaves exactly as #88 already shipped: read-only, only the
 highlighted finding's suggestions shown, no key does anything.
 
 `FindingsList.update_findings` is called on every one of `app.py`'s periodic render ticks
@@ -255,7 +285,10 @@ sized child left) takes the whole row -- the same "no box, not an empty box" ins
 `display: block` and draws a full `border` around the column (issue #92's "box around
 `FindingsSuggestion` so it reads as its own widget") -- replacing #91's `border-right` on
 `FindingsDescription`, which drew a single divider line on every row regardless of whether
-there was anything on the right to divide from.
+there was anything on the right to divide from. `FindingsSuggestion.border_title =
+"Suggestion"` is set directly in `__init__`, the same mechanism `PipelineBox`/`FindingsList`/
+`StatusBox` already use -- it only actually renders once `-visible` has added the border, so
+it costs nothing while hidden.
 
 ## The `ActivityRelay` seam (issue #66)
 
@@ -393,7 +426,20 @@ fill the pty's output buffer and block the child's single-threaded event loop, i
 own stdin-reading task) -- see that helper's own docstring. The real-pty test's "a"/"s"/"x"
 keypresses kept working unchanged across #87's rewrite (and again across #91's widget-tree
 rebuild) -- `_FindingsListView` binds the same letters, just against `FindingsList` instead
-of a modal.
+of a modal. Once the per-finding menu was later simplified to drop approve/skip as *listed*
+entries (only "Chat about it" survives there), that same test's "a" keypress stopped
+resolving anything at all -- approve has no replacement, so any scenario proving "approve
+continues the run" was retired outright, not rewritten. "s" (skip) kept working unchanged:
+it was briefly removed alongside the listed menu entries, then restored as a bare global
+escape hatch (matching "x"/abort's own treatment) the moment it became clear the chat
+mechanism cannot resolve every park -- `steps/rebase.py`'s issue #24 guard is the concrete
+case that proved it: `RebaseStep.run` never reads `ctx.fix_round`, so a human's "fix"
+response there just re-parks on the identical finding forever (see the Findings box section
+above for why), leaving skip as the only way past that specific park short of aborting.
+`tests/test_cli_review.py` reflects this exactly: the rebase-park test still answers with
+"s", the two-park blocking-finding test was rewritten to answer both parks with "s" instead
+of the "a" it used before (that fake `claude` also ignores what it's asked to fix, so chat
+cannot resolve it either), and "x" (abort) needed no change throughout.
 
 ## The "fix" response and the inline chat widget (issue #81, reworked by #87)
 
