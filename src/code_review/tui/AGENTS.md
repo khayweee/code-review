@@ -102,7 +102,7 @@ proven against a fake CLI subprocess in `tests/agent/test_claude_cli.py` — but
 not been exercised together against a real `claude` CLI process that actually blocks on
 stdin waiting for a permission answer. See `agent/AGENTS.md`'s matching note.
 
-## The Findings box (issue #42, widened for #61 and #87, rebuilt as a widget tree by #91)
+## The Findings box (issue #42, widened for #61 and #87, rebuilt as a widget tree by #91, per-finding decisions by #98)
 
 `FindingsList` (`widgets.py`) replaced the original `FindingsBox` (a single `OptionList` of
 Rich-rendered options) with a true Textual widget-composition tree: `FindingsList` (a
@@ -205,29 +205,84 @@ that a human can just describe what they want in the chat instead — every deci
 reaches this box now resolves via that same chat mechanism (`decision="fix"`), with no
 separate intent-parsing needed for the common case. Approve is no longer reachable from this
 UI at all, in any form — it was removed for good, with no replacement. Skip and abort each
-survive, kept as separate global controls rather than listed per-finding options:
-`_FindingsListView`'s "s"/"x" bindings (`action_quick_skip`/`action_quick_abort` →
-`FindingsList._quick_decision("skip"/"abort")`) still resolve the park directly, unchanged,
-since both are step-level decisions with no discussion step of their own. Skip's binding was
-briefly removed alongside approve/skip's per-finding menu entries, then restored as a bare
-escape hatch once it became clear the chat mechanism cannot resolve every park: a step whose
-own `run` ignores `ctx.fix_round` entirely (`steps/rebase.py`'s issue #24 guard is exactly
-this — see `pipeline/executor.py`'s "The approval park" section for why `decision="fix"`
-unconditionally re-runs the *same* step rather than advancing) re-parks on the identical
-finding no matter what a human types, so without skip the only way past that specific park
-would be abort. Approve never had an equivalent need — a step already completes and advances
-on its own without a human approving it, so there was nothing left for that key to do once
-its listed menu entry was removed. The decision itself stays step-scoped, not per-finding
-either way: confirming the chat, skipping, or aborting from *any* finding's row resolves the
-one pending park, regardless of which row the cursor was browsing — `_decision_cursor` is
-purely a per-row display aid. A `#findings-footer` `Static` beneath the summary line shows
-bound-key copy ("Enter to confirm, left/right or 1-9 browse options, f to chat, s to skip, x
-to abort") only while parked, matching this package's "no box, not an empty box" instinct
-applied at the sub-widget level -- the footer's own copy has no "Esc to cancel" clause since
-it only lists the ways to *resolve* the park, not `_FindingsListView`'s "escape" binding
-below (issue #95), which cancels the open chat without resolving anything.
+survive as `_FindingsListView`'s own "s"/"x" bindings (`action_quick_skip`/
+`action_quick_abort` → `FindingsList._quick_decision("skip"/"abort")`) rather than listed
+per-finding menu entries. At this point in the history (before issue #98, below) both were
+still step-level, park-resolving controls, exactly like the removed approve entry: pressing
+either from *any* row resolved the one pending park immediately, regardless of which row the
+cursor was browsing. Skip's binding was briefly removed alongside approve/skip's per-finding
+menu entries, then restored as a bare escape hatch once it became clear the chat mechanism
+cannot resolve every park: a step whose own `run` ignores `ctx.fix_round` entirely
+(`steps/rebase.py`'s issue #24 guard is exactly this — see `pipeline/executor.py`'s "The
+approval park" section for why `decision="fix"` unconditionally re-runs the *same* step
+rather than advancing) re-parks on the identical finding no matter what a human types, so
+without skip the only way past that specific park would be abort. Approve never had an
+equivalent need — a step already completes and advances on its own without a human approving
+it, so there was nothing left for that key to do once its listed menu entry was removed. A
+`#findings-footer` `Static` beneath the summary line shows bound-key copy only while parked,
+matching this package's "no box, not an empty box" instinct applied at the sub-widget level
+-- the footer's own copy has no "Esc to cancel" clause since it only lists the ways to
+*resolve* the park, not `_FindingsListView`'s "escape" binding below (issue #95), which
+cancels the open chat without resolving anything.
 Outside a park, the box behaves exactly as #88 already shipped: read-only, only the
 highlighted finding's suggestions shown, no key does anything.
+
+**Per-finding decisions, not step-scoped (issue #98)**: the paragraph above describes the
+park as resolving from *any* row's chat/skip — that was true through issue #92, but the
+product complaint it left unaddressed was concrete: a step with several findings could only
+ever have its *first*-confirmed row's decision actually count, since confirming it ended the
+whole park before a human could look at or act on the step's other findings. Issue #98
+reworks this: `Finding` (`widgets.py`) gains its own per-row decision state
+(`_row_decision`, `record_decision`/`clear_decision`/`is_decided`) alongside its existing
+`_decision_cursor` — undecided, or the `ApprovalResponse` ("fix" with typed instructions, or
+"skip") a human confirmed for that row specifically. Confirming the highlighted row's chat
+(`FindingsList._resolve_chat`) or pressing "s" (`_quick_decision("skip")`) now goes through a
+shared `_record_decision`: it records the response onto *that row alone*, then either
+resolves the whole park — via `_resolve_park`, once every row in `self._rows` has a decision
+— or leaves the park open and moves the highlighted cursor on to the next undecided row
+(`_advance_to_next_undecided`, searching forward and wrapping, reusing
+`on_list_view_highlighted`'s existing reset-cursor/`set_decision()` plumbing by just moving
+`_FindingsListView.index` rather than duplicating it). A human can revisit and reconfirm an
+already-decided row at any time (plain up/down browsing was already unrestricted) — this
+falls out for free from `_row_decision` being ordinary mutable state, not a one-shot flag.
+`_resolve_park` aggregates every `"fix"`-decided row's instructions via a new
+`pipeline.findings.describe_finding_decisions` (a sibling of that module's existing
+`describe_auto_fix_findings`, reusing its exact `"- [severity] description (location)"`
+rendering convention, with a trailing `": <instructions>"`) into the one `ApprovalResponse`
+that finally resolves `self._pending`; if every row chose "skip" instead, it resolves
+`decision="skip"` exactly as the pre-#98 step-level skip did. `ApprovalResponse`/`FixRound`
+themselves are untouched — both remain a single flat `instructions: str | None` — since both
+of their real consumers (`steps/review.py`, `steps/test_sufficiency.py`) already flatten
+`instructions` into one prompt blob regardless of internal structure, so a typed per-finding
+field would just get flattened straight back in the same two places (see the design
+discussion linked from issue #98's own body). A park with exactly one row (e.g.
+`steps/rebase.py`'s issue #24 guard, which always emits exactly one `Finding`) is a
+deliberate special case in `_resolve_park`: it resolves on that row's very first decision
+with that row's own `ApprovalResponse` passed straight through, completely unwrapped, rather
+than routed through `describe_finding_decisions` — reproducing this box's pre-#98
+immediate-resolve behavior byte for byte, since there is only one finding and nothing for a
+combined, per-finding-attributed instructions blob to usefully distinguish. Abort ("x") is
+the one binding issue #98 deliberately left alone: it still resolves `self._pending`
+directly and immediately from `_quick_decision`, regardless of how many rows already have a
+decision — "abort one finding" has no coherent meaning (a human would just skip that finding
+instead), and abort's semantics (raise `RunAbortedError`, stop the whole run) are inherently
+run-level already, not something a per-finding rework changes. The footer hint text was
+reworded for the new Enter/"s" semantics ("Enter to confirm this finding", "s to skip this
+finding") and now appends a live "N/M decided" progress count, recomputed by
+`_set_footer_hint` on every recorded decision (not just at park start/end) from
+`Finding.is_decided()` across `self._rows`. Since `FindingsSuggestion` only ever shows for
+the highlighted row (issue #88, unchanged), a decided-but-not-highlighted row's marker would
+otherwise be invisible — `render_description` (`FindingsDescription`'s content, visible on
+every row regardless of highlight) gained an optional `decision` parameter that prefixes a
+small `✔`/`⏭` marker (reusing `_STATUS_ICONS`'s existing "completed"/"skipped" glyphs, not
+new ones) when that row is "fix"/"skip"-decided while parked, defaulting to `None` so every
+pre-#98 non-parked call site renders byte-for-byte unchanged. `Finding.record_decision`/
+`clear_decision` both re-render this marker immediately via a new `_render_description`
+helper (mirroring `_render_suggestion`'s own `NoMatches`-guard pattern for a row that hasn't
+composed yet), and `await_decision` now resets every row's decision back to undecided
+(`Finding.clear_decision`, called for every row in `self._rows`) at the very start of each
+park — a fix-round's re-park on the same step must never carry over the previous round's
+per-row decisions onto a fresh one.
 
 **Escape cancels an open chat without resolving the park (issue #95)**: `_FindingsListView`'s
 `Binding("escape", "close_chat", ...)` reaches the highlighted row's live `Input` the same way
@@ -538,6 +593,15 @@ above for why), leaving skip as the only way past that specific park short of ab
 of the "a" it used before (that fake `claude` also ignores what it's asked to fix, so chat
 cannot resolve it either), and "x" (abort) needed no change throughout.
 
+Issue #98's per-finding rework (see the Findings box section above) needed no changes to
+any of these real-pty scenarios either: every park they drive is a single-`Finding` park
+(`steps/rebase.py`'s issue #24 guard and `BLOCKING_FAKE_CLAUDE`'s fixed one-finding answer
+both only ever emit one `Finding`), which is exactly `FindingsList._resolve_park`'s
+deliberate single-row special case -- one row, one decision, immediate resolve, with that
+row's own `ApprovalResponse` passed straight through unwrapped. "s" recording a per-row
+decision and "x" staying a whole-run action are indistinguishable from their pre-#98
+step-scoped behavior when there is only one row to ever decide.
+
 ## The "fix" response and the inline chat widget (issue #81, reworked by #87, relocated by #92)
 
 The fourth park response, "fix" (`pipeline.step.ApprovalDecision`/`ApprovalResponse`,
@@ -555,11 +619,13 @@ from the decision cycle described above -- and is still a no-op if one is alread
 re-entering this path never stacks a second `Input`. Submitting it (`Input.Submitted`,
 handled by `FindingsList.on_input_submitted` -- Textual messages bubble up the DOM regardless
 of how deep the `Input` lives in the row tree, so the handler works the same whether it's a
-sibling or nested three levels down) resolves the pending park with
-`ApprovalResponse(decision="fix", instructions=<what was typed>)`; every other decision
-resolves with `instructions=None`. `InputPromptScreen` itself is untouched and still exists,
-just no longer used by this seam -- it remains the unrelated `InputRelay` seam's own modal
-(issue #41).
+sibling or nested three levels down) records `ApprovalResponse(decision="fix",
+instructions=<what was typed>)` against the highlighted row specifically (issue #98 -- see
+the Findings box section above for the full per-finding model this superseded); the pending
+park itself only actually resolves once every row has a decision, at which point every
+`"fix"`-decided row's instructions are combined into one final `ApprovalResponse`.
+`InputPromptScreen` itself is untouched and still exists, just no longer used by this seam --
+it remains the unrelated `InputRelay` seam's own modal (issue #41).
 
 Because each fix-round re-run gets its own fresh "running"/"completed" `StepEvent` pair
 (`pipeline/executor.py`'s own design, see that module's AGENTS.md), the Findings box shows

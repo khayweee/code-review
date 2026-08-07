@@ -2,7 +2,11 @@
 deterministic pipeline-owned-delivery scope filter -- Milestone 5 (schema, issue #26).
 Milestone 7's fix-round mechanism (issue #81) adds one more pure helper here,
 `describe_auto_fix_findings` -- see its own docstring; the fix/approval state machine
-itself (the round loop, the park) lives in `pipeline/executor.py`, not this module.
+itself (the round loop, the park) lives in `pipeline/executor.py`, not this module. Issue
+#98 adds a sibling pure helper, `describe_finding_decisions`, for `tui.widgets.
+FindingsList`'s per-finding approval-park aggregation -- see its own docstring for how it
+reuses `describe_auto_fix_findings`'s exact rendering convention for a related but distinct
+purpose (a human's own typed instructions per finding, not the automatic auto-fix path).
 
 `Finding` is a pydantic `BaseModel`, not this repo's usual frozen/slotted dataclass (see
 `steps/intent.py`'s `Intent`), because it is passed as `RunOpts.output_schema` to an
@@ -49,6 +53,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
+
+# A top-level (not `TYPE_CHECKING`-gated) import, unlike `ReviewOutput` below -- both
+# `findings.py` and `step.py` live in `pipeline/`, and `step.py` itself never imports
+# `findings.py`, so there is no cycle to avoid the way there is with `steps/review.py`'s
+# `ReviewOutput`. Consumed by `describe_finding_decisions` (issue #98) below.
+from code_review.pipeline.step import ApprovalResponse
 
 if TYPE_CHECKING:
     # Import-direction note: `steps/` depends on `pipeline/`, never the reverse (see root
@@ -253,5 +263,52 @@ def describe_auto_fix_findings(findings: object) -> str:
             continue
         location = f" ({finding.location})" if finding.location else ""
         lines.append(f"- [{finding.severity}] {finding.description}{location}")
+
+    return "\n".join(lines)
+
+
+# --- describe_finding_decisions (issue #98) -----------------------------------------------
+
+
+def describe_finding_decisions(decisions: list[tuple[Finding, ApprovalResponse]]) -> str:
+    """Render every `"fix"`-decided finding in `decisions` as one line of combined
+    fix-round instructions text (`pipeline.step.ApprovalResponse.instructions`), for
+    `tui.widgets.FindingsList`'s per-finding approval-park aggregation (issue #98,
+    extending issue #87's original step-scoped park): once every row in a park has its own
+    decision, `FindingsList._resolve_park` combines them into the single `ApprovalResponse`
+    that actually resolves the park, and this is the pure function that builds that combined
+    text -- see that method's own docstring for the full model, including why a single-row
+    park bypasses this function entirely and resolves with that row's own `ApprovalResponse`
+    unwrapped instead.
+
+    `decisions` is every decided row as a `(Finding, ApprovalResponse)` pair -- both
+    `"fix"`- and `"skip"`-decided rows are accepted, the caller need not pre-filter,
+    mirroring `describe_auto_fix_findings`'s own "accept the whole list, filter inside"
+    shape above. A `"skip"`-decided finding contributes no line, the same way
+    `describe_auto_fix_findings` already omits a finding whose action does not resolve to
+    `"auto-fix"` -- skipping a finding means "don't act on it", so there is nothing to
+    render for it here either.
+
+    One line per `"fix"`-decided finding, in `decisions`' own order:
+    `"- [severity] description (location): <human's instructions>"`, reusing
+    `describe_auto_fix_findings`'s exact `"- [severity] description (location)"` prefix (the
+    `(location)` suffix omitted when `Finding.location` is `None`, same as there) with a
+    trailing `": <instructions>"` naming what the human actually typed for that finding.
+    `ApprovalResponse.instructions` is typed `str | None` generally, but every `"fix"`-
+    decided response `tui.widgets.Finding.record_decision`'s two callers
+    (`FindingsList._resolve_chat`/`_quick_decision`) ever build always sets it to at least
+    `""` -- rendered as an empty instructions suffix rather than raising if `None` ever
+    reaches here regardless, matching this module's "no exceptions on data outside its
+    documented shape" style elsewhere (e.g. `describe_auto_fix_findings`'s own unrecognized-
+    shape fallback).
+    """
+
+    lines = []
+    for finding, response in decisions:
+        if response.decision != "fix":
+            continue
+        location = f" ({finding.location})" if finding.location else ""
+        instructions = response.instructions or ""
+        lines.append(f"- [{finding.severity}] {finding.description}{location}: {instructions}")
 
     return "\n".join(lines)
