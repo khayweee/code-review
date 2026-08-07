@@ -107,13 +107,15 @@ stdin waiting for a permission answer. See `agent/AGENTS.md`'s matching note.
 `FindingsList` (`widgets.py`) replaced the original `FindingsBox` (a single `OptionList` of
 Rich-rendered options) with a true Textual widget-composition tree: `FindingsList` (a
 `Vertical`, not a `_BorderedBox`/`Static` subclass like `PipelineBox`/`StatusBox` — it needs
-to host a child `_FindingsListView`, a summary `Static`, a footer-hint `Static`, and, while
-parked, an inline chat widget too, none of which a plain `Static` can host) hosts a private
-`_FindingsListView(ListView)`, which hosts one `Finding(ListItem)` widget per finding, each
-composing `FindingsDescription(Static)` (severity dot, description, location, in a left
-column with a `border-right` vertical-rule divider) and `FindingsSuggestion(Static)` (that
-finding's suggestions or, while parked and highlighted, its live decision cycle, in a right
-column) in a horizontal split. `ListView(can_focus=True, can_focus_children=False)`: the
+to host a child `_FindingsListView`, a summary `Static`, and a footer-hint `Static`, none of
+which a plain `Static` can host) hosts a private `_FindingsListView(ListView)`, which hosts
+one `Finding(ListItem)` widget per finding, each composing `FindingsDescription(Static)`
+(severity dot, description, location, in a left column) and `FindingsSuggestion` (that
+finding's suggestions or, while parked and highlighted, its live decision cycle -- including,
+while a human is actively chatting, a live `Input` in place of that cycle's trailing entry,
+issue #92, see below -- in a right column, drawing its own full border when visible rather
+than a `border-right` divider on `FindingsDescription`) in a horizontal split.
+`ListView(can_focus=True, can_focus_children=False)`: the
 `ListView` itself holds keyboard focus, its `ListItem` children can never be individually
 focused, and it assumes every mounted child is a `ListItem` (`action_cursor_up/down`,
 `watch_index`, `highlighted_child` all index/assert against `self._nodes` unfiltered) — so
@@ -175,11 +177,15 @@ suggestion's own text doesn't get, since it has no further data to split one fro
 
 Every entry in this list is discussion-only (it does not auto-apply anything — issue #78's
 `EditStep`/apply machinery is still out of scope): confirming a suggestion or "Chat about it"
-mounts `_InlineApprovalChat`, a small `Vertical` with a prompt `Static` and an `Input` seeded
-with that suggestion's text (or empty, for "Chat about it"), submitting which resolves the
+opens a chat -- as of issue #92, a live `Input` rendered in place inside the highlighted
+row's own `FindingsSuggestion`, seeded with that suggestion's text (or empty, for "Chat about
+it"), rather than issue #87's original `_InlineApprovalChat` (a small `Vertical` mounted as a
+*sibling* of `_FindingsListView`, below the whole box) -- see the "in place, not a sibling"
+section below for the full rationale and mechanics of that move. Submitting it resolves the
 park with `ApprovalResponse(decision="fix", instructions=<what was typed>)` — `_open_chat` is
-a no-op if one is already mounted, so re-entering this path never stacks a second prompt.
-`_FindingsListView`'s "f" binding (`action_open_chat`) jumps straight to it regardless of
+a no-op if one is already mounted, so re-entering this path never stacks a second `Input` or
+resets one already in progress. `_FindingsListView`'s "f" binding (`action_open_chat`) jumps
+straight to it regardless of
 cursor position, mirroring the removed `ApprovalPromptScreen`'s own "f"; unlike before, the
 decision cursor itself also opens it automatically the moment left/right or a digit key moves
 it *onto* "Chat about it" (`FindingsList._cycle_decision`/`_jump_decision`, not
@@ -234,12 +240,15 @@ non-async `_render()`) can run before that happens; re-deriving from `.children`
 moment undercounts `self._rows` and mounts duplicate `Finding` widgets for rows that already
 exist, just not yet flushed (confirmed empirically against this Textual version, not just
 reasoned about). Given `self._rows`, the common case (finding count unchanged) updates every
-existing row in place via `Finding.update_finding` -- touching no DOM structure at all, so
-`_FindingsListView.index`, every row's own `_decision_cursor`/`_mode`, and any mounted
-`_InlineApprovalChat` (a sibling of `_FindingsListView`, untouched by this method regardless)
-all survive completely untouched; a same-length redundant tick, the common case given
-`app.py`'s 0.25s timer, now touches nothing at all. Only the finding count actually growing
-or shrinking mounts or removes rows, and only the ones beyond the overlap with the old list
+existing row in place via `Finding.update_finding` -- touching no DOM structure at the
+`_FindingsListView` level at all, so `_FindingsListView.index` and every row's own
+`_decision_cursor`/`_mode` survive completely untouched. As of issue #92, `Finding.
+update_finding` *does* still reach every row's own `FindingsSuggestion.show_decision` on
+each such tick, including one with a live chat `Input` mounted (that `Input` is no longer a
+sibling this method simply never touches -- see the "chat moved in place" section below);
+`show_decision` is what keeps an already-open `Input`, and whatever a human has typed into
+it, completely untouched across a same-cursor re-render. Only the finding count actually
+growing or shrinking mounts or removes rows, and only the ones beyond the overlap with the old list
 -- every retained row, including the highlighted one, is still updated in place first. This
 reconciles the overlap/tail directly rather than `_FindingsListView.clear()` followed by
 `.extend(...)` (the more obvious-looking "rebuild" shape) for a second, independent reason:
@@ -289,6 +298,56 @@ there was anything on the right to divide from. `FindingsSuggestion.border_title
 "Suggestion"` is set directly in `__init__`, the same mechanism `PipelineBox`/`FindingsList`/
 `StatusBox` already use -- it only actually renders once `-visible` has added the border, so
 it costs nothing while hidden.
+
+**The chat moved in place, inside `FindingsSuggestion`'s own box (issue #92, second half)**,
+superseding issue #87's `_InlineApprovalChat` -- a small `Vertical` (prompt `Static` +
+`Input`) `FindingsList` used to mount as a *sibling* of `_FindingsListView`, appearing as its
+own box below the whole Findings box the instant a human confirmed a suggestion or "Chat
+about it". That placement read as a second, disconnected box rather than part of the
+finding it was answering, and — once #92's own matched-`1fr`-column/border change (above)
+gave `FindingsSuggestion` a real bordered identity of its own — visually competed with it
+instead of living inside it. `_InlineApprovalChat` is gone entirely now: `FindingsSuggestion`
+itself (a `Vertical` composing two `Static`s, `_entries` for every decision-cycle entry
+before the trailing `_CUSTOM_ENTRY` and `_custom` for that entry's own line) hosts the live
+`Input` directly, swapped in for `_custom` the moment a human opens the chat
+(`FindingsSuggestion.ensure_input`) and swapped back out the moment the row leaves decision
+mode (`show_plain`/`clear`, via `_remove_input`). "Chat about it" is no longer a separate
+prompt `Static` above the `Input` either — issue #87's original `"What should this step do?"`
+prompt line is gone too, replaced by that same string as the `Input`'s own `placeholder`,
+shown only while it's empty (`_CUSTOM_ENTRY`'s literal text doing double duty as both the
+decision-cycle entry's label and the empty-input hint once it becomes live).
+
+The load-bearing correctness requirement of this move: `_CUSTOM_ENTRY` is the one decision-
+cycle entry `FindingsSuggestion` renders every time `update_findings`' periodic tick reaches
+this row (`Finding.update_finding` → `_render_suggestion` → `show_decision`, unconditionally,
+redundant tick or not — see `update_findings`' own docstring), so a naive "always render
+fresh" implementation would reconstruct the `Input` on every single tick, discarding whatever
+a human has typed into it so far. `_InlineApprovalChat` never had this problem, since it was
+a sibling `update_findings` never touched at all. `show_decision` solves it the same way
+`update_findings` itself already solves the analogous problem for `_FindingsListView.index`
+one level up: it only creates the `Input` on a genuine mode/cursor transition onto
+`_CUSTOM_ENTRY` (via the explicit `ensure_input` call `Finding.open_chat` makes, never as a
+side effect of merely rendering), and otherwise -- cursor still on `_CUSTOM_ENTRY`, `Input`
+already mounted -- leaves it completely alone, value and focus untouched.
+`test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redundant_tick`
+(`tests/tui/test_widgets.py`) is the regression test proving this, strengthened by #92 to
+assert the `Input` lives inside the highlighted row's own `FindingsSuggestion` specifically,
+not merely "somewhere in the box" the way the pre-#92 version of that same test could only
+prove for a sibling widget.
+
+Opening the chat (`FindingsList._open_chat` → `Finding.open_chat` → `FindingsSuggestion.
+ensure_input`) always moves the row's `_decision_cursor` to `_CUSTOM_ENTRY` first (the only
+entry `FindingsSuggestion` can turn into a live `Input`), even when the confirmed entry was a
+plain suggestion -- so confirming suggestion 1 of 2 seeds the `Input` with that suggestion's
+own text but the visible cursor marker moves to the trailing entry along with it, since that
+is now where the editable text actually lives. This is a deliberate behavior change from
+#87's sibling-widget design, where confirming a suggestion left the row's own cursor marker
+exactly where it was and opened the chat entirely independently, elsewhere on screen; #92's
+in-place design has nowhere else for that live text to go. Auto-focus semantics from #87 are
+otherwise unchanged: `FindingsList._open_chat` focuses whatever `Input` `Finding.open_chat`
+returns, exactly the same "cursor landing on `_CUSTOM_ENTRY` via a deliberate cycle/jump/
+confirm/'f' focuses the chat, merely browsing between rows never does" split described above
+still holds, just re-implemented against the new location.
 
 ## The `ActivityRelay` seam (issue #66)
 
@@ -441,20 +500,27 @@ above for why), leaving skip as the only way past that specific park short of ab
 of the "a" it used before (that fake `claude` also ignores what it's asked to fix, so chat
 cannot resolve it either), and "x" (abort) needed no change throughout.
 
-## The "fix" response and the inline chat widget (issue #81, reworked by #87)
+## The "fix" response and the inline chat widget (issue #81, reworked by #87, relocated by #92)
 
 The fourth park response, "fix" (`pipeline.step.ApprovalDecision`/`ApprovalResponse`,
 defined in `pipeline/step.py`), originally collected free-text instructions via a second
 modal (`InputPromptScreen`) pushed right after `ApprovalPromptScreen` dismissed with "fix".
-Issue #87 replaced that two-modal round-trip with `widgets._InlineApprovalChat`: a small
-`Vertical` (prompt `Static` + `Input`) `FindingsList` mounts on demand -- when a human
-confirms a suggestion string (seeded with that suggestion's own text) or "Type something."
-(seeded empty) from the decision cycle described above. `_open_chat` is a no-op if one is
-already mounted, so re-entering this path never stacks a second prompt. Submitting it
-resolves the pending park with `ApprovalResponse(decision="fix", instructions=<what was
-typed>)`, then the widget removes itself; every other decision resolves with
-`instructions=None`. `InputPromptScreen` itself is untouched and still exists, just no
-longer used by this seam -- it remains the unrelated `InputRelay` seam's own modal
+Issue #87 replaced that two-modal round-trip with `widgets._InlineApprovalChat`, a small
+`Vertical` (prompt `Static` + `Input`) `FindingsList` mounted as a sibling of
+`_FindingsListView` on demand; issue #92 relocated that same live `Input` in place, inside
+the highlighted row's own `FindingsSuggestion` column, and removed `_InlineApprovalChat`
+entirely -- see the "Findings box" section above for the full mechanics and rationale of
+that move. `FindingsList._open_chat` (via `Finding.open_chat` →
+`FindingsSuggestion.ensure_input`) still mounts it on demand -- when a human confirms a
+suggestion string (seeded with that suggestion's own text) or `_CUSTOM_ENTRY` (seeded empty)
+from the decision cycle described above -- and is still a no-op if one is already mounted, so
+re-entering this path never stacks a second `Input`. Submitting it (`Input.Submitted`,
+handled by `FindingsList.on_input_submitted` -- Textual messages bubble up the DOM regardless
+of how deep the `Input` lives in the row tree, so the handler works the same whether it's a
+sibling or nested three levels down) resolves the pending park with
+`ApprovalResponse(decision="fix", instructions=<what was typed>)`; every other decision
+resolves with `instructions=None`. `InputPromptScreen` itself is untouched and still exists,
+just no longer used by this seam -- it remains the unrelated `InputRelay` seam's own modal
 (issue #41).
 
 Because each fix-round re-run gets its own fresh "running"/"completed" `StepEvent` pair
