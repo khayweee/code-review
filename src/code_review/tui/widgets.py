@@ -3,14 +3,17 @@
 The Findings box (issue #42, widened for #61/#87, rebuilt as a widget tree by #91): the
 most recently completed step's `ReviewOutput`, `TestSufficiencyOutput`, or bare
 `list[Finding]`, one `Finding` row per finding plus a severity-count summary -- and, while
-a step is parked (issue #87), a live inline decision selector replacing the old
-`ApprovalPromptScreen` modal: each finding's own `suggestions` plus a single "Chat about
-it" entry that opens a free-text chat, always resolving with `decision="fix"`. Approve is
-no longer a reachable per-finding menu entry (issue #87 later simplified this -- just
-describe what you want in the chat instead); skip and abort survive as separate, global
-"s"/"x" key bindings, not listed options -- skip is a bare escape hatch for a park chatting
-genuinely cannot resolve (e.g. a step that ignores the chat's `fix_round` instructions
-entirely), and abort stops the run outright.
+a step is parked (issue #87, reworked per-finding by #98), a live inline decision selector
+replacing the old `ApprovalPromptScreen` modal: each finding's own `suggestions` plus a
+single "Chat about it" entry that opens a free-text chat, always recording "fix" for
+whichever row is highlighted. Approve is no longer a reachable per-finding menu entry
+(issue #87 later simplified this -- just describe what you want in the chat instead).
+Skip ("s") records "skip" for the highlighted row the same per-row way (issue #98 -- see
+`FindingsList.await_decision`'s docstring); the park itself only resolves once every row
+has a decision, aggregating them into one `ApprovalResponse`. Abort ("x") is the one
+binding that stays a separate, global, step-scoped control -- it stops the whole run
+outright regardless of how many rows are already decided, since "abort one finding" has no
+coherent meaning (a human would just skip that finding instead).
 
 Every widget here takes the data it displays as plain data (`StepRow`s for `PipelineBox`,
 a `ReviewOutput`/`TestSufficiencyOutput`/`list[Finding]` for `FindingsList`, see
@@ -40,6 +43,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Input, ListItem, ListView, Static
 
 from code_review.pipeline.findings import Finding as FindingData
+from code_review.pipeline.findings import describe_finding_decisions
 from code_review.pipeline.step import ApprovalDecision, ApprovalResponse
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
@@ -47,21 +51,24 @@ from code_review.tui.state import ActivityRow, Status, StepRow
 
 # `FindingsList`'s per-finding decision cycle (issue #87, kept by #91, simplified to drop
 # the fixed approve/skip/abort entries below), appended after that finding's own
-# `suggestions` -- shared by every finding row, since a park is step-scoped, not per-finding
-# (see `FindingsList.await_decision`'s docstring). A plain string, not an `ApprovalDecision`
-# value, because "Chat about it" is not itself a decision -- it opens the inline chat widget
-# rather than resolving anything on its own; confirming it (or a suggestion) always resolves
-# with `decision="fix"`, whatever the human types being the `instructions`. Rendered as the
-# numbered list's trailing free-text option (see `render_decision_cycle`), after every
-# suggestion. Approve/skip/abort used to be listed here too (three more fixed entries,
-# resolving the park directly with no chat involved) -- removed once the product call landed
-# that a human can just describe what they want in the chat instead, with no separate
-# intent-parsing needed for the common case. Skip and abort each survive as
-# `_FindingsListView`'s own global "s"/"x" bindings instead (`action_quick_skip`/
-# `action_quick_abort`), not per-finding menu entries -- skip is a bare escape hatch kept
-# for parks the chat genuinely cannot resolve (e.g. a step that ignores the chat's
-# `fix_round` instructions entirely -- `tui/AGENTS.md`'s "Findings box" section has a real
-# example); approve has no such escape hatch and is gone for good.
+# `suggestions` -- shared by every finding row, each row cycling through its own copy of
+# this list independently (see `FindingsList.await_decision`'s docstring for the per-row
+# decision model issue #98 introduced). A plain string, not an `ApprovalDecision` value,
+# because "Chat about it" is not itself a decision -- it opens the inline chat widget
+# rather than recording anything on its own; confirming it (or a suggestion) always records
+# "fix" for the row it was confirmed on, whatever the human types being the `instructions`.
+# Rendered as the numbered list's trailing free-text option (see `render_decision_cycle`),
+# after every suggestion. Approve/skip/abort used to be listed here too (three more fixed
+# entries, resolving the park directly with no chat involved) -- removed once the product
+# call landed that a human can just describe what they want in the chat instead, with no
+# separate intent-parsing needed for the common case. Abort survives as `_FindingsListView`'s
+# own global "x" binding instead (`action_quick_abort`), not a per-finding menu entry -- a
+# whole-run action with no coherent per-finding meaning (see `_quick_decision`'s own
+# docstring). Skip survives as `_FindingsListView`'s "s" binding too (`action_quick_skip`),
+# but -- as of issue #98 -- records a per-row "skip" decision rather than resolving the park
+# directly; it remains a bare escape hatch for a finding the chat genuinely cannot resolve
+# (e.g. a step that ignores the chat's `fix_round` instructions entirely -- `tui/AGENTS.md`'s
+# "Findings box" section has a real example).
 _CUSTOM_ENTRY = "Chat about it"
 
 # Short static UI copy for `_CUSTOM_ENTRY`, shown as an indented detail line beneath it in
@@ -105,6 +112,29 @@ _SEVERITY_DOT_STYLES: dict[str, str] = {
     "error": "#bb6400",  # orange -- matches _STATUS_DOT_STYLES's "failed" color
     "warning": "#d7af00",  # amber -- matches _STATUS_DOT_STYLES's "parked" color
     "info": "#5fafff",  # blue -- matches _STATUS_DOT_STYLES's "completed" color
+}
+
+# `FindingsList`'s per-row decided marker (issue #98): rendered by `render_description` on
+# every row, not just the highlighted one (unlike the decision cycle itself, `FindingsSuggestion`
+# only ever shows for the highlighted row -- issue #88's own deliberate rule), since a human
+# browsing away from a row they just decided still needs some visible confirmation that it
+# was recorded. Reuses this module's existing icon vocabulary rather than inventing new
+# glyphs: `_STATUS_ICONS["completed"]` (✔) for a "fix"-decided row and
+# `_STATUS_ICONS["skipped"]` (⏭) for a "skip"-decided one, both already meaning roughly "this
+# is settled, not still pending" for a `StepRow`/`ActivityRow` -- the same meaning they carry
+# here, just one widget level down. Only "fix"/"skip" ever key these -- `Finding.
+# record_decision`'s only two callers (`FindingsList._resolve_chat`/`_quick_decision`) never
+# record "approve"/"abort" against a single row (see `_quick_decision`'s own docstring for why
+# abort stays a whole-run action) -- but both dicts are typed by the full `ApprovalDecision`
+# rather than a narrower alias so `render_description` can pass an `ApprovalDecision | None`
+# straight through with no cast, silently rendering no marker for a key neither dict defines.
+_DECISION_MARKER_ICONS: dict[ApprovalDecision, str] = {
+    "fix": _STATUS_ICONS["completed"],
+    "skip": _STATUS_ICONS["skipped"],
+}
+_DECISION_MARKER_STYLES: dict[ApprovalDecision, str] = {
+    "fix": _STATUS_DOT_STYLES["completed"],
+    "skip": _STATUS_DOT_STYLES["skipped"],
 }
 
 
@@ -362,33 +392,57 @@ def _findings_of(
 def _decision_entries(finding: FindingData) -> list[str]:
     """The full per-finding decision cycle a parked `FindingsList` cycles through (issue
     #87): that finding's own `suggestions`, then a single trailing `_CUSTOM_ENTRY` -- every
-    entry here is discussion-only, opening the inline chat widget rather than resolving
+    entry here is discussion-only, opening the inline chat widget rather than recording
     anything by itself (see `FindingsList.await_decision`); confirming any of them always
-    resolves the park with `decision="fix"`, seeded with that entry's own text (empty for
-    `_CUSTOM_ENTRY`). Approve/skip/abort used to also live in this list as three more fixed
-    entries, resolving the park directly with no chat step -- removed once the product call
-    landed that describing what you want in the chat covers that ground with no separate
-    intent-parsing needed, for most cases. Skip and abort remain reachable, but only as
-    global key bindings (`_FindingsListView`'s "s"/"x"), never listed entries here -- skip
-    is a bare escape hatch for a park the chat genuinely cannot resolve, e.g. a step that
-    ignores `ctx.fix_round` outright (see `tui/AGENTS.md`'s "Findings box" section);
-    approve has no equivalent escape hatch and stays gone. Rendered as a 1-based numbered
-    list by `render_decision_cycle`, so a
+    records "fix" for whichever row it was confirmed on (issue #98 -- previously resolved
+    the whole park directly; now records only that row's own decision), seeded with that
+    entry's own text (empty for `_CUSTOM_ENTRY`). Approve/skip/abort used to also live in
+    this list as three more fixed entries, resolving the park directly with no chat step --
+    removed once the product call landed that describing what you want in the chat covers
+    that ground with no separate intent-parsing needed, for most cases. Abort remains
+    reachable only as a global key binding (`_FindingsListView`'s "x"), never a listed entry
+    here -- a whole-run action with no per-finding meaning (see `_quick_decision`'s own
+    docstring); approve has no equivalent escape hatch and stays gone. Skip remains
+    reachable the same way (`_FindingsListView`'s "s"), but -- as of issue #98 -- records a
+    per-row "skip" decision rather than resolving the whole park; it stays a bare escape
+    hatch for a finding the chat genuinely cannot resolve, e.g. a step that ignores
+    `ctx.fix_round` outright (see `tui/AGENTS.md`'s "Findings box" section). Rendered as a
+    1-based numbered list by `render_decision_cycle`, so a
     digit key (`_FindingsListView`'s `"1"`.."9"` bindings) can jump a row's
     `_decision_cursor` straight to any entry here by that same 1-based index."""
 
     return [*finding.suggestions, _CUSTOM_ENTRY]
 
 
-def render_description(finding: FindingData) -> Text:
+def render_description(finding: FindingData, decision: ApprovalDecision | None = None) -> Text:
     """`FindingsDescription`'s content: a colored `_DOT_ICON` (`_SEVERITY_DOT_STYLES`,
     keyed by `finding.severity`) -- the per-finding risk indicator issue #77 asks for,
     reusing `severity` rather than a new field -- followed by `format_finding`'s existing
     severity/description/location text. No `no_wrap` -- `FindingsDescription`'s own
     `width: 1fr` (see that class's docstring) is a bounded column, not an auto-sized one, so
-    a long description wraps within it rather than needing to stay on one physical line."""
+    a long description wraps within it rather than needing to stay on one physical line.
 
-    text = Text(_DOT_ICON, style=_SEVERITY_DOT_STYLES[finding.severity])
+    `decision` (issue #98) is this row's own recorded park decision -- `None` by default,
+    which renders byte-for-byte identical to this function's pre-#98 output, so every
+    existing non-parked call site (`FindingsDescription.__init__`, and every direct test
+    call that passes only `finding`) is unaffected. `FindingsSuggestion` only ever shows
+    for the highlighted row (issue #88's own deliberate rule, unchanged) -- `_STATUS_ICONS`'s
+    completed/skipped glyphs prefixed here instead (`_DECISION_MARKER_ICONS`/`_STYLES`) are
+    what let a human tell a "fix"-decided row apart from a "skip"-decided or still-undecided
+    one while browsing *any* row during a park, highlighted or not; an undecided row (while
+    parked) renders with no marker at all, the same as `decision=None`, since "no marker" is
+    already an unambiguous third state once at least one other row visibly has one. A
+    `decision` value neither `_DECISION_MARKER_ICONS` nor `_STYLES` defines (i.e. anything
+    other than "fix"/"skip" -- `Finding.record_decision`'s only two callers never pass
+    anything else) also renders with no marker, matching this module's "no exceptions on
+    data outside its documented shape" style elsewhere rather than raising `KeyError`."""
+
+    text = Text()
+    if decision is not None:
+        icon = _DECISION_MARKER_ICONS.get(decision)
+        if icon is not None:
+            text.append(f"{icon} ", style=_DECISION_MARKER_STYLES[decision])
+    text.append(_DOT_ICON, style=_SEVERITY_DOT_STYLES[finding.severity])
     text.append(f" {format_finding(finding)}")
     return text
 
@@ -491,7 +545,10 @@ def _findings_summary(output: ReviewOutput | TestSufficiencyOutput | list[Findin
 
 class FindingsDescription(Static):
     """The left column of one `Finding` row (issue #91): severity dot, description,
-    location.
+    location -- and, while parked (issue #98), a decided-marker prefix (`render_description`'s
+    `decision` parameter), since this column is the only one visible on every row regardless
+    of highlight state (`FindingsSuggestion` -- see below -- only ever shows for the
+    highlighted row, issue #88).
 
     `width: 1fr`, matching `FindingsSuggestion`'s own `1fr` -- an even, row-independent
     split (issue #92), superseding this class's earlier `width: auto`. That earlier version
@@ -527,8 +584,10 @@ class FindingsDescription(Static):
     ) -> None:
         super().__init__(render_description(finding), id=id, classes=classes)
 
-    def update_finding(self, finding: FindingData) -> None:
-        self.update(render_description(finding))
+    def update_finding(
+        self, finding: FindingData, decision: ApprovalDecision | None = None
+    ) -> None:
+        self.update(render_description(finding, decision))
 
 
 class FindingsSuggestion(Vertical):
@@ -713,13 +772,19 @@ class Finding(ListItem):
     """One row per finding inside `_FindingsListView` (issue #91, superseding the old
     `FindingsBox`'s single `OptionList` of Rich-rendered options) -- composes
     `FindingsDescription`/`FindingsSuggestion` in a horizontal split, and owns this row's
-    own display mode (`hidden`/`plain`/`decision`) and, while parked, its own
-    `_decision_cursor`. The cursor is purely a per-row browsing aid, not itself a decision
-    -- see `FindingsList.await_decision`'s docstring: every entry it can land on (a
-    suggestion, or `_CUSTOM_ENTRY`) resolves the park the same way, via the inline chat
-    widget (`decision="fix"`), regardless of which row's cursor it came from. Skip and abort
-    are not reachable through this cursor at all -- they are `_FindingsListView`'s own
-    separate global "s"/"x" bindings, each resolving the park directly with no chat step.
+    own display mode (`hidden`/`plain`/`decision`), its own `_decision_cursor` (while
+    parked, a purely per-row *browsing* position within this finding's own suggestion list,
+    not itself a decision), and, as of issue #98, its own recorded park decision
+    (`_row_decision`) -- `None` while undecided, or the `ApprovalResponse` a human confirmed
+    for this row specifically (`record_decision`). Confirming the chat or pressing "s" while
+    this row is highlighted records *this row's own* decision, not the whole park's -- see
+    `FindingsList.await_decision`'s docstring for the full per-row-then-aggregate model
+    issue #98 introduced, superseding issue #87's original step-scoped design (every row
+    used to resolve the one pending park identically, regardless of which row's cursor
+    confirmed it). Abort ("x") is the one exception: it stays `_FindingsListView`'s own
+    separate global binding, resolving the whole park directly with no per-row recording
+    step at all -- deliberately unchanged by issue #98 (see `FindingsList._quick_decision`'s
+    own docstring for why abort alone stays a whole-run action).
 
     Named `Finding`, shadowing `pipeline.findings.Finding` (imported into this module as
     `FindingData`) -- deliberate: this widget's identity in `widgets.py` *is* "one finding,
@@ -746,6 +811,15 @@ class Finding(ListItem):
         self.finding = finding
         self._decision_cursor = 0
         self._mode: Literal["hidden", "plain", "decision"] = "hidden"
+        # This row's own recorded park decision (issue #98) -- `None` until a human
+        # confirms this row's chat ("fix", `record_decision`) or presses "s" while it's
+        # highlighted ("skip", also `record_decision`); reset back to `None` at the start
+        # of every `FindingsList.await_decision()` park (`clear_decision`, called for every
+        # row in `self._rows`) so a fix-round's re-park never carries over the previous
+        # round's per-row decisions onto a fresh one. Distinct from `_decision_cursor`
+        # above, which is purely a per-row *browsing* position within this finding's own
+        # suggestion list, not a decision at all.
+        self._row_decision: ApprovalResponse | None = None
 
     def compose(self) -> ComposeResult:
         yield FindingsDescription(self.finding)
@@ -804,23 +878,82 @@ class Finding(ListItem):
         """Reset `_decision_cursor` back to 0 -- called whenever this row becomes the
         highlighted one under a park (issue #87), so each finding's own decision cycle
         always starts fresh rather than carrying over whatever index a previous highlight
-        left it on."""
+        left it on. Not to be confused with `clear_decision` below (issue #98) -- this
+        resets the *browsing* cursor, not the row's recorded decision."""
 
         self._decision_cursor = 0
 
-    def update_finding(self, finding: FindingData) -> None:
-        """Data changed in place, same list position (`FindingsList.update_findings`'s
-        in-place path) -- refresh both children, preserving whichever display mode this
-        row is currently in rather than forcing one. Skipped, like `_render_suggestion`,
-        when this row hasn't composed yet -- `self.finding` is still updated below
-        regardless, so the eventual real `compose()` reflects this call's data anyway."""
+    def is_decided(self) -> bool:
+        """True once this row has a recorded decision (issue #98) -- `record_decision` has
+        been called at least once since the last `clear_decision`/park start.
+        `FindingsList._record_decision` checks this across every row in `self._rows` to
+        decide whether to resolve the whole park yet, or just advance the highlighted
+        cursor on to the next undecided row."""
 
-        self.finding = finding
+        return self._row_decision is not None
+
+    @property
+    def row_decision(self) -> ApprovalResponse | None:
+        """This row's own recorded decision, or `None` while undecided -- read by
+        `FindingsList._resolve_park` once every row is decided, to build the combined
+        `ApprovalResponse` (or, for a single-row park, returned completely unwrapped -- see
+        that method's own docstring)."""
+
+        return self._row_decision
+
+    def record_decision(self, response: ApprovalResponse) -> None:
+        """Record `response` as this row's own decision (issue #98) --
+        `FindingsList._resolve_chat` ("fix", from this row's own inline chat `Input`) and
+        `_quick_decision("skip")` are this method's only two callers, each only ever acting
+        on the currently *highlighted* row. Overwrites whatever this row's previous
+        decision was, if any -- a human revisiting an already-decided row (plain up/down
+        browsing, already unrestricted) and reconfirming it is meant to overwrite, not be
+        rejected, so this deliberately carries no "already decided" guard of its own.
+        Re-renders this row's `FindingsDescription` (`_render_description`) so the
+        fix/skip marker every row shows regardless of highlight state (`render_description`)
+        reflects the change immediately, not just whenever some other, unrelated re-render
+        happens to reach this row next."""
+
+        self._row_decision = response
+        self._render_description()
+
+    def clear_decision(self) -> None:
+        """Reset this row back to undecided (issue #98) -- called for every row in
+        `FindingsList.await_decision`'s `self._rows` at the very start of each park, so a
+        fix-round's re-park (the same step parking again because a human's typed
+        instructions didn't resolve it -- `steps/rebase.py`'s issue #24 guard is exactly
+        this case) never starts with the previous round's per-row decisions already
+        carried over."""
+
+        self._row_decision = None
+        self._render_description()
+
+    def _render_description(self) -> None:
+        """Apply this row's current decision marker to `FindingsDescription` (issue #98) --
+        guarded the same "skip now, the eventual real `compose()` reflects the
+        already-updated state anyway" way `_render_suggestion` already is for
+        `FindingsSuggestion`, since `record_decision`/`clear_decision` can equally land on
+        a row before its own `compose()` has run."""
+
         try:
             description = self.query_one(FindingsDescription)
         except NoMatches:
             return
-        description.update_finding(finding)
+        marker = None if self._row_decision is None else self._row_decision.decision
+        description.update_finding(self.finding, marker)
+
+    def update_finding(self, finding: FindingData) -> None:
+        """Data changed in place, same list position (`FindingsList.update_findings`'s
+        in-place path) -- refresh every child, preserving whichever display mode this row
+        is currently in rather than forcing one, and this row's own decision marker (issue
+        #98) rather than resetting it -- a periodic re-render tick must never silently
+        clear an in-progress per-row decision. Skipped, like `_render_suggestion`/
+        `_render_description` themselves, when this row hasn't composed yet -- `self.
+        finding` is still updated below regardless, so the eventual real `compose()`
+        reflects this call's data anyway."""
+
+        self.finding = finding
+        self._render_description()
         self._render_suggestion()
 
     def cycle_decision(self, delta: int) -> None:
@@ -889,15 +1022,19 @@ class _FindingsListView(ListView):
     `self._nodes` unfiltered -- so every one of #87's parked-mode key bindings on top of
     up/down/enter (which `ListView`'s own `BINDINGS` already give this for free) lives
     here, never on `Finding` itself: left/right cycle the highlighted finding's
-    `_decision_entries`, the single-key "s"/"x" shortcuts jump straight to skip/abort
-    regardless of cursor position (the two remaining global, step-scoped controls -- unlike
-    approve, neither was ever a listed per-finding menu entry, and skip's binding is a bare
-    escape hatch for a park chatting genuinely cannot resolve, e.g. a step that ignores
-    `ctx.fix_round` entirely -- see `tui/AGENTS.md`'s "Findings box" section), "f" jumps
-    straight to the inline chat the same way, and digit keys "1".."9" jump straight to that
-    1-based entry (matching `render_decision_cycle`'s numbering). All of these delegate to
-    the owning `FindingsList`, which no-ops them while not parked -- this class holds no
-    decision state of its own."""
+    `_decision_entries`, the single-key "s" shortcut records "skip" for the highlighted row
+    specifically (issue #98's per-finding decision model -- see `FindingsList.
+    await_decision`'s docstring -- superseding this binding's original step-scoped/global
+    resolve), a bare escape hatch for a finding the chat genuinely cannot resolve, e.g. a
+    step that ignores `ctx.fix_round` entirely (see `tui/AGENTS.md`'s "Findings box"
+    section), "x" jumps straight to abort regardless of cursor position (the one binding
+    that stays global and step-scoped -- see `FindingsList._quick_decision`'s own docstring
+    for why abort alone never became per-finding), "f" jumps straight to the inline chat the
+    same way "s" does, and digit keys "1".."9" jump straight to that 1-based entry (matching
+    `render_decision_cycle`'s numbering). All of these delegate to the owning `FindingsList`,
+    which no-ops them while not parked -- this class holds no decision state of its own
+    (every row's own recorded decision lives on `Finding` itself, see that class's
+    docstring)."""
 
     BINDINGS = [
         Binding("left", "cycle_prev", "Previous suggestion", show=False),
@@ -946,9 +1083,14 @@ class _FindingsListView(ListView):
         self._owner._jump_decision(digit - 1)
 
 
+# Reworded by issue #98 -- "Enter to confirm" used to resolve the whole park from any row;
+# now Enter (via the chat) or "s" only records *this finding's* decision, and the park only
+# actually submits once every row has one. `FindingsList._set_footer_hint` appends a live
+# "N/M decided" progress count after this fixed copy while parked (see that method's own
+# docstring), recomputed on every recorded decision, not just at park start/end.
 _FOOTER_HINT = (
-    "Enter to confirm  |  left/right or 1-9 browse options  |  f to chat"
-    "  |  s to skip  |  x to abort"
+    "Enter to confirm this finding  |  left/right or 1-9 browse options  |  f to chat"
+    "  |  s to skip this finding  |  x to abort the run"
 )
 
 
@@ -1265,9 +1407,22 @@ class FindingsList(Vertical):
             self._open_chat("")
 
     def _quick_decision(self, decision: ApprovalDecision) -> None:
+        """ "s"/"x"'s shared entry point (`_FindingsListView.action_quick_skip`/
+        `action_quick_abort`) -- the two diverge here as of issue #98. "abort" still
+        resolves `self._pending` directly and immediately, regardless of how many rows are
+        already decided: a whole-run action with no coherent per-finding meaning ("abort one
+        finding" doesn't mean anything -- a human would just skip that finding instead;
+        question 4 of the design discussion linked from issue #98). Every other value
+        reaching this method today is "skip", recorded against the highlighted row only via
+        `_record_decision` -- the same per-row-then-aggregate path `_resolve_chat`'s "fix"
+        already goes through."""
+
         if not self._parked or self._pending is None:
             return
-        self._pending.set_result(ApprovalResponse(decision=decision, instructions=None))
+        if decision == "abort":
+            self._pending.set_result(ApprovalResponse(decision="abort", instructions=None))
+            return
+        self._record_decision(decision, None)
 
     def _open_chat(self, prefill: str) -> None:
         """Open the highlighted row's chat, seeded with `prefill` (issue #92: in place,
@@ -1312,48 +1467,193 @@ class FindingsList(Vertical):
         """Handle the highlighted row's live chat `Input` being submitted (issue #92) --
         wherever it currently lives in the row tree, this `Message` bubbles up to
         `FindingsList` regardless (see this class's own docstring for why the handler moved
-        here rather than staying on a since-removed `_InlineApprovalChat`). Resolving via
-        `_resolve_chat` is enough on its own: `await_decision`'s `finally` clause reverts the
-        highlighted row back to `set_plain()` once the pending future actually resolves,
-        which in turn tears the `Input` down (`FindingsSuggestion.show_plain` →
-        `_remove_input`) -- no explicit cleanup needed in this handler itself."""
+        here rather than staying on a since-removed `_InlineApprovalChat`). Delegating to
+        `_resolve_chat` is enough on its own either way (issue #98): once every row is
+        decided, `await_decision`'s `finally` clause reverts the (still) highlighted row
+        back to `set_plain()`, which tears the `Input` down (`FindingsSuggestion.show_plain`
+        → `_remove_input`); until then, `_record_decision`'s own
+        `_advance_to_next_undecided` moves the highlighted cursor off this row instead,
+        which reaches that exact same teardown via `on_list_view_highlighted`'s ordinary
+        hide-on-leave path. No explicit cleanup needed in this handler itself either way."""
 
         self._resolve_chat(event.value)
 
     def _resolve_chat(self, instructions: str) -> None:
-        if self._pending is not None:
-            self._pending.set_result(ApprovalResponse(decision="fix", instructions=instructions))
+        """The highlighted row's chat `Input` was submitted -- records "fix" for that row
+        only (issue #98), via `_record_decision`; see that method's docstring for what
+        happens next (either the whole park resolves, or the cursor advances to the next
+        undecided row)."""
+
+        self._record_decision("fix", instructions)
+
+    def _record_decision(self, decision: ApprovalDecision, instructions: str | None) -> None:
+        """Record `decision`/`instructions` (issue #98) against the currently highlighted
+        row only -- `_resolve_chat` ("fix", from the inline chat) and `_quick_decision`
+        ("skip") are this method's only two callers; "x" (abort) never reaches it, since it
+        stays a whole-run action resolved directly by `_quick_decision` itself.
+
+        Once every row in `self._rows` has its own decision, aggregates them into the one
+        final `ApprovalResponse` and resolves the pending park (`_resolve_park`); otherwise
+        leaves the park open and moves the highlighted cursor on to the next undecided row
+        (`_advance_to_next_undecided`), so a human can act on the step's remaining findings
+        one at a time -- the interaction this issue exists to build (see `FindingsList.
+        await_decision`'s docstring for the full model). The footer's decided/total progress
+        count (`_set_footer_hint`) is recomputed either way, since it must reflect this
+        row's just-recorded decision regardless of which branch runs next."""
+
+        if self._pending is None:
+            return
+        item = self._highlighted_finding()
+        if item is None:
+            return
+        item.record_decision(ApprovalResponse(decision=decision, instructions=instructions))
+        self._set_footer_hint(True)
+        if all(row.is_decided() for row in self._rows):
+            self._resolve_park()
+        else:
+            self._advance_to_next_undecided()
+
+    def _advance_to_next_undecided(self) -> None:
+        """After `_record_decision` records a decision but the park is not yet fully
+        decided: move the highlighted cursor to the next undecided row, searching forward
+        from the current index and wrapping past the end back to the start (issue #98).
+        Reuses `on_list_view_highlighted`'s existing reset-cursor/`set_decision()` plumbing
+        for free, rather than duplicating it here, by only ever moving
+        `_FindingsListView.index` itself -- assigning it posts a `Highlighted` message that
+        handler already reacts to.
+
+        Explicitly refocuses `_FindingsListView` afterward, mirroring `_open_chat`/
+        `_close_chat`'s own symmetric focus calls -- the row just decided may have resolved
+        via its own chat `Input`, which held keyboard focus while open; that `Input` is torn
+        down (asynchronously, once the `Highlighted` message above is actually dispatched)
+        by `on_list_view_highlighted`'s ordinary hide-on-leave path, but nothing else claims
+        focus on its own once that happens, and every one of this class's own key bindings
+        ("s"/"x"/"f"/left/right/digits) lives on `_FindingsListView`, not the `Input`."""
+
+        list_view = self._list_view()
+        if list_view is None or not self._rows:
+            return
+        current = list_view.index if list_view.index is not None else 0
+        total = len(self._rows)
+        for offset in range(1, total + 1):
+            candidate = (current + offset) % total
+            if not self._rows[candidate].is_decided():
+                list_view.index = candidate
+                list_view.focus()
+                return
+
+    def _resolve_park(self) -> None:
+        """Aggregate every row's now-final decision into the one `ApprovalResponse` that
+        resolves `self._pending` (issue #98) -- called by `_record_decision` the moment
+        every row in `self._rows` has a decision; never called directly by a key binding.
+
+        A park with exactly one row (e.g. `steps/rebase.py`'s issue #24 guard, which always
+        emits exactly one `Finding` -- see the design discussion linked from issue #98's own
+        body) is a deliberate special case: resolving with that row's own `ApprovalResponse`,
+        completely unwrapped, reproduces this class's pre-#98 immediate-resolve behavior
+        byte for byte (pinned by `tests/tui/test_app.py`'s
+        `test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_them`,
+        which predates this issue and asserts the exact typed text with no formatting
+        applied). There is only one finding in that case, so there is nothing for a
+        combined, per-finding-attributed instructions blob to usefully distinguish --
+        `describe_finding_decisions`'s `"- [severity] description: instructions"`
+        attribution only earns its keep once there are two or more rows for a human reading
+        the resulting fix-round prompt to tell apart.
+
+        Otherwise (two or more rows): every `fix`-decided row's instructions are combined
+        via `pipeline.findings.describe_finding_decisions` into one `instructions` string,
+        resolved with `decision="fix"`; if every row chose `skip` instead
+        (`describe_finding_decisions` returns `""` when it has no `fix`-decided row to
+        render), resolves with `decision="skip", instructions=None` -- identical in shape to
+        this class's own pre-#98 step-level skip."""
+
+        assert self._pending is not None
+        decided: list[tuple[FindingData, ApprovalResponse]] = []
+        for row in self._rows:
+            response = row.row_decision
+            if response is not None:
+                decided.append((row.finding, response))
+
+        if len(self._rows) == 1:
+            resolution = decided[0][1]
+        else:
+            combined = describe_finding_decisions(decided)
+            resolution = (
+                ApprovalResponse(decision="fix", instructions=combined)
+                if combined
+                else ApprovalResponse(decision="skip", instructions=None)
+            )
+        self._pending.set_result(resolution)
 
     def _set_footer_hint(self, parked: bool) -> None:
+        """Show/clear `#findings-footer`'s bound-key copy (issue #87) -- while parked, also
+        appends a live "N/M decided" progress count (issue #98), so a human can tell at a
+        glance how many of this park's findings still need a decision. Called both at park
+        start/end (`await_decision`) and after every single recorded decision
+        (`_record_decision`), since the count must move the instant a decision is recorded,
+        not just once at the very start and end of the whole park."""
+
         try:
             footer = self.query_one("#findings-footer", Static)
         except NoMatches:
             return
-        footer.update(_FOOTER_HINT if parked else "")
+        if not parked:
+            footer.update("")
+            return
+        decided = sum(1 for row in self._rows if row.is_decided())
+        footer.update(f"{_FOOTER_HINT}  |  {decided}/{len(self._rows)} decided")
 
     async def await_decision(self) -> ApprovalResponse:
         """Turn the highlighted row's `FindingsSuggestion` into a live decision selector
-        until a human resolves the park -- via the inline chat widget (confirming a
-        suggestion or "Chat about it" and submitting, always resolving with
-        `decision="fix"`), or via `_FindingsListView`'s two separate global bindings, "s"
-        (skip, a bare escape hatch for a park the chat genuinely cannot resolve) and "x"
-        (abort, stopping the whole run) -- the inline replacement for
+        until every row in `self._rows` has its own decision and the park resolves -- via
+        the inline chat widget (confirming a suggestion or "Chat about it" and submitting
+        records "fix" for the highlighted row, see `_resolve_chat`), or
+        `_FindingsListView`'s "s" binding (records "skip" for the highlighted row, see
+        `_quick_decision`) -- or, for the whole run at once regardless of per-row progress,
+        "x" (abort, stopping the run outright) -- the inline replacement for
         `ReviewApp._relay_approval`'s old `push_screen_wait(ApprovalPromptScreen(...))`
-        (issue #87).
+        (issue #87), reworked by issue #98 to resolve per finding rather than the instant
+        any one row is confirmed.
 
-        The decision is step-scoped, not per-finding (an explicit design call, since a
-        park is a single step-level event): confirming the chat, skipping, or aborting from
-        *any* finding's row resolves the one pending future here, regardless of which row
-        the cursor was on -- each row's own `_decision_cursor`/left-right cycling is purely
-        a per-row browsing aid, not separate state per finding. Only one `await_decision`
-        call can be pending at a time in practice (`ReviewApp._relay_approval` awaits one
-        park at a time), so a single `self._pending` future, not a queue, is enough.
+        Each row's own decision is per-finding, not step-scoped (issue #98, superseding
+        #87's original design, where confirming the chat, skipping, or aborting from *any*
+        row resolved the one pending park immediately, regardless of which row the cursor
+        was on): `_record_decision` records whichever of "fix"/"skip" the highlighted row
+        just confirmed onto that `Finding`'s own `_row_decision` (`Finding.record_decision`/
+        `is_decided`), then either resolves the park -- once every row has a decision -- or
+        moves the highlighted cursor on to the next undecided row
+        (`_advance_to_next_undecided`), leaving the park open so a human can act on the
+        step's remaining findings one at a time. `self._pending` is still a single future,
+        not a queue or one future per row: aggregation into one final `ApprovalResponse`
+        (`_resolve_park`, combining every `fix`-decided row's instructions via
+        `pipeline.findings.describe_finding_decisions`, or resolving `decision="skip"` if
+        every row chose that) happens entirely *before* `self._pending.set_result(...)` is
+        ever called, so by the time it is called there is exactly one response to hand back
+        -- the same reasoning issue #87 originally gave for a single future, just realized
+        one step later in the flow. A park with exactly one row (e.g. `steps/rebase.py`'s
+        issue #24 guard, which always emits exactly one `Finding`) degrades to resolving on
+        that row's very first decision, with its `ApprovalResponse` passed through
+        completely unwrapped -- see `_resolve_park`'s own docstring for why that case is
+        special-cased rather than run through the combined-instructions renderer.
+
+        Resets every row's decision back to undecided (`Finding.clear_decision`) at the very
+        start of this method, before anything else -- a step's fix-round loop can re-park
+        the same `FindingsList` on a fresh round after a human's "fix" instructions didn't
+        resolve it (`steps/rebase.py`'s issue #24 guard is exactly this case, since it never
+        reads `ctx.fix_round`), and that fresh round must never start with the previous
+        round's per-row decisions already carried over.
 
         Resets the highlighted row's `_decision_cursor` to 0 and switches it into decision
         mode before waiting, so a park always starts that finding's cycle fresh, then
-        restores `self._parked = False` and that row back to `set_plain()` in a `finally`
-        -- once resolved, the box reverts to #88's plain read-only display for whatever
-        `update_findings` call comes next, as if it had never been parked.
+        restores `self._parked = False` and the (possibly since-moved) highlighted row back
+        to `set_plain()` in a `finally` -- once resolved, the box reverts to #88's plain
+        read-only display for whatever `update_findings` call comes next, as if it had never
+        been parked. The `finally` clause reverts `self._last_highlighted`, not the row
+        captured when this method started -- issue #98's per-row advance means the
+        highlighted row can legitimately change mid-park, and every row it moves away from
+        along the way is already reverted to plain by `on_list_view_highlighted`'s own
+        hide-on-leave path, so only the row still highlighted when the park actually
+        resolves needs this final revert.
 
         Also focuses `_FindingsListView` -- unlike the old `ApprovalPromptScreen`, becoming
         the active screen on `push_screen` and so implicitly receiving every keypress, this
@@ -1373,13 +1673,16 @@ class FindingsList(Vertical):
         with no intervening `await` of its own, so `FindingsList.compose()` (which yields
         `#findings-footer`) has typically not run yet either. `_set_footer_hint` itself only
         guards against `NoMatches` and gives up silently (the plain, synchronous pattern
-        every other caller in this class uses, correct for a merely stale render) -- but
-        nothing else ever calls it again for the rest of this park, unlike `Finding`'s own
-        `_apply_mode`-on-compose catch-up, so calling it before the box has settled would
-        leave the footer hint blank for the entire park, not just one frame.
+        every other caller in this class uses, correct for a merely stale render) -- but the
+        only thing that reliably calls it again for the rest of this park is
+        `_record_decision`, on every recorded decision (so its decided/total progress count
+        stays current), not a timer, so calling it before the box has settled here would
+        otherwise leave the footer hint blank for the entire park, not just one frame.
         """
 
         self._parked = True
+        for row in self._rows:
+            row.clear_decision()
         list_view = await self._await_list_view()
         self._set_footer_hint(True)
         item = self._highlighted_finding()
@@ -1395,8 +1698,8 @@ class FindingsList(Vertical):
         finally:
             self._parked = False
             self._pending = None
-            if item is not None:
-                item.set_plain()
+            if self._last_highlighted is not None:
+                self._last_highlighted.set_plain()
             self._set_footer_hint(False)
 
 

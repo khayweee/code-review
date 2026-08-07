@@ -601,6 +601,31 @@ def test_render_description_includes_a_severity_dot_and_format_finding() -> None
     assert text.plain == "● warning: unclear naming (widgets.py:42)"
 
 
+def test_render_description_has_no_decision_marker_by_default() -> None:
+    """issue #98: the default (`decision=None`) must render byte-for-byte identical to the
+    pre-#98 output above, so every non-parked call site is unaffected."""
+
+    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+
+    assert render_description(finding).plain == render_description(finding, None).plain
+
+
+def test_render_description_prefixes_a_fix_decided_marker() -> None:
+    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+
+    text = render_description(finding, "fix")
+
+    assert text.plain == "✔ ● warning: unclear naming"
+
+
+def test_render_description_prefixes_a_skip_decided_marker() -> None:
+    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+
+    text = render_description(finding, "skip")
+
+    assert text.plain == "⏭ ● warning: unclear naming"
+
+
 def test_render_suggestions_plain_joins_suggestions_one_per_line() -> None:
     finding = Finding(
         severity="warning",
@@ -1119,7 +1144,7 @@ def test_findings_list_accepts_a_bare_list_of_findings() -> None:
     asyncio.run(scenario())
 
 
-# --- FindingsList, parked-mode interactive decision flow (issue #87) --------------------
+# --- FindingsList, parked-mode interactive decision flow (issue #87, per-finding by #98) -
 
 
 def test_findings_list_await_decision_populates_the_footer_hint_when_called_right_after_mount() -> (
@@ -1808,6 +1833,429 @@ def test_findings_list_escape_cancels_the_chat_without_resolving_the_park() -> N
             await pilot.press("s")
             response = await task
             assert response == ApprovalResponse(decision="skip", instructions=None)
+
+    asyncio.run(scenario())
+
+
+# --- FindingsList, per-finding decisions and aggregation (issue #98) --------------------
+
+
+def test_findings_list_recording_a_decision_does_not_resolve_a_multi_finding_park() -> None:
+    """Confirming the highlighted row's chat records that row's own decision but leaves a
+    multi-finding park open until every row has one -- superseding this box's pre-#98
+    behavior, where any one row's confirm resolved the whole park immediately."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("enter")  # opens the chat on row 0
+            await pilot.pause()
+            box.query_one(Input).value = "fix the first one"
+            await pilot.press("enter")  # submits -- decides row 0 only
+            await pilot.pause()
+
+            assert not task.done()
+            assert box._rows[0].is_decided()
+            assert not box._rows[1].is_decided()
+
+            box._quick_decision("abort")
+            response = await task
+            assert response == ApprovalResponse(decision="abort", instructions=None)
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_recording_a_decision_advances_the_cursor_to_the_next_undecided_row() -> None:
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="info", description="third finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            list_view.focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            assert list_view.index == 0
+            await pilot.press("s")  # decide row 0 -- advances to row 1
+            await pilot.pause()
+            assert list_view.index == 1
+
+            await pilot.press("s")  # decide row 1 -- advances to row 2
+            await pilot.pause()
+            assert list_view.index == 2
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_advancing_to_the_next_undecided_row_wraps_around() -> None:
+    """`_advance_to_next_undecided` searches forward from the current index and wraps past
+    the end back to the start -- proven here by deciding the *last* row first, which can
+    only find an undecided row by wrapping around to row 0."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="info", description="third finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            list_view.focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause()
+            assert list_view.index == 2
+
+            await pilot.press("s")  # decide row 2 (the last row) -- wraps to row 0
+            await pilot.pause()
+            assert list_view.index == 0
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_aggregates_fix_decided_findings_once_every_row_is_decided() -> None:
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="unclear naming", review_scope="source"),
+                Finding(severity="error", description="missing null check", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("enter")  # opens the chat on row 0
+            await pilot.pause()
+            box.query_one(Input).value = "rename it"
+            await pilot.press("enter")  # decides row 0, advances to row 1
+            await pilot.pause()
+
+            await pilot.press("enter")  # opens the chat on row 1
+            await pilot.pause()
+            box.query_one(Input).value = "add a null guard"
+            await pilot.press("enter")  # decides row 1 -- every row now decided, resolves
+            await pilot.pause()
+
+            response = await task
+            assert response == ApprovalResponse(
+                decision="fix",
+                instructions=(
+                    "- [warning] unclear naming: rename it\n"
+                    "- [error] missing null check: add a null guard"
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_resolves_skip_when_every_row_is_skip_decided() -> None:
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="info", description="second finding", review_scope="source"),
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("s")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+
+            response = await task
+            assert response == ApprovalResponse(decision="skip", instructions=None)
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> None:
+    """A human can browse back to an already-decided row (plain up/down browsing was
+    already unrestricted) and reconfirm it with a different decision -- overwriting, not
+    rejected -- since `Finding.record_decision` carries no "already decided" guard."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            list_view.focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("s")  # skip row 0 -- advances to row 1, still undecided
+            await pilot.pause()
+            assert list_view.index == 1
+
+            await pilot.press("up")  # browse back to the already-decided row 0
+            await pilot.pause()
+            assert list_view.index == 0
+
+            await pilot.press("enter")  # opens the chat on row 0 again
+            await pilot.pause()
+            box.query_one(Input).value = "actually rename it"
+            await pilot.press("enter")  # reconfirms row 0 as "fix", overwriting "skip"
+            await pilot.pause()
+
+            # Row 1 was never decided -- the park is still open, and the cursor moved back
+            # to it (the only remaining undecided row).
+            assert not task.done()
+            assert list_view.index == 1
+
+            await pilot.press("s")  # decide row 1 too -- every row now decided, resolves
+            await pilot.pause()
+
+            response = await task
+            assert response == ApprovalResponse(
+                decision="fix", instructions="- [warning] first finding: actually rename it"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_abort_resolves_immediately_regardless_of_per_row_progress() -> None:
+    """ "x" (abort) stays a whole-run action, unchanged by issue #98: it resolves the park
+    the instant it's pressed, even with some rows already decided and others not."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="info", description="third finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("s")  # decide row 0 only -- 2 of 3 rows still undecided
+            await pilot.pause()
+
+            await pilot.press("x")
+            await pilot.pause()
+
+            response = await task
+            assert response == ApprovalResponse(decision="abort", instructions=None)
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_single_finding_park_resolves_immediately_on_one_decision() -> None:
+    """Degenerate case (issue #98's own linked design discussion): a park with exactly one
+    row (e.g. `steps/rebase.py`'s issue #24 guard, which always emits exactly one `Finding`)
+    resolves on that row's very first decision, with its `ApprovalResponse` passed through
+    completely unwrapped -- not routed through `describe_finding_decisions`'s combined-
+    instructions format, which only earns its keep once there are two or more rows to
+    attribute text to. Pinned separately from the pre-existing single-finding tests in the
+    section above (which already exercise this path incidentally) to make the "exact,
+    unwrapped match" guarantee explicit, since `steps/rebase.py`'s guard relies on it."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="unclear naming", review_scope="source")
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("enter")
+            await pilot.pause()
+            box.query_one(Input).value = "looks fine actually"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            response = await task
+            # Not "- [warning] unclear naming: looks fine actually" -- the combined-
+            # instructions format never applies to a single-row park.
+            assert response == ApprovalResponse(decision="fix", instructions="looks fine actually")
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_await_decision_resets_stale_decisions_from_a_previous_round() -> None:
+    """A fix-round re-park on the same `FindingsList` (a step's own re-run after a human's
+    "fix" instructions didn't resolve it) must not carry over the previous round's per-row
+    decisions onto the fresh one -- `await_decision` clears every row via `Finding.
+    clear_decision` at the very start of each call."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+
+            first_task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+            await pilot.press("s")  # decide row 0 only
+            await pilot.pause()
+            box._quick_decision("abort")
+            await first_task
+
+            assert box._rows[0].is_decided()
+            assert not box._rows[1].is_decided()
+
+            second_task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            assert not any(row.is_decided() for row in box._rows)
+
+            box._quick_decision("abort")
+            await second_task
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_decided_marker_is_visible_on_every_row_regardless_of_highlight() -> None:
+    """`FindingsSuggestion` only ever shows for the highlighted row (issue #88, unchanged),
+    so the decided marker on `FindingsDescription` -- visible on every row -- is what lets a
+    human tell a decided row apart from an undecided one while browsing anywhere in the
+    list, not just the row they last acted on."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("s")  # skip row 0 -- advances highlight to row 1
+            await pilot.pause()
+
+            lines = _finding_rows_content(box)
+            assert lines[0].startswith("⏭ ●")  # row 0's marker survives losing highlight
+            assert not lines[1].startswith(("⏭", "✔"))  # row 1 is still undecided
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_footer_hint_shows_a_decided_progress_count_while_parked() -> None:
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            footer = box.query_one("#findings-footer", Static)
+            assert "0/2 decided" in footer.content
+
+            await pilot.press("s")
+            await pilot.pause()
+            assert "1/2 decided" in footer.content
+
+            box._quick_decision("abort")
+            await task
 
     asyncio.run(scenario())
 

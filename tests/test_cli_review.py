@@ -75,6 +75,7 @@ _FAKES = Path(__file__).parent / "pipeline" / "fakes"
 AUTO_FIX_ROUND_FAKE_CLAUDE = _FAKES / "claude_superset_auto_fix_then_clean.py"
 CLEAN_FAKE_CLAUDE = _FAKES / "claude_superset_clean.py"
 BLOCKING_FAKE_CLAUDE = _FAKES / "claude_superset_blocking.py"
+BLOCKING_TWO_FINDINGS_FAKE_CLAUDE = _FAKES / "claude_superset_blocking_two_findings.py"
 
 
 def _plain(output: str) -> str:
@@ -606,6 +607,34 @@ def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_th
     # of this test too), so this is a pre-existing environment-dependent fragility in the
     # assertion itself, not something this change introduced.
     assert "drops error handling" in output
+
+    _assert_no_leftover_code_review_process()
+
+
+def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
+    repo_with_branch: tuple[Path, str], tmp_path: Path
+) -> None:
+    """Repro/regression test for issue #98 (per-finding parking): unlike the single-finding
+    park above, `BLOCKING_TWO_FINDINGS_FAKE_CLAUDE` returns two "ask-user" findings per
+    step, so `ReviewStep`'s park has a real multi-row `FindingsList` -- the case #98's
+    per-finding decision model exists for. Both rows must be answered with "s" before
+    `ReviewStep`'s park actually resolves (issue #98's own new behavior), and the same
+    again for `TestSufficiencyStep`'s park right after."""
+
+    repo, branch = repo_with_branch
+    env = _env_with_fake_claude(BLOCKING_TWO_FINDINGS_FAKE_CLAUDE, tmp_path)
+
+    result = _run_review_with_keypresses(
+        [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
+        cwd=repo,
+        keypresses=[(3.0, "s"), (1.0, "s"), (2.0, "s"), (1.0, "s")],
+        env=env,
+    )
+    output = _plain(result.stdout)
+
+    assert "Traceback" not in output
+    assert result.returncode == 0
+    assert "Pipeline ran successfully." in output
 
     _assert_no_leftover_code_review_process()
 

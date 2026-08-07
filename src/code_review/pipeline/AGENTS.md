@@ -119,6 +119,13 @@ fixes first, and a human can request as many manual fix rounds as they want at a
   `supports_fix_round=False` staying inert to `auto_fixable`, and the human "fix"
   response's own uncapped repeat) and, end to end, against a real `ReviewStep`
   (`tests/steps/test_review.py`'s "Fix mode" section) and a real `code-review review` run.
+- Issue #98 later added a sibling pure function, `describe_finding_decisions`, reusing
+  `describe_auto_fix_findings`'s exact rendering convention for a different producer: a
+  human's own per-finding "fix" instructions from `tui.widgets.FindingsList`'s per-finding
+  approval-park decisions, not the automatic auto-fix path. `ApprovalResponse`/`FixRound`
+  themselves stay untouched by that issue -- both remain a single flat `instructions: str |
+  None` -- since the aggregation happens entirely on the `tui/` side before a park resolves;
+  see `tui/AGENTS.md`'s "Findings box" section for the full per-finding decision model.
 
 ## Open
 
