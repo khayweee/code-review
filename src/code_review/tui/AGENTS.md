@@ -223,9 +223,26 @@ one pending park, regardless of which row the cursor was browsing — `_decision
 purely a per-row display aid. A `#findings-footer` `Static` beneath the summary line shows
 bound-key copy ("Enter to confirm, left/right or 1-9 browse options, f to chat, s to skip, x
 to abort") only while parked, matching this package's "no box, not an empty box" instinct
-applied at the sub-widget level -- no "Esc to cancel" clause, since no such binding exists.
+applied at the sub-widget level -- the footer's own copy has no "Esc to cancel" clause since
+it only lists the ways to *resolve* the park, not `_FindingsListView`'s "escape" binding
+below (issue #95), which cancels the open chat without resolving anything.
 Outside a park, the box behaves exactly as #88 already shipped: read-only, only the
 highlighted finding's suggestions shown, no key does anything.
+
+**Escape cancels an open chat without resolving the park (issue #95)**: `_FindingsListView`'s
+`Binding("escape", "close_chat", ...)` reaches the highlighted row's live `Input` the same way
+"s"/"x" do -- Textual walks `escape`'s binding chain from the focused `Input` (which binds
+none of the keys above, including escape, itself) up through its ancestors, so
+`_FindingsListView.action_close_chat` → `FindingsList._close_chat` → the highlighted
+`Finding.close_chat` → `FindingsSuggestion.cancel_input` fires even while the `Input` holds
+focus. `cancel_input` tears the `Input` down and re-renders `_CUSTOM_ENTRY`'s plain text in
+its place (the same rendering `show_decision` already produces whenever no `Input` is
+mounted) -- `_decision_cursor` is left exactly where it was (still on `_CUSTOM_ENTRY`), and
+`self._pending` is left untouched, so the same park is still open to resolve afterwards via
+any other route. `_close_chat` refocuses `_FindingsListView` explicitly, mirroring
+`_open_chat`'s own symmetric focus call, since removing the focused `Input` would otherwise
+leave nothing focused at all. Whatever a human had typed is discarded -- this is "cancel," not
+"save draft."
 
 `FindingsList.update_findings` is called on every one of `app.py`'s periodic render ticks
 (`_render` → `_render_findings`), not just when the displayed output actually changed.
@@ -316,6 +333,27 @@ prompt `Static` above the `Input` either — issue #87's original `"What should 
 prompt line is gone too, replaced by that same string as the `Input`'s own `placeholder`,
 shown only while it's empty (`_CUSTOM_ENTRY`'s literal text doing double duty as both the
 decision-cycle entry's label and the empty-input hint once it becomes live).
+
+The mounted `Input` is styled `border: none !important; height: 1 !important;`
+(`FindingsSuggestion Input`, `DEFAULT_CSS`, issue #94) -- left unstyled, it picks up
+Textual's own `Input.DEFAULT_CSS` default (`border: tall`, `height: 3`), which read as a
+second bordered box nested inside `FindingsSuggestion`'s own `-visible` border. Both
+properties need `!important`: `Input`'s own `&:focus { border: tall $border; }` rule has
+higher CSS specificity than a plain descendant type-selector like ours (a pseudo-class
+counts as a class selector, which outweighs any number of type selectors), so without
+`!important` the border silently reappeared -- and stayed reappeared, since focus is set the
+instant the chat opens (`FindingsList._open_chat`'s `input_widget.focus()`) -- the moment a
+human actually used it, while looking fine in a screenshot taken before focusing it. Pinning
+`height` to `1 !important` too keeps that border's would-be two extra rows from squeezing the
+actual content line to zero once `border: tall` reasserted itself. The override collapses the
+`Input` to a single line matching the plain decision-cycle entries above it, reading as one
+inline field rather than a box-in-a-box.
+
+A one-line `Static("Press esc to cancel", classes="-chat-hint")` is mounted directly below
+the `Input` (issue #95, in the same `ensure_input`/`_remove_input` lifecycle, so it only
+exists while the chat is actually open) -- the footer's key-hint line lists the ways to
+*resolve* the park, not this row-local Escape reminder, so without this hint nothing on
+screen names the one binding that gets a human back out without resolving anything.
 
 The load-bearing correctness requirement of this move: `_CUSTOM_ENTRY` is the one decision-
 cycle entry `FindingsSuggestion` renders every time `update_findings`' periodic tick reaches

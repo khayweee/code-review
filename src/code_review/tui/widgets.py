@@ -581,6 +581,18 @@ class FindingsSuggestion(Vertical):
         display: block;
         border: round $primary-darken-1;
     }
+
+    FindingsSuggestion Input {
+        border: none !important;
+        height: 1 !important;
+        padding: 0 1;
+    }
+
+    FindingsSuggestion .-chat-hint {
+        color: $text-disabled;
+        height: 1;
+        padding: 0 1;
+    }
     """
 
     def __init__(
@@ -598,6 +610,9 @@ class FindingsSuggestion(Vertical):
         # nobody has opened it yet", both of which render `self._custom`'s plain text
         # instead (see `show_decision`).
         self._input: Input | None = None
+        # Mounted/removed in lockstep with `self._input` (issue #95) -- a one-line reminder
+        # of the Escape binding, shown only while the chat is actually open.
+        self._hint: Static | None = None
 
     def compose(self) -> ComposeResult:
         yield self._entries
@@ -672,12 +687,26 @@ class FindingsSuggestion(Vertical):
         self._custom.update("")
         self._input = Input(value=prefill, placeholder=_CUSTOM_ENTRY)
         self.mount(self._input)
+        self._hint = Static("Press esc to cancel", classes="-chat-hint")
+        self.mount(self._hint)
         return self._input
 
     def _remove_input(self) -> None:
         if self._input is not None:
             self._input.remove()
             self._input = None
+        if self._hint is not None:
+            self._hint.remove()
+            self._hint = None
+
+    def cancel_input(self, finding: FindingData, decision_cursor: int) -> None:
+        """Cancel this row's live chat (issue #95) without resolving anything -- tears
+        the `Input` down and re-renders `_CUSTOM_ENTRY`'s plain text in its place, exactly
+        as `show_decision` already does whenever no `Input` is mounted. Whatever had been
+        typed is discarded, matching Escape's "cancel", not "save draft"."""
+
+        self._remove_input()
+        self.show_decision(finding, decision_cursor)
 
 
 class Finding(ListItem):
@@ -838,6 +867,19 @@ class Finding(ListItem):
             return None
         return suggestion.ensure_input(prefill)
 
+    def close_chat(self) -> None:
+        """Cancel a chat open on this row (issue #95) -- the Escape counterpart to
+        `open_chat`. Leaves `_decision_cursor` exactly where it was (still on
+        `_CUSTOM_ENTRY`) and resolves nothing; a no-op if this row hasn't composed yet or
+        has no live `Input` open (`FindingsSuggestion.cancel_input`/`_remove_input` are
+        both already idempotent)."""
+
+        try:
+            suggestion = self.query_one(FindingsSuggestion)
+        except NoMatches:
+            return
+        suggestion.cancel_input(self.finding, self._decision_cursor)
+
 
 class _FindingsListView(ListView):
     """Direct successor to `FindingsBox`'s old private `_FindingOptionList` (issue #91).
@@ -863,6 +905,7 @@ class _FindingsListView(ListView):
         Binding("s", "quick_skip", "Skip", show=False),
         Binding("x", "quick_abort", "Abort", show=False),
         Binding("f", "open_chat", "Chat", show=False),
+        Binding("escape", "close_chat", "Cancel chat", show=False),
         *(
             Binding(str(digit), f"jump_decision({digit})", f"Option {digit}", show=False)
             for digit in range(1, 10)
@@ -895,6 +938,9 @@ class _FindingsListView(ListView):
 
     def action_open_chat(self) -> None:
         self._owner._open_chat("")
+
+    def action_close_chat(self) -> None:
+        self._owner._close_chat()
 
     def action_jump_decision(self, digit: int) -> None:
         self._owner._jump_decision(digit - 1)
@@ -1244,6 +1290,23 @@ class FindingsList(Vertical):
         input_widget = item.open_chat(prefill)
         if input_widget is not None:
             input_widget.focus()
+
+    def _close_chat(self) -> None:
+        """Escape counterpart to `_open_chat` (issue #95): cancel the highlighted row's
+        live chat without resolving `self._pending` -- the park stays open exactly as it
+        was before the chat opened. Refocuses `_FindingsListView` explicitly, matching
+        `_open_chat`'s own symmetric focus call, since removing the focused `Input` leaves
+        Textual with nothing focused otherwise."""
+
+        if not self._parked:
+            return
+        item = self._highlighted_finding()
+        if item is None:
+            return
+        item.close_chat()
+        list_view = self._list_view()
+        if list_view is not None:
+            list_view.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle the highlighted row's live chat `Input` being submitted (issue #92) --

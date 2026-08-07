@@ -1765,6 +1765,53 @@ def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redunda
     asyncio.run(scenario())
 
 
+def test_findings_list_escape_cancels_the_chat_without_resolving_the_park() -> None:
+    """Issue #95: Escape, while the chat `Input` has focus, tears the `Input` down and
+    returns focus to `_FindingsListView` -- without resolving `self._pending`, so the
+    human can go on to browse/act on other suggestions or findings, and the exact same
+    park is still there to resolve afterwards."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="unclear naming",
+                    review_scope="source",
+                    suggestions=["rename it"],
+                )
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            box.query_one(_FindingsListView).focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("f")
+            await pilot.pause()
+            box.query_one(Input).value = "draft instructions"
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert not list(box.query(Input))
+            assert box._pending is not None
+            assert box._parked
+            assert box.query_one(_FindingsListView).has_focus
+
+            # The park is still open and resolvable exactly as before Escape.
+            await pilot.press("s")
+            response = await task
+            assert response == ApprovalResponse(decision="skip", instructions=None)
+
+    asyncio.run(scenario())
+
+
 # --- StatusBox, mounted and driven through Pilot ------------------------------------------
 
 
