@@ -1,0 +1,13 @@
+FindingsList {
+    border: round $primary;
+    padding: 0 1;
+    height: auto;
+}
+
+FindingsList > _FindingsListView {
+    height: auto;
+}
+
+FindingsList .footer-hint {
+    color: $text-muted;
+}

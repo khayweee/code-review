@@ -1,0 +1,5 @@
+_BorderedBox {
+    border: round $primary;
+    padding: 0 1;
+    height: auto;
+}

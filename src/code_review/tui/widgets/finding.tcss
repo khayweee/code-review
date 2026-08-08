@@ -1,0 +1,4 @@
+Finding {
+    layout: horizontal;
+    height: auto;
+}

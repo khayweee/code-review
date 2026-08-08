@@ -1,0 +1,4 @@
+FindingsDescription {
+    width: 1fr;
+    padding: 0 1;
+}

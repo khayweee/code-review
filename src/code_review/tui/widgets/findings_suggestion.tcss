@@ -1,0 +1,23 @@
+FindingsSuggestion {
+    width: 1fr;
+    padding: 0 1;
+    display: none;
+    height: auto;
+}
+
+FindingsSuggestion.-visible {
+    display: block;
+    border: round $primary-darken-1;
+}
+
+FindingsSuggestion Input {
+    border: none !important;
+    height: 1 !important;
+    padding: 0 1;
+}
+
+FindingsSuggestion .-chat-hint {
+    color: $text-disabled;
+    height: 1;
+    padding: 0 1;
+}
