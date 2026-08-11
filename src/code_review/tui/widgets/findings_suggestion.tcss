@@ -21,3 +21,24 @@ FindingsSuggestion .-chat-hint {
     height: 1;
     padding: 0 1;
 }
+
+/* "Chat about it" (`self._custom`, `_CUSTOM_ENTRY`) should read as "type your own", not as
+another agent-generated suggestion -- `$text-muted` (also used by `FindingsList`'s own
+`.footer-hint`, `findings_list.tcss`) is the lighter, more-visible-than-`$text-disabled`
+gray of this theme's two muted tokens, and staying off `$text-disabled` keeps this entry
+visually distinct from `.-chat-hint`'s own dimmer reminder line above. */
+FindingsSuggestion .-custom-entry {
+    color: $text-muted;
+}
+
+/* A real horizontal divider directly above "Chat about it", replacing the blank line that
+used to appear there (that gap was actually a stray trailing `Text` newline from
+`render_decision_cycle_head`'s entries, not a CSS margin -- see that function's own
+docstring). Reuses this column's own border color (`$primary-darken-1`, `.-visible`
+above) so the divider reads as an internal continuation of this box's own border. Only
+applied while `-decision` is present -- toggled on in `show_decision`, off in
+`show_plain`/`clear` -- so plain mode and a hidden/cleared column never show a divider
+above nothing. */
+FindingsSuggestion .-custom-entry.-decision {
+    border-top: solid $primary-darken-1;
+}

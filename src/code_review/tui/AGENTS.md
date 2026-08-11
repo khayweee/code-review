@@ -171,28 +171,39 @@ highlighted finding changes), Enter confirms whatever it's on, and digit keys "1
 finding's own entry count, since a finding with fewer suggestions than another has a shorter
 list. `render_decision_cycle` renders this list 1-based ("1. rename it", "2. Chat about it",
 …), labeling entry 0 " (Recommended)" when it came from the finding's own `suggestions`
-(styled after the Claude Code CLI's own interactive picker), and the one fixed entry
-(`_CUSTOM_ENTRY`) gets a short indented detail line of static UI copy (`_ENTRY_DETAILS`) a
-suggestion's own text doesn't get, since it has no further data to split one from.
+(styled after the Claude Code CLI's own interactive picker). The one fixed entry
+(`_CUSTOM_ENTRY`) is visually set apart from the finding's own suggestions above it -- a
+lighter, muted gray (`$text-muted`, `findings_suggestion.tcss`'s `.-custom-entry`, so it
+reads as "type your own" rather than another agent-generated suggestion) and a `border-top`
+divider drawn directly above it (`.-custom-entry.-decision`, toggled by `show_decision`/
+`show_plain`/`clear`) -- rather than the short indented detail line ("Start typing to
+describe what you want.") this entry originally carried, removed once product feedback
+found it redundant with the entry's own label.
 
-Every entry in this list is discussion-only (it does not auto-apply anything — issue #78's
-`EditStep`/apply machinery is still out of scope): confirming a suggestion or "Chat about it"
-opens a chat -- as of issue #92, a live `Input` rendered in place inside the highlighted
-row's own `FindingsSuggestion`, seeded with that suggestion's text (or empty, for "Chat about
-it"), rather than issue #87's original `_InlineApprovalChat` (a small `Vertical` mounted as a
-*sibling* of `_FindingsListView`, below the whole box) -- see the "in place, not a sibling"
-section below for the full rationale and mechanics of that move. Submitting it resolves the
-park with `ApprovalResponse(decision="fix", instructions=<what was typed>)` — `_open_chat` is
-a no-op if one is already mounted, so re-entering this path never stacks a second `Input` or
-resets one already in progress. `_FindingsListView`'s "f" binding (`action_open_chat`) jumps
-straight to it regardless of
-cursor position, mirroring the removed `ApprovalPromptScreen`'s own "f"; unlike before, the
-decision cursor itself also opens it automatically the moment left/right or a digit key moves
-it *onto* "Chat about it" (`FindingsList._cycle_decision`/`_jump_decision`, not
-`Finding.cycle_decision`/`jump_decision` themselves, which stay pure cursor moves with no
-Textual side effect) — so browsing onto that entry already starts typing, no extra Enter/"f"
-needed. This auto-open is deliberately *not* wired into the plain per-row highlight reset
-path (`on_list_view_highlighted`/`_prime_highlighted`, which calls `reset_decision()`/
+Every entry in this list is discussion-only in the sense that it never auto-applies anything
+(issue #78's `EditStep`/apply machinery is still out of scope), but only "Chat about it" is
+actually a *chat*: confirming a real suggestion (`FindingsList.on_list_view_selected`) records
+it as the fix immediately, verbatim, via `_record_decision("fix", entry)` -- no edit step, no
+`Input` ever mounted for it. Confirming "Chat about it" is the one path that opens a chat --
+as of issue #92, a live `Input` rendered in place inside the highlighted row's own
+`FindingsSuggestion`, seeded empty, rather than issue #87's original `_InlineApprovalChat` (a
+small `Vertical` mounted as a *sibling* of `_FindingsListView`, below the whole box) -- see the
+"in place, not a sibling" section below for the full rationale and mechanics of that move.
+Submitting it resolves the park with `ApprovalResponse(decision="fix", instructions=<what was
+typed>)` — `_open_chat` is a no-op if one is already mounted, so re-entering this path never
+stacks a second `Input` or resets one already in progress. (Confirming a suggestion used to
+also route through this same chat, pre-seeded with that suggestion's own text and requiring a
+second Enter to submit -- revised after a human reported that as reading like "it just copies
+the suggestion into the chat box instead of accepting it": a suggestion's own text is already
+the human's chosen instructions the moment they confirm it, so there is nothing left to edit.)
+`_FindingsListView`'s "f" binding (`action_open_chat`) jumps straight to the chat regardless of
+cursor position, mirroring the removed `ApprovalPromptScreen`'s own "f"; the decision cursor
+itself also opens it automatically the moment left/right or a digit key moves it *onto* "Chat
+about it" (`FindingsList._cycle_decision`/`_jump_decision`, not `Finding.cycle_decision`/
+`jump_decision` themselves, which stay pure cursor moves with no Textual side effect) -- so
+browsing onto that entry already starts typing, no extra Enter/"f" needed. This auto-open is
+deliberately *not* wired into the plain per-row highlight reset path
+(`on_list_view_highlighted`/`_prime_highlighted`, which calls `reset_decision()`/
 `set_decision()` directly, no cursor-move call at all): a finding with zero suggestions has
 "Chat about it" at cursor 0, and merely arrow-key-browsing between finding rows must never
 yank focus into a chat box — only a deliberate intra-row cursor move does that.
@@ -613,10 +624,12 @@ Issue #87 replaced that two-modal round-trip with `widgets._InlineApprovalChat`,
 the highlighted row's own `FindingsSuggestion` column, and removed `_InlineApprovalChat`
 entirely -- see the "Findings box" section above for the full mechanics and rationale of
 that move. `FindingsList._open_chat` (via `Finding.open_chat` →
-`FindingsSuggestion.ensure_input`) still mounts it on demand -- when a human confirms a
-suggestion string (seeded with that suggestion's own text) or `_CUSTOM_ENTRY` (seeded empty)
-from the decision cycle described above -- and is still a no-op if one is already mounted, so
-re-entering this path never stacks a second `Input`. Submitting it (`Input.Submitted`,
+`FindingsSuggestion.ensure_input`) still mounts it on demand -- when a human confirms
+`_CUSTOM_ENTRY` (seeded empty) or explicitly jumps/cycles onto it, the only entry in the
+decision cycle described above that opens this `Input` at all (a plain suggestion string
+confirms straight to `_record_decision` instead, with no `Input` step -- see the Findings
+box section above) -- and is still a no-op if one is already mounted, so re-entering this
+path never stacks a second `Input`. Submitting it (`Input.Submitted`,
 handled by `FindingsList.on_input_submitted` -- Textual messages bubble up the DOM regardless
 of how deep the `Input` lives in the row tree, so the handler works the same whether it's a
 sibling or nested three levels down) records `ApprovalResponse(decision="fix",

@@ -26,11 +26,6 @@ from code_review.pipeline.findings import Finding as FindingData
 # suggestion) always records "fix" for whichever row it was confirmed on.
 _CUSTOM_ENTRY = "Chat about it"
 
-# Short static UI copy for `_CUSTOM_ENTRY`, shown as an indented detail line beneath it.
-_ENTRY_DETAILS: dict[str, str] = {
-    _CUSTOM_ENTRY: "Start typing to describe what you want.",
-}
-
 
 def _decision_entries(finding: FindingData) -> list[str]:
     """The full per-finding decision cycle a parked row cycles through.
@@ -55,24 +50,26 @@ def render_suggestions_plain(finding: FindingData) -> Text:
 def _render_decision_entry(
     index: int, entry: str, decision_cursor: int, *, has_own_suggestions: bool
 ) -> Text:
-    """One line (plus, for `_CUSTOM_ENTRY`, its indented detail line) of a decision cycle.
+    """One line of a decision cycle, with no trailing newline of its own.
 
     - Shared by `render_decision_cycle`/`render_decision_cycle_head`/
-      `render_custom_entry_line`, so the numbering/marker/detail-line rules stay defined
-      in exactly one place.
+      `render_custom_entry_line`, so the numbering/marker rules stay defined in exactly
+      one place.
+    - Deliberately returns a bare, newline-free line -- callers join multiple entries with
+      `"\\n"` as a *separator* rather than a trailing terminator, so the last entry in a
+      multi-entry render never carries a dangling trailing blank line (see
+      `render_decision_cycle_head`'s own docstring for why that distinction matters to
+      `FindingsSuggestion`).
     """
 
     marker = "> " if index == decision_cursor else "  "
     recommended = " (Recommended)" if index == 0 and has_own_suggestions else ""
-    text = Text(f"{marker}{index + 1}. {entry}{recommended}\n")
-    detail = _ENTRY_DETAILS.get(entry)
-    if detail is not None:
-        text.append(f"      {detail}\n")
-    return text
+    return Text(f"{marker}{index + 1}. {entry}{recommended}")
 
 
 def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
-    """The full decision cycle: every `_decision_entries` entry, numbered from 1.
+    """The full decision cycle: every `_decision_entries` entry, numbered from 1, one per
+    line with no trailing blank line after the last one.
 
     - A leading `"> "` marks whichever index `decision_cursor` names.
     - Entry 0 is labeled `" (Recommended)"` when it came from `finding.suggestions` itself.
@@ -84,6 +81,8 @@ def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
     entries = _decision_entries(finding)
     text = Text()
     for index, entry in enumerate(entries):
+        if index:
+            text.append("\n")
         text.append(
             _render_decision_entry(
                 index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
@@ -95,11 +94,20 @@ def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
 def render_decision_cycle_head(finding: FindingData, decision_cursor: int) -> Text:
     """Every `_decision_entries` entry except the trailing `_CUSTOM_ENTRY`, rendered exactly
     as `render_decision_cycle` would -- the entry after this list is drawn separately, by
-    `render_custom_entry_line`/a live `Input`."""
+    `render_custom_entry_line`/a live `Input`.
+
+    - No trailing newline after the last entry: `FindingsSuggestion.show_decision` renders
+      this straight into `self._entries`, and a Rich `Text` ending in `"\\n"` renders an
+      extra, otherwise-invisible empty line beneath it -- that was the actual root cause of
+      the gap that used to appear above "Chat about it" (not a CSS margin). A real divider
+      (`self._custom`'s own `border-top`, `findings_suggestion.tcss`) replaces it now.
+    """
 
     entries = _decision_entries(finding)
     text = Text()
     for index, entry in enumerate(entries[:-1]):
+        if index:
+            text.append("\n")
         text.append(
             _render_decision_entry(
                 index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
@@ -130,6 +138,14 @@ class FindingsSuggestion(Vertical):
       an always-reserved, unused half.
     - The `-visible` class restores `display: block` and draws a full border, so this
       column only reads as its own widget once it actually has content.
+    - `self._custom` always carries the `-custom-entry` class (styled a lighter, muted gray
+      in `findings_suggestion.tcss` -- distinct from both the plain-foreground suggestion
+      entries above it and `.-chat-hint`'s own, dimmer `$text-disabled`), so "Chat about
+      it" reads as "type your own", not as another agent-generated suggestion. The
+      `-decision` class is toggled alongside it (added in `show_decision`, removed in
+      `show_plain`/`clear`) to draw a `border-top` divider directly above it -- only while
+      decision mode is actually showing a "Chat about it" entry, since plain mode and
+      hidden/cleared rows have no such entry to divide from.
     """
 
     DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
@@ -143,7 +159,7 @@ class FindingsSuggestion(Vertical):
         super().__init__(id=id, classes=classes)
         self.border_title = "Suggestion"
         self._entries = Static("")
-        self._custom = Static("")
+        self._custom = Static("", classes="-custom-entry")
         # Set only once a human deliberately opens the chat (`ensure_input`) -- `None`
         # covers both "not parked"/"plain mode" and "cursor on `_CUSTOM_ENTRY` but not
         # opened yet", both of which render `self._custom`'s plain text instead.
@@ -158,12 +174,14 @@ class FindingsSuggestion(Vertical):
 
     def clear(self) -> None:
         self.remove_class("-visible")
+        self._custom.remove_class("-decision")
         self._entries.update("")
         self._custom.update("")
         self._remove_input()
 
     def show_plain(self, finding: FindingData) -> None:
         self.add_class("-visible")
+        self._custom.remove_class("-decision")
         self._entries.update(render_suggestions_plain(finding))
         self._custom.update("")
         self._remove_input()
@@ -184,6 +202,7 @@ class FindingsSuggestion(Vertical):
         """
 
         self.add_class("-visible")
+        self._custom.add_class("-decision")
         self._entries.update(render_decision_cycle_head(finding, decision_cursor))
         entries = _decision_entries(finding)
         on_custom_entry = decision_cursor == len(entries) - 1

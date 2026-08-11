@@ -31,7 +31,6 @@ from code_review.tui.widgets.findings_list import (
 from code_review.tui.widgets.findings_list_view import _FindingsListView
 from code_review.tui.widgets.findings_suggestion import (
     _CUSTOM_ENTRY,
-    _ENTRY_DETAILS,
     FindingsSuggestion,
     _decision_entries,
     _render_decision_entry,
@@ -76,7 +75,6 @@ __all__ = [
     "_DECISION_MARKER_ICONS",
     "_DECISION_MARKER_STYLES",
     "_DOT_ICON",
-    "_ENTRY_DETAILS",
     "_FOOTER_HINT",
     "_FindingsListView",
     "_SEVERITY_DOT_STYLES",

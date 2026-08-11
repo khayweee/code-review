@@ -187,8 +187,9 @@ class FindingsList(Vertical):
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Confirm whatever the cursor currently points at for the selected row's finding
-        -- a no-op outside a park. Every entry is discussion-only, so this always opens the
-        inline chat, seeded with that entry's own text (empty for "Chat about it")."""
+        -- a no-op outside a park. A suggestion entry records itself as the fix immediately,
+        verbatim, with no edit step -- "Chat about it" is the one entry with no text of its
+        own to record, so confirming it opens the inline chat instead."""
 
         if not self._parked:
             return
@@ -198,7 +199,7 @@ class FindingsList(Vertical):
         if entry == _CUSTOM_ENTRY:
             self._open_chat("")
         else:
-            self._open_chat(entry)
+            self._record_decision("fix", entry)
 
     def _prime_highlighted(self) -> None:
         item = self._highlighted_finding()
