@@ -2312,6 +2312,68 @@ def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> Non
     asyncio.run(scenario())
 
 
+def test_findings_list_reopening_chat_on_a_revisited_row_restores_its_typed_instructions() -> (
+    None
+):
+    """A human types custom instructions into a row's chat, confirms it (advancing to the
+    next row), then browses back and reopens that row's chat -- the `Input` must come back
+    seeded with what was originally typed, not blank. Before this fix every chat-open call
+    site hardcoded `prefill=""`, so the original text was gone and a stray Enter would
+    silently overwrite the recorded "fix" instructions with an empty string."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            list_view.focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("enter")  # opens the chat on row 0
+            await pilot.pause()
+            box.query_one(Input).value = "actually rename it"
+            await pilot.press("enter")  # confirms row 0, advances to row 1
+            await pilot.pause()
+            assert list_view.index == 1
+
+            await pilot.press("up")  # browse back to the already-decided row 0
+            await pilot.pause()
+            assert list_view.index == 0
+            assert not list(box.query(Input))
+
+            await pilot.press("enter")  # reopens row 0's chat
+            await pilot.pause()
+            assert box.query_one(Input).value == "actually rename it"
+
+            # A bare re-confirm must not corrupt the recorded decision with blank text.
+            await pilot.press("enter")
+            await pilot.pause()
+            assert list_view.index == 1
+            assert box._rows[0].row_decision == ApprovalResponse(
+                decision="fix", instructions="actually rename it"
+            )
+
+            await pilot.press("s")  # decide row 1 too -- every row now decided, resolves
+            await pilot.pause()
+
+            response = await task
+            assert response == ApprovalResponse(
+                decision="fix", instructions="- [warning] first finding: actually rename it"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_findings_list_abort_resolves_immediately_regardless_of_per_row_progress() -> None:
     """ "x" (abort) stays a whole-run action, unchanged by issue #98: it resolves the park
     the instant it's pressed, even with some rows already decided and others not."""

@@ -196,7 +196,7 @@ class FindingsList(Vertical):
         assert isinstance(item, Finding)
         entry = item.confirmed_entry()
         if entry == _CUSTOM_ENTRY:
-            self._open_chat("")
+            self._open_chat()
         else:
             self._record_decision("fix", entry)
 
@@ -250,7 +250,7 @@ class FindingsList(Vertical):
             return
         item.cycle_decision(delta)
         if item.confirmed_entry() == _CUSTOM_ENTRY:
-            self._open_chat("")
+            self._open_chat()
 
     def _jump_decision(self, index: int) -> None:
         """Digit-key counterpart to `_cycle_decision` -- same "open the chat the instant
@@ -264,7 +264,7 @@ class FindingsList(Vertical):
             return
         item.jump_decision(index)
         if item.confirmed_entry() == _CUSTOM_ENTRY:
-            self._open_chat("")
+            self._open_chat()
 
     def _quick_decision(self, decision: ApprovalDecision) -> None:
         """ "s"/"x"'s shared entry point. "abort" resolves `self._pending` directly and
@@ -279,17 +279,39 @@ class FindingsList(Vertical):
             return
         self._record_decision(decision, None)
 
-    def _open_chat(self, prefill: str) -> None:
+    def _chat_prefill(self, item: Finding) -> str:
+        """The text to seed a freshly (re)opened chat with: the highlighted row's own
+        previously recorded "fix" instructions, if it has any, so browsing away from a
+        decided row and back -- then reopening its chat via Enter/"f"/cycling back onto
+        "Chat about it" -- shows what was already confirmed instead of an empty box.
+        Without this, a stray Enter on a revisited row would resubmit an empty `Input` and
+        silently overwrite the real instructions with "" in the aggregated fix prompt
+        (`pipeline.findings.describe_finding_decisions`). Empty for an undecided row, or
+        one decided "skip" -- there is no fix text to restore."""
+
+        response = item.row_decision
+        if response is not None and response.decision == "fix":
+            return response.instructions or ""
+        return ""
+
+    def _open_chat(self, prefill: str | None = None) -> None:
         """Open the highlighted row's chat, seeded with `prefill`, in place inside that
         row's own `FindingsSuggestion`. Idempotent, so calling this twice in a row -- via a
         cycle/jump auto-open and again via a redundant Enter/"f" -- never stacks or resets
-        anything. Focuses the returned `Input`."""
+        anything. Focuses the returned `Input`.
+
+        `prefill` defaults to `_chat_prefill`'s own row-decision-aware guess rather than
+        always `""`, so every real key-binding call site (Enter/"f"/cycle/jump) gets that
+        behavior for free. Tests pass an explicit string (including `""`) to force a
+        specific seed regardless of the row's recorded decision."""
 
         if not self._parked:
             return
         item = self._highlighted_finding()
         if item is None:
             return
+        if prefill is None:
+            prefill = self._chat_prefill(item)
         input_widget = item.open_chat(prefill)
         if input_widget is not None:
             input_widget.focus()
