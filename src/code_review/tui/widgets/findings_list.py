@@ -163,8 +163,7 @@ class FindingsList(Vertical):
             if self._last_highlighted in removed:
                 self._last_highlighted = None
             if list_view.index is not None and list_view.index >= len(new_findings):
-                list_view.index = len(new_findings) - \
-                    1 if new_findings else None
+                list_view.index = len(new_findings) - 1 if new_findings else None
 
         if new_findings and list_view.index is None:
             list_view.index = 0
@@ -300,8 +299,7 @@ class FindingsList(Vertical):
         if not self._parked or self._pending is None:
             return
         if decision == "abort":
-            self._pending.set_result(ApprovalResponse(
-                decision="abort", instructions=None))
+            self._pending.set_result(ApprovalResponse(decision="abort", instructions=None))
             return
         self._record_decision(decision, None)
 
@@ -386,8 +384,7 @@ class FindingsList(Vertical):
         item = self._highlighted_finding()
         if item is None:
             return
-        item.record_decision(ApprovalResponse(
-            decision=decision, instructions=instructions))
+        item.record_decision(ApprovalResponse(decision=decision, instructions=instructions))
         self._set_footer_hint(True)
         if all(row.is_decided() for row in self._rows):
             self._resolve_park()
@@ -456,8 +453,7 @@ class FindingsList(Vertical):
             footer.update("")
             return
         decided = sum(1 for row in self._rows if row.is_decided())
-        footer.update(
-            f"{_FOOTER_HINT}  |  {decided}/{len(self._rows)} decided")
+        footer.update(f"{_FOOTER_HINT}  |  {decided}/{len(self._rows)} decided")
 
     async def await_decision(self) -> ApprovalResponse:
         """Turn the highlighted row's `FindingsSuggestion` into a live decision selector
