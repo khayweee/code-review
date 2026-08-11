@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator, Sequence
 
 from textual.app import App, ComposeResult
 from textual.timer import Timer
+from textual.widget import MountError
 
 from code_review.pipeline.step import StepEvent
 from code_review.tui.activity import ActivityEvent, ActivityRelay
@@ -127,9 +128,26 @@ class ReviewApp(App[None]):
         )
 
     def _render(self) -> None:
-        self.query_one(PipelineBox).update_rows(self._rows())
-        self._render_findings()
-        self._render_status()
+        """Re-render every box driven by current state.
+
+        Four independent callers can reach this -- the tick timer, `_consume_events`,
+        `_consume_activities`, and `_relay_approval` -- any of which can still be
+        scheduled to run after `self.exit()` fires (e.g. a background worker's own
+        pending render, mid-flight when the app starts exiting). `Widget.mount()` treats
+        a widget already flagged `_closing`/`_pruning` as a graceful no-op, but that flag
+        lags one step behind `App.exit()` itself: `is_attached` (which every mount call
+        checks first) goes `False` the instant `exit()` sets `App._exit`, before
+        `_closing`/`_pruning` catch up -- so a render landing in that gap raises
+        `MountError` instead of no-op'ing. Nothing is worth rendering once the app is on
+        its way out either way, so this simply drops the render rather than crash it.
+        """
+
+        try:
+            self.query_one(PipelineBox).update_rows(self._rows())
+            self._render_findings()
+            self._render_status()
+        except MountError:
+            pass
 
     def _render_findings(self) -> None:
         """Mount, update in place, or remove the Findings box, driven by

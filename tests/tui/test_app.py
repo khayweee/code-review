@@ -267,6 +267,34 @@ def test_review_app_shows_no_status_box_while_the_run_is_still_in_progress() -> 
     asyncio.run(scenario())
 
 
+def test_review_app_render_after_exit_is_called_does_not_raise() -> None:
+    """Regression test: a background worker (`_consume_events`, `_consume_activities`, or
+    `_relay_approval`) can still have its own call to `_render()` in flight -- e.g.
+    mid-`finally` block -- at the exact moment something else calls `self.exit()`.
+    `Widget.mount()` raises `MountError` rather than no-op'ing in that gap (see `_render`'s
+    own docstring for why), which used to crash the whole app instead of just ending the
+    run. Reproduces the gap directly: force the exact state `_consume_events`'s `finally`
+    reaches (`_done=True`, no `StatusBox` mounted yet) at the moment `exit()` has already
+    fired, then call `_render()` the same way that `finally` block does."""
+
+    async def scenario() -> None:
+        async def hangs_until_cancelled() -> AsyncIterator[StepEvent]:
+            await asyncio.Future()
+            yield  # pragma: no cover - unreachable, only makes this an async generator
+
+        app = ReviewApp(REGISTRY, hangs_until_cancelled())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            app.exit()
+            app._done = True
+            app._render()  # Must not raise MountError.
+
+            assert list(app.query(StatusBox)) == []
+
+    asyncio.run(scenario())
+
+
 def test_review_app_status_box_shows_success_message_after_a_clean_run() -> None:
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _one_step_completes())
