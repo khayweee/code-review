@@ -83,16 +83,9 @@ _SHIMMER_PEAK_LIGHTNESS = 0.90
 
 
 def gradient_text(label: str, phase: float) -> Text:
-    """Pure per-character gradient color computation for the running step's name.
-
-    - A "rendering..." shimmer distinct from the plain text a pending/completed row gets.
-    - Factored out of `_render_row` so the color math is unit-testable without Textual or
-      timing flakiness.
-    - A single grayscale highlight band sweeps across the label once per phase cycle,
-      brightest at the band's center, fading to `_SHIMMER_BASE_LIGHTNESS` at its edges.
-    - The caller passes `time.monotonic()` as `phase` so consecutive repaints visibly move.
-    - Zero saturation keeps every stop neutral gray/white rather than cycling hues.
-    """
+    """Per-character grayscale shimmer for a running step's name: one highlight band
+    sweeps across the label per phase cycle, brightest at its center. `phase` drives the
+    sweep position -- pass `time.monotonic()` so consecutive repaints visibly move."""
 
     text = Text()
     length = max(len(label), 1)
@@ -112,15 +105,10 @@ def gradient_text(label: str, phase: float) -> Text:
 def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | Text, Text]:
     """Render one row as Rich renderables, using a live spinner for running rows.
 
-    - `spinners` caches one `Spinner` instance per running step name (`PipelineBox._spinners`),
-      shared across repeated calls -- constructing a fresh `Spinner` every render would reset
-      its animation clock and it would never look animated.
-    - A row that stops running has its cached spinner evicted, so a later run of the
-      same-named step starts its animation fresh.
-    - A running row's name renders via `gradient_text` (phased by `time.monotonic()`); the
-      duration suffix stays plain, appended after.
-    - A completed/failed row's icon renders as a colored `_DOT_ICON`; pending keeps its
-      plain hollow-ring glyph.
+    `spinners` caches one `Spinner` per running step name so repeated calls reuse the same
+    instance -- a fresh `Spinner` every render would reset its animation clock. A row that
+    stops running has its cached spinner evicted. Running rows shimmer via `gradient_text`;
+    completed/failed rows get a colored `_DOT_ICON`; pending keeps the plain glyph.
     """
 
     if row.status != "running":
@@ -139,17 +127,13 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
 
 
 def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> Group:
-    """Render every row as Rich renderables so the running row can animate itself.
+    """Render every row as Rich renderables so the running row can animate itself, each
+    row's `activities` as tree-connected lines beneath it.
 
-    - Each row's own `activities` render as tree-connected lines immediately beneath it.
-    - Returns a `Group` of one small `(icon, text)` grid per step, not one shared
-      `Table.grid` spanning every row -- a shared grid sizes every row's icon column to
-      the widest cell across *every* row ever added, so a step with no activities still
-      got padded to match some unrelated step's longest connector.
-    - Activity lines need no grid: each is one already-formed `Text` line, its `├─`/`└─`
-      connector baked directly into the string by `format_activity_row`.
-    - `spinners` is the caller's cache (see `_render_row`), passed in so it persists
-      across repeated calls for the same `PipelineBox`.
+    Returns a `Group` of one small `(icon, text)` grid per step rather than one shared
+    `Table.grid` -- a shared grid would size every row's icon column to the widest cell
+    across all rows. `spinners` is the caller's cache, passed through to `_render_row` so
+    it persists across repeated calls for the same `PipelineBox`.
     """
 
     renderables: list[Table | Text] = []
@@ -179,9 +163,8 @@ class PipelineBox(_BorderedBox):
         id: (str | None) = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
-        # One `Spinner` per currently-running step name, reused across `update_rows`
-        # calls for as long as that step stays running -- see `_render_row`'s docstring
-        # for why a fresh `Spinner` per render never animates.
+        # One `Spinner` per currently-running step name, reused across `update_rows` calls
+        # so the animation clock doesn't reset every render. See `_render_row`.
         self._spinners: dict[str, Spinner] = {}
         super().__init__(render_rows_live(rows, self._spinners), id=id, classes=classes)
         self._rows = list(rows)
@@ -191,15 +174,11 @@ class PipelineBox(_BorderedBox):
         self.set_interval(1 / 60, self._animate_shimmer)
 
     def _animate_shimmer(self) -> None:
-        """Re-run `render_rows_live` every tick, not just `self.refresh()`.
-
-        - `refresh()` alone only repaints the already-stored renderable; it does not call
-          `gradient_text` again, so a running row's shimmer would freeze between events.
-        - `layout=False` since this recompute never changes row count/line length, only
-          per-character color.
-        - Named `_animate_shimmer`, not `_animate` -- `Widget` already defines a private
-          `_animate` attribute for its own animation system.
-        """
+        """Re-run `render_rows_live` every tick rather than just `self.refresh()`, which
+        would only repaint the already-stored renderable and never call `gradient_text`
+        again -- the shimmer would freeze between events. `layout=False` since this never
+        changes row count/line length, only per-character color. Named `_animate_shimmer`,
+        not `_animate` -- `Widget` already owns a private `_animate` attribute."""
 
         self.update(render_rows_live(self._rows, self._spinners), layout=False)
 

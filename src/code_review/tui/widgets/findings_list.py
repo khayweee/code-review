@@ -118,18 +118,17 @@ class FindingsList(Vertical):
     ) -> None:
         """Replace the displayed findings with `output`'s, and update `border_title`.
 
-        - Called on every periodic render tick, whether or not `output` actually changed.
-        - The common case (finding count unchanged) updates every existing row in place,
-          touching no DOM structure at the `_FindingsListView` level at all -- so
-          `_FindingsListView.index` and every row's own cursor/mode survive untouched.
-        - Only the finding count actually growing or shrinking mounts or removes rows, and
-          only the ones beyond the overlap with the old list.
-        - Reconciles against `self._rows` (this box's own authoritative row list), never
-          against a fresh `_FindingsListView.children` read -- both mounting and removal
-          are asynchronous in Textual, so a live query at the wrong moment would
-          undercount or double-count rows still settling into the DOM.
-        - Skips the child rebuild entirely (but still updates `self._output`/
-          `border_title`) when `_FindingsListView` itself hasn't composed yet.
+        Called on every periodic render tick, whether or not `output` actually changed. The
+        common case (finding count unchanged) updates every existing row in place, touching
+        no `_FindingsListView`-level DOM structure -- so its cursor index and every row's
+        own mode survive untouched. Only a growing/shrinking finding count mounts or
+        removes rows, and only the ones beyond the overlap with the old list.
+
+        Reconciles against `self._rows` (this box's own authoritative row list), never a
+        fresh `_FindingsListView.children` read -- Textual mounts/removes children
+        asynchronously, so a live query mid-tick could under/over-count rows still settling
+        into the DOM. No-ops the child rebuild (but still updates `border_title`) if
+        `_FindingsListView` hasn't composed yet.
         """
 
         self._output = output
@@ -367,17 +366,13 @@ class FindingsList(Vertical):
 
     def _resolve_park(self) -> None:
         """Aggregate every row's now-final decision into the one `ApprovalResponse` that
-        resolves `self._pending` -- called the moment every row in `self._rows` has a
-        decision; never called directly by a key binding.
+        resolves `self._pending` -- called once every row in `self._rows` has a decision;
+        never called directly by a key binding.
 
-        - A park with exactly one row resolves with that row's own `ApprovalResponse`,
-          completely unwrapped, reproducing this class's original immediate-resolve
-          behavior byte for byte -- there is nothing for a combined instructions blob to
-          usefully distinguish with only one finding.
-        - Otherwise, every "fix"-decided row's instructions are combined via
-          `describe_finding_decisions` into one `instructions` string, resolved with
-          `decision="fix"`; if every row chose "skip" instead, resolves with
-          `decision="skip", instructions=None`.
+        A single-row park resolves with that row's own `ApprovalResponse`, unwrapped.
+        Otherwise every "fix"-decided row's instructions are combined via
+        `describe_finding_decisions` into one `decision="fix"` response; if every row chose
+        "skip" instead, resolves `decision="skip", instructions=None`.
         """
 
         assert self._pending is not None
@@ -418,20 +413,17 @@ class FindingsList(Vertical):
         """Turn the highlighted row's `FindingsSuggestion` into a live decision selector
         until every row in `self._rows` has its own decision and the park resolves.
 
-        - Confirming a suggestion or "Chat about it" via the inline chat records "fix" for
-          the highlighted row; `_FindingsListView`'s "s" binding records "skip" for it.
-          "x" (abort) resolves the whole run immediately regardless of per-row progress.
-        - Each row's decision is per-finding, not step-scoped: `_record_decision` records
-          onto the highlighted `Finding`'s own state, then either resolves the park (once
-          every row has a decision) or moves the highlighted cursor to the next undecided
-          row, leaving the park open so a human can act on the remaining findings one at a
-          time.
-        - Resets every row's decision back to undecided at the very start, since a step's
-          fix-round loop can re-park the same `FindingsList` on a fresh round.
-        - Awaits `_await_list_view()` (not the plain `_list_view()`) so the initial
-          `.focus()` call actually lands even if this coroutine starts running before
-          `FindingsList` has finished composing; restores plain display and unparks in a
-          `finally` regardless of how the park resolved.
+        Confirming a suggestion or "Chat about it" records "fix" for the highlighted row;
+        "s" records "skip"; "x" (abort) resolves the whole run immediately regardless of
+        per-row progress. Each recorded decision either resolves the park (once every row
+        is decided) or moves the highlighted cursor to the next undecided row via
+        `_record_decision`, leaving the park open for the rest.
+
+        Resets every row's decision to undecided at the start, since a fix-round can
+        re-park the same `FindingsList` on a fresh round. Awaits `_await_list_view()` (not
+        the plain `_list_view()`) so the initial `.focus()` call lands even if this
+        coroutine starts before `FindingsList` finishes composing; restores plain display
+        in a `finally` regardless of how the park resolved.
         """
 
         self._parked = True

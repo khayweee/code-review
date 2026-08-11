@@ -33,17 +33,13 @@ def format_finding(finding: FindingData) -> str:
 
 
 def render_description(finding: FindingData, decision: ApprovalDecision | None = None) -> Text:
-    """`FindingsDescription`'s content: severity dot, then `format_finding`'s text.
+    """`FindingsDescription`'s content: severity dot (`_SEVERITY_DOT_STYLES`, keyed by
+    `finding.severity`), then `format_finding`'s text.
 
-    - A colored `_DOT_ICON` (`_SEVERITY_DOT_STYLES`, keyed by `finding.severity`) is the
-      per-finding risk indicator, reusing `severity` rather than a new field.
-    - `decision` is this row's own recorded park decision; `None` (the default) renders
-      identically to before that feature existed, so every non-parked call site is unaffected.
-    - When `decision` is "fix"/"skip", a small marker (`_DECISION_MARKER_ICONS`/`_STYLES`)
-      is prefixed so a human can tell a decided row apart from an undecided one while
-      browsing any row during a park, not just the highlighted one.
-    - Any other `decision` value (or `None`) renders with no marker at all, matching this
-      module's "no exceptions on data outside its documented shape" style.
+    `decision` is this row's own recorded park decision; `None` (the default, used by every
+    non-parked call site) renders no marker. "fix"/"skip" prefix a small marker
+    (`_DECISION_MARKER_ICONS`/`_STYLES`) so a human can tell a decided row apart from an
+    undecided one while browsing any row during a park, not just the highlighted one.
     """
 
     text = Text()

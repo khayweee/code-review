@@ -86,11 +86,8 @@ class Finding(ListItem):
 
     def _render_suggestion(self) -> None:
         """Apply the current `_mode` to this row's `FindingsSuggestion`, unless this row's
-        own `compose()` hasn't run yet.
-
-        - `_mode` is already updated by the caller regardless, so skipping the render here
-          isn't lossy -- `compose()`'s own `_apply_mode` call picks it up once it does run.
-        """
+        own `compose()` hasn't run yet -- not lossy, since `compose()`'s own `_apply_mode`
+        call picks up `_mode` once it does run."""
 
         try:
             suggestion = self.query_one(FindingsSuggestion)
@@ -99,52 +96,40 @@ class Finding(ListItem):
         self._apply_mode(suggestion)
 
     def reset_decision(self) -> None:
-        """Reset `_decision_cursor` back to 0 -- called whenever this row becomes the
-        highlighted one under a park, so each finding's own decision cycle always starts
-        fresh. Not to be confused with `clear_decision` below, which resets the row's
-        recorded decision, not this browsing cursor."""
+        """Reset the browsing cursor to 0 -- called whenever this row becomes highlighted,
+        so each finding's decision cycle starts fresh. Distinct from `clear_decision`,
+        which resets the recorded decision, not the cursor."""
 
         self._decision_cursor = 0
 
     def is_decided(self) -> bool:
-        """True once this row has a recorded decision since the last `clear_decision`/
-        park start. `FindingsList._record_decision` checks this across every row to decide
-        whether to resolve the whole park yet, or advance to the next undecided row."""
+        """True once this row has a recorded decision since the last `clear_decision`."""
 
         return self._row_decision is not None
 
     @property
     def row_decision(self) -> ApprovalResponse | None:
-        """This row's own recorded decision, or `None` while undecided -- read by
-        `FindingsList._resolve_park` once every row is decided, to build the combined
-        `ApprovalResponse`."""
+        """This row's own recorded decision, or `None` while undecided."""
 
         return self._row_decision
 
     def record_decision(self, response: ApprovalResponse) -> None:
-        """Record `response` as this row's own decision.
-
-        - Called only for the currently-highlighted row, from its own inline chat or "s".
-        - Overwrites whatever this row's previous decision was -- reconfirming an
-          already-decided row is meant to overwrite, not be rejected.
-        - Re-renders this row's `FindingsDescription` so its decided marker reflects the
-          change immediately.
-        """
+        """Record `response` as this row's decision, overwriting any previous one, and
+        re-render `FindingsDescription`'s decided marker immediately."""
 
         self._row_decision = response
         self._render_description()
 
     def clear_decision(self) -> None:
-        """Reset this row back to undecided -- called for every row at the very start of
-        each park, so a fix-round's re-park never starts with the previous round's per-row
-        decisions already carried over."""
+        """Reset this row back to undecided -- called for every row at the start of each
+        park, so a fix-round's re-park never carries over the previous round's decision."""
 
         self._row_decision = None
         self._render_description()
 
     def _render_description(self) -> None:
-        """Apply this row's current decision marker to `FindingsDescription`, guarded the
-        same way `_render_suggestion` is for a row that hasn't composed yet."""
+        """Apply this row's decision marker to `FindingsDescription`, guarded like
+        `_render_suggestion` for a row that hasn't composed yet."""
 
         try:
             description = self.query_one(FindingsDescription)
@@ -155,9 +140,8 @@ class Finding(ListItem):
 
     def update_finding(self, finding: FindingData) -> None:
         """Data changed in place, same list position -- refresh every child, preserving
-        this row's current display mode and its own decision marker rather than resetting
-        either. Skipped, like the render helpers above, when this row hasn't composed yet
-        -- `self.finding` is still updated regardless."""
+        this row's display mode and decision marker. `self.finding` is updated regardless
+        of whether this row has composed yet."""
 
         self.finding = finding
         self._render_description()
@@ -169,9 +153,9 @@ class Finding(ListItem):
         self.set_decision()
 
     def jump_decision(self, index: int) -> None:
-        """Jump `_decision_cursor` straight to `index` (0-based) -- the digit-key
-        counterpart to `cycle_decision`'s relative left/right step. A no-op when `index`
-        is past this finding's own entry count."""
+        """Jump the cursor straight to `index` (0-based) -- the digit-key counterpart to
+        `cycle_decision`'s relative left/right step. No-ops past this finding's entry
+        count."""
 
         entries = _decision_entries(self.finding)
         if not 0 <= index < len(entries):
@@ -184,12 +168,9 @@ class Finding(ListItem):
 
     def open_chat(self, prefill: str) -> Input | None:
         """A human deliberately opened the chat on this row -- via Enter/"f", or a
-        cycle/jump landing the cursor on `_CUSTOM_ENTRY` (see `FindingsList._open_chat`).
-
-        - Moves `_decision_cursor` straight to the trailing entry regardless of where it
-          already was, so a confirmed suggestion's text has somewhere live to render.
-        - Returns the `FindingsSuggestion`'s `Input` once this row has composed, or `None`
-          when it hasn't yet -- the same guard `_render_suggestion` already uses.
+        cycle/jump landing the cursor on `_CUSTOM_ENTRY`. Moves the cursor to the trailing
+        entry regardless of where it was, so a confirmed suggestion's text has somewhere
+        live to render. Returns the `Input` once this row has composed, `None` otherwise.
         """
 
         entries = _decision_entries(self.finding)

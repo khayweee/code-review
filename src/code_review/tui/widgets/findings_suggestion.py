@@ -93,14 +93,13 @@ def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
 
 def render_decision_cycle_head(finding: FindingData, decision_cursor: int) -> Text:
     """Every `_decision_entries` entry except the trailing `_CUSTOM_ENTRY`, rendered exactly
-    as `render_decision_cycle` would -- the entry after this list is drawn separately, by
+    as `render_decision_cycle` would -- the trailing entry is drawn separately, by
     `render_custom_entry_line`/a live `Input`.
 
-    - No trailing newline after the last entry: `FindingsSuggestion.show_decision` renders
-      this straight into `self._entries`, and a Rich `Text` ending in `"\\n"` renders an
-      extra, otherwise-invisible empty line beneath it -- that was the actual root cause of
-      the gap that used to appear above "Chat about it" (not a CSS margin). A real divider
-      (`self._custom`'s own `border-top`, `findings_suggestion.tcss`) replaces it now.
+    No trailing newline after the last entry: `FindingsSuggestion.show_decision` renders
+    this straight into `self._entries`, and a Rich `Text` ending in `"\\n"` renders an
+    extra, invisible empty line beneath it. A real divider (`self._custom`'s own
+    `border-top`) marks the boundary instead.
     """
 
     entries = _decision_entries(finding)
@@ -135,17 +134,12 @@ class FindingsSuggestion(Vertical):
       `_CUSTOM_ENTRY`, `self._custom` for that entry's own line), since decision mode needs
       to replace the trailing line with a live `Input` in place.
     - `display: none` while hidden, so `FindingsDescription` takes the whole row instead of
-      an always-reserved, unused half.
-    - The `-visible` class restores `display: block` and draws a full border, so this
-      column only reads as its own widget once it actually has content.
-    - `self._custom` always carries the `-custom-entry` class (styled a lighter, muted gray
-      in `findings_suggestion.tcss` -- distinct from both the plain-foreground suggestion
-      entries above it and `.-chat-hint`'s own, dimmer `$text-disabled`), so "Chat about
-      it" reads as "type your own", not as another agent-generated suggestion. The
-      `-decision` class is toggled alongside it (added in `show_decision`, removed in
-      `show_plain`/`clear`) to draw a `border-top` divider directly above it -- only while
-      decision mode is actually showing a "Chat about it" entry, since plain mode and
-      hidden/cleared rows have no such entry to divide from.
+      an always-reserved, unused half. The `-visible` class restores `display: block` and
+      draws a full border, so this column only reads as its own widget once it has content.
+    - `self._custom` always carries `-custom-entry` (styled a muted gray) so "Chat about
+      it" reads as "type your own", not another agent-generated suggestion. `-decision` is
+      toggled alongside it (added in `show_decision`, removed in `show_plain`/`clear`) to
+      draw a `border-top` divider above it, only while a "Chat about it" entry is showing.
     """
 
     DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
@@ -187,18 +181,14 @@ class FindingsSuggestion(Vertical):
         self._remove_input()
 
     def show_decision(self, finding: FindingData, decision_cursor: int) -> None:
-        """Render decision mode.
-
-        - `self._entries` always gets every entry before `_CUSTOM_ENTRY`.
-        - The trailing slot shows `self._custom`'s plain text, UNLESS a chat is already
-          open on this row (`self._input is not None`), in which case that live `Input`
-          stays exactly as it is, untouched.
-        - Never opens the chat itself, even when `decision_cursor` already points at
-          `_CUSTOM_ENTRY` -- only a human's deliberate confirm/cycle/jump does that, via
-          `ensure_input`.
-        - Safe to call repeatedly at the same cursor from a periodic re-render: with no
-          `Input` open it just re-renders the same plain text; with one open, it leaves it
-          -- and whatever a human has typed into it -- completely alone.
+        """Render decision mode: `self._entries` gets every entry before `_CUSTOM_ENTRY`;
+        the trailing slot shows `self._custom`'s plain text, unless a chat is already open
+        on this row (`self._input is not None`), in which case that `Input` is left
+        untouched. Never opens the chat itself, even when `decision_cursor` points at
+        `_CUSTOM_ENTRY` -- only a deliberate confirm/cycle/jump does that, via
+        `ensure_input`. Safe to call repeatedly from a periodic re-render: with no `Input`
+        open it just re-renders the plain text; with one open, it leaves it -- and whatever
+        a human has typed -- completely alone.
         """
 
         self.add_class("-visible")
@@ -217,14 +207,10 @@ class FindingsSuggestion(Vertical):
 
     def ensure_input(self, prefill: str) -> Input:
         """Mount (if not already mounted) this row's live `Input` for `_CUSTOM_ENTRY`,
-        seeded with `prefill`, and return it.
-
-        - Called only when a human deliberately opens the chat, never by `show_decision`'s
-          own redundant re-renders.
-        - Idempotent: if one is already mounted, it is returned untouched, `prefill`
-          ignored -- so an already-open chat's typed value survives a redundant re-render.
-        - Placeholder text is the literal `_CUSTOM_ENTRY` string, shown only while empty.
-        """
+        seeded with `prefill`, and return it. Called only when a human deliberately opens
+        the chat, never by `show_decision`'s own redundant re-renders. Idempotent: if one
+        is already mounted, it's returned untouched and `prefill` is ignored, so an
+        already-open chat's typed value survives a redundant re-render."""
 
         if self._input is not None:
             return self._input
