@@ -26,11 +26,6 @@ from code_review.pipeline.findings import Finding as FindingData
 # suggestion) always records "fix" for whichever row it was confirmed on.
 _CUSTOM_ENTRY = "Chat about it"
 
-# Short static UI copy for `_CUSTOM_ENTRY`, shown as an indented detail line beneath it.
-_ENTRY_DETAILS: dict[str, str] = {
-    _CUSTOM_ENTRY: "Start typing to describe what you want.",
-}
-
 
 def _decision_entries(finding: FindingData) -> list[str]:
     """The full per-finding decision cycle a parked row cycles through.
@@ -55,24 +50,26 @@ def render_suggestions_plain(finding: FindingData) -> Text:
 def _render_decision_entry(
     index: int, entry: str, decision_cursor: int, *, has_own_suggestions: bool
 ) -> Text:
-    """One line (plus, for `_CUSTOM_ENTRY`, its indented detail line) of a decision cycle.
+    """One line of a decision cycle, with no trailing newline of its own.
 
     - Shared by `render_decision_cycle`/`render_decision_cycle_head`/
-      `render_custom_entry_line`, so the numbering/marker/detail-line rules stay defined
-      in exactly one place.
+      `render_custom_entry_line`, so the numbering/marker rules stay defined in exactly
+      one place.
+    - Deliberately returns a bare, newline-free line -- callers join multiple entries with
+      `"\\n"` as a *separator* rather than a trailing terminator, so the last entry in a
+      multi-entry render never carries a dangling trailing blank line (see
+      `render_decision_cycle_head`'s own docstring for why that distinction matters to
+      `FindingsSuggestion`).
     """
 
     marker = "> " if index == decision_cursor else "  "
     recommended = " (Recommended)" if index == 0 and has_own_suggestions else ""
-    text = Text(f"{marker}{index + 1}. {entry}{recommended}\n")
-    detail = _ENTRY_DETAILS.get(entry)
-    if detail is not None:
-        text.append(f"      {detail}\n")
-    return text
+    return Text(f"{marker}{index + 1}. {entry}{recommended}")
 
 
 def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
-    """The full decision cycle: every `_decision_entries` entry, numbered from 1.
+    """The full decision cycle: every `_decision_entries` entry, numbered from 1, one per
+    line with no trailing blank line after the last one.
 
     - A leading `"> "` marks whichever index `decision_cursor` names.
     - Entry 0 is labeled `" (Recommended)"` when it came from `finding.suggestions` itself.
@@ -84,6 +81,8 @@ def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
     entries = _decision_entries(finding)
     text = Text()
     for index, entry in enumerate(entries):
+        if index:
+            text.append("\n")
         text.append(
             _render_decision_entry(
                 index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
@@ -94,12 +93,20 @@ def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
 
 def render_decision_cycle_head(finding: FindingData, decision_cursor: int) -> Text:
     """Every `_decision_entries` entry except the trailing `_CUSTOM_ENTRY`, rendered exactly
-    as `render_decision_cycle` would -- the entry after this list is drawn separately, by
-    `render_custom_entry_line`/a live `Input`."""
+    as `render_decision_cycle` would -- the trailing entry is drawn separately, by
+    `render_custom_entry_line`/a live `Input`.
+
+    No trailing newline after the last entry: `FindingsSuggestion.show_decision` renders
+    this straight into `self._entries`, and a Rich `Text` ending in `"\\n"` renders an
+    extra, invisible empty line beneath it. A real divider (`self._custom`'s own
+    `border-top`) marks the boundary instead.
+    """
 
     entries = _decision_entries(finding)
     text = Text()
     for index, entry in enumerate(entries[:-1]):
+        if index:
+            text.append("\n")
         text.append(
             _render_decision_entry(
                 index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
@@ -127,9 +134,12 @@ class FindingsSuggestion(Vertical):
       `_CUSTOM_ENTRY`, `self._custom` for that entry's own line), since decision mode needs
       to replace the trailing line with a live `Input` in place.
     - `display: none` while hidden, so `FindingsDescription` takes the whole row instead of
-      an always-reserved, unused half.
-    - The `-visible` class restores `display: block` and draws a full border, so this
-      column only reads as its own widget once it actually has content.
+      an always-reserved, unused half. The `-visible` class restores `display: block` and
+      draws a full border, so this column only reads as its own widget once it has content.
+    - `self._custom` always carries `-custom-entry` (styled a muted gray) so "Chat about
+      it" reads as "type your own", not another agent-generated suggestion. `-decision` is
+      toggled alongside it (added in `show_decision`, removed in `show_plain`/`clear`) to
+      draw a `border-top` divider above it, only while a "Chat about it" entry is showing.
     """
 
     DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
@@ -143,7 +153,7 @@ class FindingsSuggestion(Vertical):
         super().__init__(id=id, classes=classes)
         self.border_title = "Suggestion"
         self._entries = Static("")
-        self._custom = Static("")
+        self._custom = Static("", classes="-custom-entry")
         # Set only once a human deliberately opens the chat (`ensure_input`) -- `None`
         # covers both "not parked"/"plain mode" and "cursor on `_CUSTOM_ENTRY` but not
         # opened yet", both of which render `self._custom`'s plain text instead.
@@ -158,32 +168,31 @@ class FindingsSuggestion(Vertical):
 
     def clear(self) -> None:
         self.remove_class("-visible")
+        self._custom.remove_class("-decision")
         self._entries.update("")
         self._custom.update("")
         self._remove_input()
 
     def show_plain(self, finding: FindingData) -> None:
         self.add_class("-visible")
+        self._custom.remove_class("-decision")
         self._entries.update(render_suggestions_plain(finding))
         self._custom.update("")
         self._remove_input()
 
     def show_decision(self, finding: FindingData, decision_cursor: int) -> None:
-        """Render decision mode.
-
-        - `self._entries` always gets every entry before `_CUSTOM_ENTRY`.
-        - The trailing slot shows `self._custom`'s plain text, UNLESS a chat is already
-          open on this row (`self._input is not None`), in which case that live `Input`
-          stays exactly as it is, untouched.
-        - Never opens the chat itself, even when `decision_cursor` already points at
-          `_CUSTOM_ENTRY` -- only a human's deliberate confirm/cycle/jump does that, via
-          `ensure_input`.
-        - Safe to call repeatedly at the same cursor from a periodic re-render: with no
-          `Input` open it just re-renders the same plain text; with one open, it leaves it
-          -- and whatever a human has typed into it -- completely alone.
+        """Render decision mode: `self._entries` gets every entry before `_CUSTOM_ENTRY`;
+        the trailing slot shows `self._custom`'s plain text, unless a chat is already open
+        on this row (`self._input is not None`), in which case that `Input` is left
+        untouched. Never opens the chat itself, even when `decision_cursor` points at
+        `_CUSTOM_ENTRY` -- only a deliberate confirm/cycle/jump does that, via
+        `ensure_input`. Safe to call repeatedly from a periodic re-render: with no `Input`
+        open it just re-renders the plain text; with one open, it leaves it -- and whatever
+        a human has typed -- completely alone.
         """
 
         self.add_class("-visible")
+        self._custom.add_class("-decision")
         self._entries.update(render_decision_cycle_head(finding, decision_cursor))
         entries = _decision_entries(finding)
         on_custom_entry = decision_cursor == len(entries) - 1
@@ -198,14 +207,10 @@ class FindingsSuggestion(Vertical):
 
     def ensure_input(self, prefill: str) -> Input:
         """Mount (if not already mounted) this row's live `Input` for `_CUSTOM_ENTRY`,
-        seeded with `prefill`, and return it.
-
-        - Called only when a human deliberately opens the chat, never by `show_decision`'s
-          own redundant re-renders.
-        - Idempotent: if one is already mounted, it is returned untouched, `prefill`
-          ignored -- so an already-open chat's typed value survives a redundant re-render.
-        - Placeholder text is the literal `_CUSTOM_ENTRY` string, shown only while empty.
-        """
+        seeded with `prefill`, and return it. Called only when a human deliberately opens
+        the chat, never by `show_decision`'s own redundant re-renders. Idempotent: if one
+        is already mounted, it's returned untouched and `prefill` is ignored, so an
+        already-open chat's typed value survives a redundant re-render."""
 
         if self._input is not None:
             return self._input

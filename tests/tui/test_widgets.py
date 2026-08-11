@@ -17,6 +17,7 @@ import pytest
 from rich.console import Console
 from rich.spinner import Spinner
 from textual.app import App, ComposeResult
+from textual.color import Color
 from textual.widgets import Input, ListItem, Static
 
 from code_review.pipeline.findings import Finding
@@ -674,15 +675,36 @@ def test_render_decision_cycle_has_no_recommended_label_with_no_suggestions() ->
     assert "1. Chat about it" in text.plain
 
 
-def test_render_decision_cycle_gives_the_one_fixed_entry_a_detail_line() -> None:
-    """A suggestion's own text stays single-line; the one fixed entry (`_CUSTOM_ENTRY`)
-    gets a short indented detail line."""
+def test_render_decision_cycle_gives_the_one_fixed_entry_no_detail_line() -> None:
+    """The one fixed entry (`_CUSTOM_ENTRY`) used to carry a short indented detail line
+    ("Start typing to describe what you want.") -- removed outright, not just hidden, since
+    it read as redundant with the entry's own label."""
 
     finding = Finding(severity="warning", description="unclear naming", review_scope="source")
 
     text = render_decision_cycle(finding, decision_cursor=0)
 
-    assert "Start typing to describe what you want." in text.plain
+    assert "Start typing" not in text.plain
+    assert text.plain == "> 1. Chat about it"
+
+
+def test_render_decision_cycle_has_no_trailing_blank_line() -> None:
+    """A `Text` ending in `"\\n"` renders an extra, otherwise-invisible empty line -- the
+    actual root cause of the gap that used to appear above "Chat about it" in
+    `FindingsSuggestion` (not a CSS margin). Entries are joined by `"\\n"`, not each
+    terminated by one, so the last entry never dangles a trailing newline."""
+
+    finding = Finding(
+        severity="warning",
+        description="unclear naming",
+        review_scope="source",
+        suggestions=["rename it"],
+    )
+
+    text = render_decision_cycle(finding, decision_cursor=0)
+
+    assert not text.plain.endswith("\n")
+    assert text.plain == "> 1. rename it (Recommended)\n  2. Chat about it"
 
 
 def test_render_decision_cycle_head_excludes_the_trailing_custom_entry() -> None:
@@ -704,6 +726,23 @@ def test_render_decision_cycle_head_excludes_the_trailing_custom_entry() -> None
     assert "Chat about it" not in text.plain
 
 
+def test_render_decision_cycle_head_has_no_trailing_blank_line() -> None:
+    """Same root-cause fix as `render_decision_cycle` above, for the head-only render
+    `FindingsSuggestion.show_decision` actually uses."""
+
+    finding = Finding(
+        severity="warning",
+        description="unclear naming",
+        review_scope="source",
+        suggestions=["rename it", "add a docstring"],
+    )
+
+    text = render_decision_cycle_head(finding, decision_cursor=0)
+
+    assert not text.plain.endswith("\n")
+    assert text.plain == "> 1. rename it (Recommended)\n  2. add a docstring"
+
+
 def test_render_decision_cycle_head_is_empty_with_no_suggestions() -> None:
     """A finding with no suggestions of its own has only `_CUSTOM_ENTRY` in its decision
     cycle -- entirely excluded from the head, which is left with nothing to render."""
@@ -715,11 +754,11 @@ def test_render_decision_cycle_head_is_empty_with_no_suggestions() -> None:
     assert text.plain == ""
 
 
-def test_render_custom_entry_line_marks_the_cursor_and_keeps_the_detail_line() -> None:
-    """`render_custom_entry_line` renders exactly the one line (plus detail) that
-    `render_decision_cycle` would have rendered for `_CUSTOM_ENTRY` -- marked when the
-    cursor is on it, plain otherwise -- so `FindingsSuggestion` can show it standing alone,
-    swapped for a live `Input` once a human opens the chat."""
+def test_render_custom_entry_line_marks_the_cursor_with_no_detail_line() -> None:
+    """`render_custom_entry_line` renders exactly the one line `render_decision_cycle` would
+    have rendered for `_CUSTOM_ENTRY` -- marked when the cursor is on it, plain otherwise --
+    so `FindingsSuggestion` can show it standing alone, swapped for a live `Input` once a
+    human opens the chat. No detail line, and no trailing newline of its own."""
 
     finding = Finding(
         severity="warning",
@@ -729,11 +768,10 @@ def test_render_custom_entry_line_marks_the_cursor_and_keeps_the_detail_line() -
     )
 
     unmarked = render_custom_entry_line(finding, decision_cursor=0)
-    assert "  2. Chat about it" in unmarked.plain
-    assert "Start typing to describe what you want." in unmarked.plain
+    assert unmarked.plain == "  2. Chat about it"
 
     marked = render_custom_entry_line(finding, decision_cursor=1)
-    assert "> 2. Chat about it" in marked.plain
+    assert marked.plain == "> 2. Chat about it"
 
 
 # --- FindingsList, mounted and driven through Pilot ----------------------------------------
@@ -823,6 +861,53 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
     asyncio.run(scenario())
 
 
+def test_findings_list_highlighted_row_recolors_text_with_no_background_fill() -> None:
+    """The highlighted row must not get a solid background fill -- Textual's own two
+    built-in `ListView` highlight rules (`_list_view.py`'s blurred `& > ListItem.-highlight`
+    and focused `&:focus { & > ListItem.-highlight }`) are overridden (`finding.tcss`) so
+    only the text recolors, to this box's own border color (`$primary`), in both focus
+    states. `FindingsDescription`'s own rendered text is checked too, not just `Finding`'s
+    own `styles.color` -- overriding `color` on `Finding` alone is not sufficient (see
+    `finding.tcss`'s own comment on Textual's `auto-color` companion property)."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            rows = list(box.query(FindingItem))
+            desc0 = rows[0].query_one(FindingsDescription)
+            desc1 = rows[1].query_one(FindingsDescription)
+            primary = Color.parse(app.get_css_variables()["primary"])
+
+            assert list_view.has_focus
+            assert rows[0].styles.background.a == 0
+            assert rows[1].styles.background.a == 0
+            assert rows[0].styles.color == primary
+            assert Color.from_rich_color(desc0.rich_style.color) == primary
+            assert Color.from_rich_color(desc1.rich_style.color) != primary
+
+            # The focused default rule is the one whose `color` this ticket's own
+            # verification found hardest to beat (see `finding.tcss`) -- prove the blurred
+            # state independently rather than assuming it behaves the same way.
+            app.set_focus(None)
+            await pilot.pause()
+            assert not list_view.has_focus
+            assert rows[0].styles.background.a == 0
+            assert Color.from_rich_color(desc0.rich_style.color) == primary
+
+    asyncio.run(scenario())
+
+
 def test_findings_suggestion_has_a_suggestion_border_title() -> None:
     """`FindingsSuggestion.border_title` is set directly in `__init__`, the same mechanism
     `PipelineBox`/`FindingsList`/`StatusBox` already use -- it only actually renders once a
@@ -843,6 +928,92 @@ def test_findings_suggestion_has_a_suggestion_border_title() -> None:
             box = app.query_one(FindingsList)
             suggestion = box.query_one(FindingsSuggestion)
             assert suggestion.border_title == "Suggestion"
+
+    asyncio.run(scenario())
+
+
+def test_findings_suggestion_custom_entry_is_styled_a_muted_gray_distinct_from_entries() -> None:
+    """ "Chat about it" (`self._custom`, the `.-custom-entry` class) should read as "type
+    your own", not another agent-generated suggestion -- styled `$text-muted`
+    (`findings_suggestion.tcss`), distinct from the plain-foreground suggestion entries
+    above it in `self._entries`. Checked at the style-rule level (`has_rule`/`.a`, the same
+    empirical approach used for the highlight-color fix above) rather than a hardcoded
+    hex, since `$text-muted` is itself an auto-contrast token."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="unclear naming",
+                    review_scope="source",
+                    suggestions=["rename it"],
+                )
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            suggestion = box.query_one(FindingsSuggestion)
+            entries_static, custom_static = suggestion.query(Static)
+
+            assert custom_static.has_class("-custom-entry")
+            # `$text-muted` = "auto 60%" -- our rule sets its own `color`/`auto-color`
+            # directly on this node, at 60% alpha, distinct from `_entries`, which has no
+            # `color` rule of its own at all (it inherits the highlighted row's own
+            # `$primary`, at full alpha).
+            assert custom_static.styles.has_rule("color")
+            assert custom_static.styles.color.a == pytest.approx(0.6)
+            assert custom_static.styles.auto_color is True
+            assert not entries_static.styles.has_rule("color")
+
+            box._quick_decision("abort")
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_findings_suggestion_custom_entry_divider_only_shows_in_decision_mode() -> None:
+    """`self._custom`'s `-decision` class (`findings_suggestion.tcss`'s
+    `.-custom-entry.-decision` `border-top` divider) must only be present while decision
+    mode is actually showing a "Chat about it" entry -- plain mode and a hidden/cleared row
+    have no such entry to divide from."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="unclear naming",
+                    review_scope="source",
+                    suggestions=["rename it"],
+                )
+            ],
+            risk_level="low",
+            risk_rationale="fine",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            row = list(box.query(FindingItem))[0]
+            suggestion = row.query_one(FindingsSuggestion)
+            custom_static = suggestion.query(Static)[1]
+
+            row.set_plain()
+            assert not custom_static.has_class("-decision")
+
+            row.set_decision()
+            assert custom_static.has_class("-decision")
+
+            row.set_hidden()
+            assert not custom_static.has_class("-decision")
 
     asyncio.run(scenario())
 
@@ -1621,7 +1792,16 @@ def test_findings_list_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
     asyncio.run(scenario())
 
 
-def test_findings_list_confirming_a_suggestion_opens_the_inline_chat_prefilled() -> None:
+def test_findings_list_confirming_a_suggestion_records_it_as_the_fix_immediately() -> None:
+    """Confirming a real suggestion (cursor on an entry from `finding.suggestions`, not
+    `_CUSTOM_ENTRY`) records it as the fix verbatim in one Enter, with no intermediate chat
+    `Input` step -- a suggestion's own text already is the human's chosen instructions the
+    moment they confirm it. Only `_CUSTOM_ENTRY` ("Chat about it") opens a chat, since it has
+    no text of its own to record without one -- see
+    `test_findings_list_f_shortcut_opens_the_inline_chat_widget_empty` and
+    `test_findings_list_enter_confirms_the_cursor_and_resolves_the_pending_decision` for that
+    path."""
+
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
@@ -1646,10 +1826,7 @@ def test_findings_list_confirming_a_suggestion_opens_the_inline_chat_prefilled()
             await pilot.press("enter")  # confirms the cursor at index 0: "rename it"
             await pilot.pause()
 
-            assert box.query_one(Input).value == "rename it"
-
-            await pilot.press("enter")  # submits the prefilled Input
-            await pilot.pause()
+            assert not list(box.query(Input))
 
             response = await task
             assert response == ApprovalResponse(decision="fix", instructions="rename it")
@@ -1982,6 +2159,64 @@ def test_findings_list_aggregates_fix_decided_findings_once_every_row_is_decided
             box.query_one(Input).value = "add a null guard"
             await pilot.press("enter")  # decides row 1 -- every row now decided, resolves
             await pilot.pause()
+
+            response = await task
+            assert response == ApprovalResponse(
+                decision="fix",
+                instructions=(
+                    "- [warning] unclear naming: rename it\n"
+                    "- [error] missing null check: add a null guard"
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_confirming_recommended_suggestions_across_rows_aggregates_with_no_chat() -> (
+    None
+):
+    """Same shape as the aggregation test above, but confirming each row's own recommended
+    suggestion (a bare Enter, cursor already on entry 0) rather than going through the chat
+    -- the exact multi-finding scenario a human reported as "confirming a suggestion just
+    copies it into Chat about it instead of accepting it". No `Input` is ever mounted."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="unclear naming",
+                    review_scope="source",
+                    suggestions=["rename it"],
+                ),
+                Finding(
+                    severity="error",
+                    description="missing null check",
+                    review_scope="source",
+                    suggestions=["add a null guard"],
+                ),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            list_view.focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            assert list_view.index == 0
+            await pilot.press("enter")  # confirms row 0's "rename it" -- advances to row 1
+            await pilot.pause()
+            assert not list(box.query(Input))
+            assert list_view.index == 1
+
+            await pilot.press("enter")  # confirms row 1's "add a null guard" -- resolves
+            await pilot.pause()
+            assert not list(box.query(Input))
 
             response = await task
             assert response == ApprovalResponse(

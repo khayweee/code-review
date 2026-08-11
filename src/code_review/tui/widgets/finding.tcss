@@ -2,3 +2,41 @@ Finding {
     layout: horizontal;
     height: auto;
 }
+
+/* Overrides two of Textual's own built-in `ListView` highlight rules (`_list_view.py`'s
+DEFAULT_CSS: the blurred `& > ListItem.-highlight` and the focused `&:focus { & >
+ListItem.-highlight }`) -- both set `background`/`color`/`text-style` from
+`$block-cursor(-blurred)-background/foreground/text-style`, giving the highlighted row a
+solid-color fill. This box's own highlight should read via text color alone, the same blue
+already used for this box's border ($primary, `findings_list.tcss`'s `FindingsList {
+border: round $primary; }`, and `FindingsSuggestion`'s own `$primary-darken-1`) -- no
+background fill, in either focus state. `!important` is required on every property: the
+focused default rule carries a `:focus` pseudo-class, which outweighs a plain
+same-count-of-type-selectors override (confirmed empirically, not just reasoned about --
+see this ticket's own verification script; the identical class of problem is already
+documented for `FindingsSuggestion Input`'s border/height override in this package's
+AGENTS.md). `text-style: none` resets any stray bold/reverse the active theme's
+block-cursor style would otherwise carry through. */
+Finding.-highlight {
+    background: transparent !important;
+    color: $primary !important;
+    text-style: none !important;
+}
+
+/* `color` alone on `Finding.-highlight` above is not enough to actually recolor this row's
+rendered text (confirmed empirically): Textual's `DOMNode.rich_style` walks ancestors and,
+for any ancestor whose OWN `auto-color` flag is set, replaces whatever literal `color` that
+ancestor declared with an auto-contrast pick against its background -- and the built-in
+focused rule's `$block-cursor-foreground` token resolves to `auto 87%` (`design.py`), so
+that companion flag stays `True` on `Finding` itself in the focused state regardless of our
+own literal `$primary` value there, since `!important` on a `color:` declaration only
+elevates the `color` key, not its `auto-color` companion (`_styles_builder.py`'s
+`process_color`) -- there is no TCSS syntax to mark `auto-color` important on its own. The
+robust fix is to stop relying on inheritance through `Finding` at all: declare `color`
+directly on the two child columns that actually render this row's text, each uncontested
+(neither has any other rule touching `color`/`auto-color` today), so their own literal
+`$primary` always wins regardless of what `Finding`'s own ancestor step decided. */
+Finding.-highlight FindingsDescription,
+Finding.-highlight FindingsSuggestion {
+    color: $primary !important;
+}

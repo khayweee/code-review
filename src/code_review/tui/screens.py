@@ -1,14 +1,11 @@
 """`InputPromptScreen`: a modal collecting one line of human input for a relayed request.
 
-Split out from `app.py` (rather than defined inline) so `ReviewApp`'s worker logic and
-this screen's presentation stay separately readable -- see `tui/AGENTS.md` for how
-`InputPromptScreen` fits into the `InputRelay` seam (issue #41).
+Split out from `app.py` so `ReviewApp`'s worker logic and this screen's presentation stay
+separately readable -- see the `InputRelay` seam in `input_relay.py`.
 
-`ApprovalPromptScreen` (issue #80, extended by #81) used to live here too, alongside its
-own `_format_outcome` helper -- both were removed by issue #87, which replaces that
-modal's approve/skip/fix/abort flow with an inline decision selector on the already-
-mounted `FindingsBox` (`widgets.py`) instead. See `app.py`'s `_relay_approval` for the
-seam that used to push it.
+Approval used to have its own modal pair here too; that flow now resolves inline via
+`FindingsList` instead (see `widgets/findings_list.py`), so this module holds only the
+unrelated `InputRelay` seam's screen.
 """
 
 from __future__ import annotations
