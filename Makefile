@@ -1,4 +1,4 @@
-.PHONY: sync fmt lint test check run install-dev
+.PHONY: sync fmt lint test check run install-dev prune-branches
 
 sync:
 	uv sync
@@ -21,3 +21,7 @@ run:
 install-dev:
 	-uv tool uninstall code-review
 	CODE_REVIEW_INSTALL_SOURCE="$(CURDIR)" ./scripts/install.sh
+
+prune-branches:
+	git fetch --prune
+	git branch -vv | awk '/: gone]/{print $$1}' | xargs -r git branch -D
