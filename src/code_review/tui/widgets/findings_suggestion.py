@@ -85,7 +85,8 @@ def render_decision_cycle(finding: FindingData, decision_cursor: int) -> Text:
             text.append("\n")
         text.append(
             _render_decision_entry(
-                index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
+                index, entry, decision_cursor, has_own_suggestions=bool(
+                    finding.suggestions)
             )
         )
     return text
@@ -109,7 +110,8 @@ def render_decision_cycle_head(finding: FindingData, decision_cursor: int) -> Te
             text.append("\n")
         text.append(
             _render_decision_entry(
-                index, entry, decision_cursor, has_own_suggestions=bool(finding.suggestions)
+                index, entry, decision_cursor, has_own_suggestions=bool(
+                    finding.suggestions)
             )
         )
     return text
@@ -123,7 +125,8 @@ def render_custom_entry_line(finding: FindingData, decision_cursor: int) -> Text
     entries = _decision_entries(finding)
     index = len(entries) - 1
     return _render_decision_entry(
-        index, entries[index], decision_cursor, has_own_suggestions=bool(finding.suggestions)
+        index, entries[index], decision_cursor, has_own_suggestions=bool(
+            finding.suggestions)
     )
 
 
@@ -142,7 +145,11 @@ class FindingsSuggestion(Vertical):
       draw a `border-top` divider above it, only while a "Chat about it" entry is showing.
     """
 
-    DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
+    DEFAULT_CSS = (
+        Path(__file__).with_name("tokens.tcss").read_text()
+        + "\n"
+        + Path(__file__).with_suffix(".tcss").read_text()
+    )
 
     def __init__(
         self,
@@ -193,7 +200,8 @@ class FindingsSuggestion(Vertical):
 
         self.add_class("-visible")
         self._custom.add_class("-decision")
-        self._entries.update(render_decision_cycle_head(finding, decision_cursor))
+        self._entries.update(
+            render_decision_cycle_head(finding, decision_cursor))
         entries = _decision_entries(finding)
         on_custom_entry = decision_cursor == len(entries) - 1
         if self._input is not None:
