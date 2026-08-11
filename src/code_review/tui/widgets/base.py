@@ -20,4 +20,8 @@ class _BorderedBox(Static):
     - Styled from `base.tcss`, loaded next to this module.
     """
 
-    DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
+    DEFAULT_CSS = (
+        Path(__file__).with_name("tokens.tcss").read_text()
+        + "\n"
+        + Path(__file__).with_suffix(".tcss").read_text()
+    )

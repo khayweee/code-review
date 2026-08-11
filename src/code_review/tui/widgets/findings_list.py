@@ -77,7 +77,11 @@ class FindingsList(Vertical):
       children, which a `Static` can't.
     """
 
-    DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
+    DEFAULT_CSS = (
+        Path(__file__).with_name("tokens.tcss").read_text()
+        + "\n"
+        + Path(__file__).with_suffix(".tcss").read_text()
+    )
 
     def __init__(
         self,
@@ -168,9 +172,21 @@ class FindingsList(Vertical):
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         """Hide the previously-highlighted row's suggestions and show the newly
-        highlighted one's -- `plain` outside a park, or `decision` (cursor reset to 0
-        first) while parked, since moving to a different finding always starts its own
-        decision cycle fresh."""
+        highlighted one's -- `plain` outside a park, or `decision` while parked.
+
+        `reset_decision` starts an undecided row's cycle fresh at entry 0, but leaves a
+        "fix"-decided row's cursor exactly where it was confirmed -- `restore_chat_preview`
+        then re-opens that row's chat in place, pre-filled with its own recorded
+        instructions, whenever that cursor landed on `_CUSTOM_ENTRY` -- so revisiting a
+        chat-decided row shows what was actually typed instead of the bare "Chat about it"
+        label, with no extra keypress needed.
+
+        Refocuses `_FindingsListView` at the end of the parked branch -- this handler also
+        fires when up/down bubbles here from a row's own live chat `Input` (which doesn't
+        bind either key itself), and hiding the old row tears that focused `Input` down via
+        `set_hidden`. Every parked-mode binding lives only on `_FindingsListView` (see its
+        own docstring), so leaving focus on a just-removed `Input` strands it at `None`
+        with no key able to reach any binding again -- the whole box reads as hung."""
 
         if self._last_highlighted is not None:
             self._last_highlighted.set_hidden()
@@ -181,6 +197,10 @@ class FindingsList(Vertical):
         if self._parked:
             self._last_highlighted.reset_decision()
             self._last_highlighted.set_decision()
+            self._last_highlighted.restore_chat_preview()
+            list_view = self._list_view()
+            if list_view is not None:
+                list_view.focus()
         else:
             self._last_highlighted.set_plain()
 
@@ -196,7 +216,7 @@ class FindingsList(Vertical):
         assert isinstance(item, Finding)
         entry = item.confirmed_entry()
         if entry == _CUSTOM_ENTRY:
-            self._open_chat("")
+            self._open_chat()
         else:
             self._record_decision("fix", entry)
 
@@ -204,7 +224,11 @@ class FindingsList(Vertical):
         item = self._highlighted_finding()
         if item is None:
             return
-        item.set_decision() if self._parked else item.set_plain()
+        if self._parked:
+            item.set_decision()
+            item.restore_chat_preview()
+        else:
+            item.set_plain()
         self._last_highlighted = item
 
     def _list_view(self) -> _FindingsListView | None:
@@ -250,7 +274,7 @@ class FindingsList(Vertical):
             return
         item.cycle_decision(delta)
         if item.confirmed_entry() == _CUSTOM_ENTRY:
-            self._open_chat("")
+            self._open_chat()
 
     def _jump_decision(self, index: int) -> None:
         """Digit-key counterpart to `_cycle_decision` -- same "open the chat the instant
@@ -264,7 +288,7 @@ class FindingsList(Vertical):
             return
         item.jump_decision(index)
         if item.confirmed_entry() == _CUSTOM_ENTRY:
-            self._open_chat("")
+            self._open_chat()
 
     def _quick_decision(self, decision: ApprovalDecision) -> None:
         """ "s"/"x"'s shared entry point. "abort" resolves `self._pending` directly and
@@ -279,17 +303,39 @@ class FindingsList(Vertical):
             return
         self._record_decision(decision, None)
 
-    def _open_chat(self, prefill: str) -> None:
+    def _chat_prefill(self, item: Finding) -> str:
+        """The text to seed a freshly (re)opened chat with: the highlighted row's own
+        previously recorded "fix" instructions, if it has any, so browsing away from a
+        decided row and back -- then reopening its chat via Enter/"f"/cycling back onto
+        "Chat about it" -- shows what was already confirmed instead of an empty box.
+        Without this, a stray Enter on a revisited row would resubmit an empty `Input` and
+        silently overwrite the real instructions with "" in the aggregated fix prompt
+        (`pipeline.findings.describe_finding_decisions`). Empty for an undecided row, or
+        one decided "skip" -- there is no fix text to restore."""
+
+        response = item.row_decision
+        if response is not None and response.decision == "fix":
+            return response.instructions or ""
+        return ""
+
+    def _open_chat(self, prefill: str | None = None) -> None:
         """Open the highlighted row's chat, seeded with `prefill`, in place inside that
         row's own `FindingsSuggestion`. Idempotent, so calling this twice in a row -- via a
         cycle/jump auto-open and again via a redundant Enter/"f" -- never stacks or resets
-        anything. Focuses the returned `Input`."""
+        anything. Focuses the returned `Input`.
+
+        `prefill` defaults to `_chat_prefill`'s own row-decision-aware guess rather than
+        always `""`, so every real key-binding call site (Enter/"f"/cycle/jump) gets that
+        behavior for free. Tests pass an explicit string (including `""`) to force a
+        specific seed regardless of the row's recorded decision."""
 
         if not self._parked:
             return
         item = self._highlighted_finding()
         if item is None:
             return
+        if prefill is None:
+            prefill = self._chat_prefill(item)
         input_widget = item.open_chat(prefill)
         if input_widget is not None:
             input_widget.focus()
@@ -435,6 +481,7 @@ class FindingsList(Vertical):
         if item is not None:
             item.reset_decision()
             item.set_decision()
+            item.restore_chat_preview()
             self._last_highlighted = item
         if list_view is not None:
             list_view.focus()

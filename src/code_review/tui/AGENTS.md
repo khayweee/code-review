@@ -160,6 +160,14 @@ Status box's "no box, not an empty box" rule.
 
 - Only the highlighted row shows anything in its `FindingsSuggestion` column
   (`on_list_view_highlighted`); every other row stays hidden.
+- Revisiting a row keeps what it already decided: `Finding.reset_decision` only resets the
+  decision cursor to 0 for an undecided row — a "fix"-decided row keeps its cursor exactly
+  where it was confirmed, and `Finding.restore_chat_preview` (called from every
+  highlight-landing site: `on_list_view_highlighted`, `_prime_highlighted`, `await_decision`'s
+  initial priming — never from a redundant re-render) re-opens that row's chat in place,
+  pre-filled with its own recorded instructions, whenever that cursor sits on
+  `_CUSTOM_ENTRY`. So browsing back to a chat-decided row shows what was actually typed, not
+  a reset "Chat about it" placeholder, with no extra keypress.
 - **Per-finding decisions**: each `Finding` row owns its own decision state. Confirming a
   row's chat, or pressing "s" while it's highlighted, records that row's decision alone
   (`_record_decision`) and either advances the highlighted cursor to the next undecided row

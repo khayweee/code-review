@@ -68,7 +68,7 @@ class _FindingsListView(ListView):
         self._owner._quick_decision("abort")
 
     def action_open_chat(self) -> None:
-        self._owner._open_chat("")
+        self._owner._open_chat()
 
     def action_close_chat(self) -> None:
         self._owner._close_chat()
