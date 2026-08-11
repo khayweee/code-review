@@ -77,7 +77,11 @@ class FindingsList(Vertical):
       children, which a `Static` can't.
     """
 
-    DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
+    DEFAULT_CSS = (
+        Path(__file__).with_name("tokens.tcss").read_text()
+        + "\n"
+        + Path(__file__).with_suffix(".tcss").read_text()
+    )
 
     def __init__(
         self,
@@ -159,7 +163,8 @@ class FindingsList(Vertical):
             if self._last_highlighted in removed:
                 self._last_highlighted = None
             if list_view.index is not None and list_view.index >= len(new_findings):
-                list_view.index = len(new_findings) - 1 if new_findings else None
+                list_view.index = len(new_findings) - \
+                    1 if new_findings else None
 
         if new_findings and list_view.index is None:
             list_view.index = 0
@@ -168,9 +173,14 @@ class FindingsList(Vertical):
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         """Hide the previously-highlighted row's suggestions and show the newly
-        highlighted one's -- `plain` outside a park, or `decision` (cursor reset to 0
-        first) while parked, since moving to a different finding always starts its own
-        decision cycle fresh."""
+        highlighted one's -- `plain` outside a park, or `decision` while parked.
+
+        `reset_decision` starts an undecided row's cycle fresh at entry 0, but leaves a
+        "fix"-decided row's cursor exactly where it was confirmed -- `restore_chat_preview`
+        then re-opens that row's chat in place, pre-filled with its own recorded
+        instructions, whenever that cursor landed on `_CUSTOM_ENTRY` -- so revisiting a
+        chat-decided row shows what was actually typed instead of the bare "Chat about it"
+        label, with no extra keypress needed."""
 
         if self._last_highlighted is not None:
             self._last_highlighted.set_hidden()
@@ -181,6 +191,7 @@ class FindingsList(Vertical):
         if self._parked:
             self._last_highlighted.reset_decision()
             self._last_highlighted.set_decision()
+            self._last_highlighted.restore_chat_preview()
         else:
             self._last_highlighted.set_plain()
 
@@ -204,7 +215,11 @@ class FindingsList(Vertical):
         item = self._highlighted_finding()
         if item is None:
             return
-        item.set_decision() if self._parked else item.set_plain()
+        if self._parked:
+            item.set_decision()
+            item.restore_chat_preview()
+        else:
+            item.set_plain()
         self._last_highlighted = item
 
     def _list_view(self) -> _FindingsListView | None:
@@ -275,7 +290,8 @@ class FindingsList(Vertical):
         if not self._parked or self._pending is None:
             return
         if decision == "abort":
-            self._pending.set_result(ApprovalResponse(decision="abort", instructions=None))
+            self._pending.set_result(ApprovalResponse(
+                decision="abort", instructions=None))
             return
         self._record_decision(decision, None)
 
@@ -360,7 +376,8 @@ class FindingsList(Vertical):
         item = self._highlighted_finding()
         if item is None:
             return
-        item.record_decision(ApprovalResponse(decision=decision, instructions=instructions))
+        item.record_decision(ApprovalResponse(
+            decision=decision, instructions=instructions))
         self._set_footer_hint(True)
         if all(row.is_decided() for row in self._rows):
             self._resolve_park()
@@ -429,7 +446,8 @@ class FindingsList(Vertical):
             footer.update("")
             return
         decided = sum(1 for row in self._rows if row.is_decided())
-        footer.update(f"{_FOOTER_HINT}  |  {decided}/{len(self._rows)} decided")
+        footer.update(
+            f"{_FOOTER_HINT}  |  {decided}/{len(self._rows)} decided")
 
     async def await_decision(self) -> ApprovalResponse:
         """Turn the highlighted row's `FindingsSuggestion` into a live decision selector
@@ -457,6 +475,7 @@ class FindingsList(Vertical):
         if item is not None:
             item.reset_decision()
             item.set_decision()
+            item.restore_chat_preview()
             self._last_highlighted = item
         if list_view is not None:
             list_view.focus()

@@ -34,7 +34,11 @@ class Finding(ListItem):
       binding, resolving the whole park directly with no per-row recording step.
     """
 
-    DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
+    DEFAULT_CSS = (
+        Path(__file__).with_name("tokens.tcss").read_text()
+        + "\n"
+        + Path(__file__).with_suffix(".tcss").read_text()
+    )
 
     def __init__(
         self,
@@ -96,11 +100,18 @@ class Finding(ListItem):
         self._apply_mode(suggestion)
 
     def reset_decision(self) -> None:
-        """Reset the browsing cursor to 0 -- called whenever this row becomes highlighted,
-        so each finding's decision cycle starts fresh. Distinct from `clear_decision`,
-        which resets the recorded decision, not the cursor."""
+        """Reset the browsing cursor to 0 -- called whenever an undecided row becomes
+        highlighted, so its decision cycle starts fresh. A row that already has a
+        recorded "fix" decision instead keeps its cursor exactly where it was when that
+        decision was confirmed, so revisiting it re-renders what was actually chosen (a
+        suggestion's own marker, or the chat's typed text via `restore_chat_preview`)
+        instead of resetting back to entry 0. A "skip" decision carries no such meaning --
+        it bypasses the cursor entirely, via "s" -- so a skip-decided row still resets to
+        0. Distinct from `clear_decision`, which resets the recorded decision itself, not
+        the cursor."""
 
-        self._decision_cursor = 0
+        if self._row_decision is None or self._row_decision.decision != "fix":
+            self._decision_cursor = 0
 
     def is_decided(self) -> bool:
         """True once this row has a recorded decision since the last `clear_decision`."""
@@ -192,3 +203,29 @@ class Finding(ListItem):
         except NoMatches:
             return
         suggestion.cancel_input(self.finding, self._decision_cursor)
+
+    def restore_chat_preview(self) -> None:
+        """Re-open this row's chat, pre-filled with its own recorded "fix" instructions,
+        when the decision cursor -- left exactly where `reset_decision` found it -- is
+        sitting on `_CUSTOM_ENTRY` and this row has such a decision recorded. Lets a human
+        revisiting a chat-decided row see what was actually typed instead of the bare
+        "Chat about it" label, with no further keypress needed.
+
+        Called only from `FindingsList`'s own highlight-transition call sites
+        (`on_list_view_highlighted`/`_prime_highlighted`/`await_decision`'s initial
+        priming) -- never from a redundant re-render, so a human's own Escape
+        (`close_chat`) isn't immediately undone by the next periodic tick. Idempotent and
+        focus-free, unlike `open_chat`: a no-op if the cursor isn't on `_CUSTOM_ENTRY`,
+        there's no recorded "fix" decision, or an `Input` is already mounted
+        (`ensure_input`'s own idempotency)."""
+
+        entries = _decision_entries(self.finding)
+        if self._decision_cursor != len(entries) - 1:
+            return
+        if self._row_decision is None or self._row_decision.decision != "fix":
+            return
+        try:
+            suggestion = self.query_one(FindingsSuggestion)
+        except NoMatches:
+            return
+        suggestion.ensure_input(self._row_decision.instructions or "")

@@ -2312,14 +2312,16 @@ def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> Non
     asyncio.run(scenario())
 
 
-def test_findings_list_reopening_chat_on_a_revisited_row_restores_its_typed_instructions() -> (
+def test_findings_list_revisiting_a_chat_decided_row_shows_its_typed_instructions_immediately() -> (
     None
 ):
     """A human types custom instructions into a row's chat, confirms it (advancing to the
-    next row), then browses back and reopens that row's chat -- the `Input` must come back
-    seeded with what was originally typed, not blank. Before this fix every chat-open call
-    site hardcoded `prefill=""`, so the original text was gone and a stray Enter would
-    silently overwrite the recorded "fix" instructions with an empty string."""
+    next row), then just browses back -- no Enter/"f" needed -- and must immediately see
+    what was originally typed, not the bare "Chat about it" label. Before this fix every
+    chat-open call site hardcoded `prefill=""` and browsing a row never auto-opened its
+    chat at all, so merely revisiting a chat-decided row showed the plain placeholder text
+    until a deliberate re-open -- and a stray Enter there would silently overwrite the
+    recorded "fix" instructions with an empty string."""
 
     async def scenario() -> None:
         output = ReviewOutput(
@@ -2345,17 +2347,33 @@ def test_findings_list_reopening_chat_on_a_revisited_row_restores_its_typed_inst
             await pilot.press("enter")  # confirms row 0, advances to row 1
             await pilot.pause()
             assert list_view.index == 1
+            assert not list(box.query(Input))  # row 0 hidden, its Input torn down
 
             await pilot.press("up")  # browse back to the already-decided row 0
             await pilot.pause()
             assert list_view.index == 0
-            assert not list(box.query(Input))
 
-            await pilot.press("enter")  # reopens row 0's chat
+            # No Enter/"f" pressed -- the chat reappeared on its own, pre-filled.
+            lines = _finding_rows_content(box)
+            assert "Chat about it" not in lines[0]
+            restored_input = box.query_one(Input)
+            assert restored_input.value == "actually rename it"
+            assert not restored_input.has_focus  # visible, but doesn't steal keyboard focus
+
+            # The auto-restored `Input` isn't focused, so a first Enter here (still handled
+            # by `_FindingsListView`) only focuses it for editing -- it must not resubmit
+            # blank text and corrupt the recorded decision.
+            await pilot.press("enter")
             await pilot.pause()
+            assert list_view.index == 0
+            assert box.query_one(Input).has_focus
             assert box.query_one(Input).value == "actually rename it"
+            assert box._rows[0].row_decision == ApprovalResponse(
+                decision="fix", instructions="actually rename it"
+            )
 
-            # A bare re-confirm must not corrupt the recorded decision with blank text.
+            # A second Enter, now that the `Input` itself has focus, submits it for real --
+            # unchanged text, so the recorded decision is untouched and the park advances.
             await pilot.press("enter")
             await pilot.pause()
             assert list_view.index == 1
