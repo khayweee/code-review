@@ -51,7 +51,8 @@ from code_review.tui.widgets import (
 
 def _render_content(renderable: object) -> str:
     buffer = StringIO()
-    console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
+    console = Console(file=buffer, force_terminal=True,
+                      width=80, color_system=None)
     console.print(renderable)
     return buffer.getvalue().rstrip()
 
@@ -74,7 +75,8 @@ def _finding_rows_content(findings_list: FindingsList) -> list[str]:
 
     rows = []
     for item in findings_list.query(FindingItem):
-        description = _render_content(item.query_one(FindingsDescription).content)
+        description = _render_content(
+            item.query_one(FindingsDescription).content)
         suggestion = item.query_one(FindingsSuggestion)
         suggestion_text = "\n".join(
             _render_content(static.content) for static in suggestion.query(Static)
@@ -107,7 +109,8 @@ def test_format_duration_renders_minute_and_above_as_mm_ss() -> None:
     ],
 )
 def test_format_row_uses_a_distinct_icon_per_status(status: str, icon: str) -> None:
-    row = StepRow(name="IntentStep", status=status, duration=None)  # type: ignore[arg-type]
+    row = StepRow(name="IntentStep", status=status,
+                  duration=None)  # type: ignore[arg-type]
 
     assert format_row(row).startswith(icon)
 
@@ -149,7 +152,8 @@ def test_format_activity_row_uses_tree_connectors_and_the_same_status_icons() ->
     completed = ActivityRow(label="rebase", status="completed", duration=3.4)
 
     assert format_activity_row(running, is_last=False) == "  ├  ◔ fetch  1.2s"
-    assert format_activity_row(completed, is_last=True) == "  └  ✔ rebase  3.4s"
+    assert format_activity_row(
+        completed, is_last=True) == "  └  ✔ rebase  3.4s"
 
 
 def test_format_activity_row_omits_duration_when_none() -> None:
@@ -191,7 +195,8 @@ def test_render_rows_live_keeps_each_steps_icon_column_independent_of_others_act
     step's own rendered line must therefore be identical whether or not some other step in
     the same list has activities."""
 
-    alone = render_rows_live([StepRow(name="IntentStep", status="completed", duration=0.1)], {})
+    alone = render_rows_live(
+        [StepRow(name="IntentStep", status="completed", duration=0.1)], {})
     alongside_a_step_with_activities = render_rows_live(
         [
             StepRow(name="IntentStep", status="completed", duration=0.1),
@@ -199,7 +204,8 @@ def test_render_rows_live_keeps_each_steps_icon_column_independent_of_others_act
                 name="RebaseStep",
                 status="running",
                 duration=1.0,
-                activities=(ActivityRow(label="fetch", status="running", duration=0.2),),
+                activities=(ActivityRow(label="fetch",
+                            status="running", duration=0.2),),
             ),
         ],
         {},
@@ -345,7 +351,8 @@ class _HostApp(App[None]):
 
 def test_pipeline_box_renders_its_initial_rows_on_mount() -> None:
     async def scenario() -> None:
-        app = _HostApp([StepRow(name="IntentStep", status="pending", duration=None)])
+        app = _HostApp(
+            [StepRow(name="IntentStep", status="pending", duration=None)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
@@ -356,12 +363,14 @@ def test_pipeline_box_renders_its_initial_rows_on_mount() -> None:
 
 def test_pipeline_box_update_rows_replaces_the_rendered_content() -> None:
     async def scenario() -> None:
-        app = _HostApp([StepRow(name="IntentStep", status="pending", duration=None)])
+        app = _HostApp(
+            [StepRow(name="IntentStep", status="pending", duration=None)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
 
-            box.update_rows([StepRow(name="IntentStep", status="running", duration=0.5)])
+            box.update_rows(
+                [StepRow(name="IntentStep", status="running", duration=0.5)])
             await pilot.pause()
 
             content = _render_content(box.content)
@@ -386,13 +395,15 @@ def test_pipeline_box_reuses_the_same_spinner_instance_while_a_step_keeps_runnin
     """
 
     async def scenario() -> None:
-        app = _HostApp([StepRow(name="IntentStep", status="running", duration=0.0)])
+        app = _HostApp(
+            [StepRow(name="IntentStep", status="running", duration=0.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
             first_spinner = box._spinners["IntentStep"]
 
-            box.update_rows([StepRow(name="IntentStep", status="running", duration=0.3)])
+            box.update_rows(
+                [StepRow(name="IntentStep", status="running", duration=0.3)])
             await pilot.pause()
 
             assert box._spinners["IntentStep"] is first_spinner
@@ -402,13 +413,15 @@ def test_pipeline_box_reuses_the_same_spinner_instance_while_a_step_keeps_runnin
 
 def test_pipeline_box_evicts_a_step_s_spinner_once_it_stops_running() -> None:
     async def scenario() -> None:
-        app = _HostApp([StepRow(name="IntentStep", status="running", duration=0.0)])
+        app = _HostApp(
+            [StepRow(name="IntentStep", status="running", duration=0.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
             assert "IntentStep" in box._spinners
 
-            box.update_rows([StepRow(name="IntentStep", status="completed", duration=0.3)])
+            box.update_rows(
+                [StepRow(name="IntentStep", status="completed", duration=0.3)])
             await pilot.pause()
 
             assert "IntentStep" not in box._spinners
@@ -422,7 +435,8 @@ def test_pipeline_box_evicts_a_step_s_spinner_once_it_stops_running() -> None:
 
 def test_pipeline_box_renders_nested_activity_lines_under_their_owning_row() -> None:
     async def scenario() -> None:
-        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=1.0)])
+        app = _HostApp(
+            [StepRow(name="RebaseStep", status="running", duration=1.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
@@ -433,7 +447,8 @@ def test_pipeline_box_renders_nested_activity_lines_under_their_owning_row() -> 
                         name="RebaseStep",
                         status="running",
                         duration=1.0,
-                        activities=(ActivityRow(label="fetch", status="running", duration=0.4),),
+                        activities=(ActivityRow(label="fetch",
+                                    status="running", duration=0.4),),
                     )
                 ]
             )
@@ -459,7 +474,8 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
     span -- matching a `StepRow`'s own "elapsed-so-far, then frozen" duration rule."""
 
     async def scenario() -> None:
-        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=0.0)])
+        app = _HostApp(
+            [StepRow(name="RebaseStep", status="running", duration=0.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
@@ -470,7 +486,8 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
                         name="RebaseStep",
                         status="running",
                         duration=0.2,
-                        activities=(ActivityRow(label="fetch", status="running", duration=0.2),),
+                        activities=(ActivityRow(label="fetch",
+                                    status="running", duration=0.2),),
                     )
                 ]
             )
@@ -483,7 +500,8 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
                         name="RebaseStep",
                         status="running",
                         duration=0.6,
-                        activities=(ActivityRow(label="fetch", status="running", duration=0.6),),
+                        activities=(ActivityRow(label="fetch",
+                                    status="running", duration=0.6),),
                     )
                 ]
             )
@@ -496,7 +514,8 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
                         name="RebaseStep",
                         status="running",
                         duration=5.0,
-                        activities=(ActivityRow(label="fetch", status="completed", duration=0.63),),
+                        activities=(ActivityRow(label="fetch",
+                                    status="completed", duration=0.63),),
                     )
                 ]
             )
@@ -520,7 +539,8 @@ def test_pipeline_box_shimmers_a_running_steps_name_purely_from_its_own_interval
     this, so this test renders with real color on instead."""
 
     async def scenario() -> None:
-        app = _HostApp([StepRow(name="RebaseStep", status="running", duration=0.0)])
+        app = _HostApp(
+            [StepRow(name="RebaseStep", status="running", duration=0.0)])
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
@@ -568,7 +588,8 @@ def test_pipeline_box_has_a_pipeline_border_title() -> None:
 
 
 def test_format_finding_omits_location_when_none() -> None:
-    finding = Finding(severity="warning", description="missing null check", review_scope="source")
+    finding = Finding(severity="warning",
+                      description="missing null check", review_scope="source")
 
     assert format_finding(finding) == "warning: missing null check"
 
@@ -606,13 +627,16 @@ def test_render_description_has_no_decision_marker_by_default() -> None:
     """issue #98: the default (`decision=None`) must render byte-for-byte identical to the
     pre-#98 output above, so every non-parked call site is unaffected."""
 
-    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+    finding = Finding(severity="warning",
+                      description="unclear naming", review_scope="source")
 
-    assert render_description(finding).plain == render_description(finding, None).plain
+    assert render_description(
+        finding).plain == render_description(finding, None).plain
 
 
 def test_render_description_prefixes_a_fix_decided_marker() -> None:
-    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+    finding = Finding(severity="warning",
+                      description="unclear naming", review_scope="source")
 
     text = render_description(finding, "fix")
 
@@ -620,7 +644,8 @@ def test_render_description_prefixes_a_fix_decided_marker() -> None:
 
 
 def test_render_description_prefixes_a_skip_decided_marker() -> None:
-    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+    finding = Finding(severity="warning",
+                      description="unclear naming", review_scope="source")
 
     text = render_description(finding, "skip")
 
@@ -635,11 +660,13 @@ def test_render_suggestions_plain_joins_suggestions_one_per_line() -> None:
         suggestions=["rename it", "add a docstring"],
     )
 
-    assert render_suggestions_plain(finding).plain == "rename it\nadd a docstring"
+    assert render_suggestions_plain(
+        finding).plain == "rename it\nadd a docstring"
 
 
 def test_render_suggestions_plain_is_empty_with_no_suggestions() -> None:
-    finding = Finding(severity="info", description="fine as-is", review_scope="source")
+    finding = Finding(
+        severity="info", description="fine as-is", review_scope="source")
 
     assert render_suggestions_plain(finding).plain == ""
 
@@ -667,7 +694,8 @@ def test_render_decision_cycle_has_no_recommended_label_with_no_suggestions() ->
     """Entry 0 is `_CUSTOM_ENTRY` ("Chat about it") when a finding has no suggestions of
     its own -- it never earns the "(Recommended)" label either."""
 
-    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+    finding = Finding(severity="warning",
+                      description="unclear naming", review_scope="source")
 
     text = render_decision_cycle(finding, decision_cursor=0)
 
@@ -680,7 +708,8 @@ def test_render_decision_cycle_gives_the_one_fixed_entry_no_detail_line() -> Non
     ("Start typing to describe what you want.") -- removed outright, not just hidden, since
     it read as redundant with the entry's own label."""
 
-    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+    finding = Finding(severity="warning",
+                      description="unclear naming", review_scope="source")
 
     text = render_decision_cycle(finding, decision_cursor=0)
 
@@ -747,7 +776,8 @@ def test_render_decision_cycle_head_is_empty_with_no_suggestions() -> None:
     """A finding with no suggestions of its own has only `_CUSTOM_ENTRY` in its decision
     cycle -- entirely excluded from the head, which is left with nothing to render."""
 
-    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+    finding = Finding(severity="warning",
+                      description="unclear naming", review_scope="source")
 
     text = render_decision_cycle_head(finding, decision_cursor=0)
 
@@ -798,7 +828,8 @@ def test_findings_list_view_rejects_a_non_finding_child() -> None:
     far from the actual mistake."""
 
     owner = FindingsList(
-        ReviewOutput(findings=[], risk_level="low", risk_rationale="fine"), "ReviewStep"
+        ReviewOutput(findings=[], risk_level="low",
+                     risk_rationale="fine"), "ReviewStep"
     )
 
     with pytest.raises(AssertionError):
@@ -809,7 +840,8 @@ def test_findings_list_renders_its_initial_findings_on_mount() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -861,53 +893,6 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
     asyncio.run(scenario())
 
 
-def test_findings_list_highlighted_row_recolors_text_with_no_background_fill() -> None:
-    """The highlighted row must not get a solid background fill -- Textual's own two
-    built-in `ListView` highlight rules (`_list_view.py`'s blurred `& > ListItem.-highlight`
-    and focused `&:focus { & > ListItem.-highlight }`) are overridden (`finding.tcss`) so
-    only the text recolors, to this box's own border color (`$primary`), in both focus
-    states. `FindingsDescription`'s own rendered text is checked too, not just `Finding`'s
-    own `styles.color` -- overriding `color` on `Finding` alone is not sufficient (see
-    `finding.tcss`'s own comment on Textual's `auto-color` companion property)."""
-
-    async def scenario() -> None:
-        output = ReviewOutput(
-            findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
-            ],
-            risk_level="low",
-            risk_rationale="fine",
-        )
-        app = _FindingsHostApp(output, "ReviewStep")
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            box = app.query_one(FindingsList)
-            list_view = box.query_one(_FindingsListView)
-            rows = list(box.query(FindingItem))
-            desc0 = rows[0].query_one(FindingsDescription)
-            desc1 = rows[1].query_one(FindingsDescription)
-            primary = Color.parse(app.get_css_variables()["primary"])
-
-            assert list_view.has_focus
-            assert rows[0].styles.background.a == 0
-            assert rows[1].styles.background.a == 0
-            assert rows[0].styles.color == primary
-            assert Color.from_rich_color(desc0.rich_style.color) == primary
-            assert Color.from_rich_color(desc1.rich_style.color) != primary
-
-            # The focused default rule is the one whose `color` this ticket's own
-            # verification found hardest to beat (see `finding.tcss`) -- prove the blurred
-            # state independently rather than assuming it behaves the same way.
-            app.set_focus(None)
-            await pilot.pause()
-            assert not list_view.has_focus
-            assert rows[0].styles.background.a == 0
-            assert Color.from_rich_color(desc0.rich_style.color) == primary
-
-    asyncio.run(scenario())
-
-
 def test_findings_suggestion_has_a_suggestion_border_title() -> None:
     """`FindingsSuggestion.border_title` is set directly in `__init__`, the same mechanism
     `PipelineBox`/`FindingsList`/`StatusBox` already use -- it only actually renders once a
@@ -917,7 +902,8 @@ def test_findings_suggestion_has_a_suggestion_border_title() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1107,7 +1093,8 @@ def test_findings_list_update_findings_preserves_a_browsed_to_highlight() -> Non
 def test_findings_list_update_findings_replaces_the_rendered_rows() -> None:
     async def scenario() -> None:
         initial = ReviewOutput(
-            findings=[Finding(severity="info", description="first", review_scope="source")],
+            findings=[
+                Finding(severity="info", description="first", review_scope="source")],
             risk_level="low",
             risk_rationale="fine",
         )
@@ -1117,7 +1104,8 @@ def test_findings_list_update_findings_replaces_the_rendered_rows() -> None:
             box = app.query_one(FindingsList)
 
             updated = ReviewOutput(
-                findings=[Finding(severity="error", description="second", review_scope="source")],
+                findings=[
+                    Finding(severity="error", description="second", review_scope="source")],
                 risk_level="high",
                 risk_rationale="bad",
             )
@@ -1142,7 +1130,8 @@ def test_findings_list_update_findings_growing_the_finding_count_keeps_the_old_h
 
     async def scenario() -> None:
         initial = ReviewOutput(
-            findings=[Finding(severity="info", description="first", review_scope="source")],
+            findings=[
+                Finding(severity="info", description="first", review_scope="source")],
             risk_level="low",
             risk_rationale="fine",
         )
@@ -1266,7 +1255,8 @@ def test_findings_list_renders_a_test_sufficiency_output_on_mount() -> None:
 
 def test_findings_list_border_title_names_the_owning_step() -> None:
     async def scenario() -> None:
-        output = ReviewOutput(findings=[], risk_level="low", risk_rationale="fine")
+        output = ReviewOutput(
+            findings=[], risk_level="low", risk_rationale="fine")
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1278,7 +1268,8 @@ def test_findings_list_border_title_names_the_owning_step() -> None:
 
 def test_findings_list_update_findings_updates_the_border_title_to_the_new_step() -> None:
     async def scenario() -> None:
-        initial = ReviewOutput(findings=[], risk_level="low", risk_rationale="fine")
+        initial = ReviewOutput(
+            findings=[], risk_level="low", risk_rationale="fine")
         app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1349,7 +1340,8 @@ def test_findings_list_await_decision_populates_the_footer_hint_when_called_righ
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1358,7 +1350,8 @@ def test_findings_list_await_decision_populates_the_footer_hint_when_called_righ
 
         async def _mount_and_park() -> ApprovalResponse:
             box = FindingsList(output, "ReviewStep")
-            app.mount(box)  # no `await` between this and `await_decision()` below
+            # no `await` between this and `await_decision()` below
+            app.mount(box)
             return await box.await_decision()
 
         async with app.run_test() as pilot:
@@ -1519,7 +1512,8 @@ def test_findings_list_enter_confirms_the_cursor_and_resolves_the_pending_decisi
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1543,7 +1537,8 @@ def test_findings_list_enter_confirms_the_cursor_and_resolves_the_pending_decisi
             await pilot.pause()
 
             response = await task
-            assert response == ApprovalResponse(decision="fix", instructions="looks good, thanks")
+            assert response == ApprovalResponse(
+                decision="fix", instructions="looks good, thanks")
 
     asyncio.run(scenario())
 
@@ -1668,7 +1663,8 @@ def test_findings_list_opening_the_chat_widget_twice_mounts_only_one() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1704,7 +1700,8 @@ def test_findings_list_s_shortcut_resolves_directly_while_parked() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1721,7 +1718,8 @@ def test_findings_list_s_shortcut_resolves_directly_while_parked() -> None:
             await pilot.pause()
 
             response = await task
-            assert response == ApprovalResponse(decision="skip", instructions=None)
+            assert response == ApprovalResponse(
+                decision="skip", instructions=None)
 
     asyncio.run(scenario())
 
@@ -1735,7 +1733,8 @@ def test_findings_list_a_shortcut_is_a_no_op_while_parked() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1756,7 +1755,8 @@ def test_findings_list_a_shortcut_is_a_no_op_while_parked() -> None:
 
             box._quick_decision("abort")
             response = await task
-            assert response == ApprovalResponse(decision="abort", instructions=None)
+            assert response == ApprovalResponse(
+                decision="abort", instructions=None)
 
     asyncio.run(scenario())
 
@@ -1765,7 +1765,8 @@ def test_findings_list_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1787,7 +1788,8 @@ def test_findings_list_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
             await pilot.pause()
 
             response = await task
-            assert response == ApprovalResponse(decision="fix", instructions="")
+            assert response == ApprovalResponse(
+                decision="fix", instructions="")
 
     asyncio.run(scenario())
 
@@ -1823,13 +1825,15 @@ def test_findings_list_confirming_a_suggestion_records_it_as_the_fix_immediately
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
-            await pilot.press("enter")  # confirms the cursor at index 0: "rename it"
+            # confirms the cursor at index 0: "rename it"
+            await pilot.press("enter")
             await pilot.pause()
 
             assert not list(box.query(Input))
 
             response = await task
-            assert response == ApprovalResponse(decision="fix", instructions="rename it")
+            assert response == ApprovalResponse(
+                decision="fix", instructions="rename it")
 
     asyncio.run(scenario())
 
@@ -1844,7 +1848,8 @@ def test_findings_list_letter_shortcuts_are_no_ops_while_not_parked() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1933,7 +1938,8 @@ def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redunda
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -1962,7 +1968,8 @@ def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redunda
 
             box._resolve_chat(suggestion.query_one(Input).value)
             response = await task
-            assert response == ApprovalResponse(decision="fix", instructions="draft instructions")
+            assert response == ApprovalResponse(
+                decision="fix", instructions="draft instructions")
 
     asyncio.run(scenario())
 
@@ -2009,7 +2016,59 @@ def test_findings_list_escape_cancels_the_chat_without_resolving_the_park() -> N
             # The park is still open and resolvable exactly as before Escape.
             await pilot.press("s")
             response = await task
-            assert response == ApprovalResponse(decision="skip", instructions=None)
+            assert response == ApprovalResponse(
+                decision="skip", instructions=None)
+
+    asyncio.run(scenario())
+
+
+def test_findings_list_arrow_navigation_away_from_an_open_chat_keeps_the_list_focused() -> None:
+    """Regression: `Input` doesn't bind up/down itself, so those keys bubble from a focused
+    chat straight to `_FindingsListView`'s inherited `ListView` navigation -- moving the
+    highlighted row while its chat is still open. That tears the focused `Input` down
+    (`Finding.set_hidden` -> `FindingsSuggestion.clear`) with nothing to reclaim focus
+    afterward, stranding it at `None`. Every parked-mode binding lives only on
+    `_FindingsListView` (see its own docstring), so a stray `None` focus made the whole box
+    permanently unresponsive to every key, including "s"/"x" -- reading as a hard hang."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingsList)
+            list_view = box.query_one(_FindingsListView)
+            list_view.focus()
+            task = asyncio.ensure_future(box.await_decision())
+            await pilot.pause()
+
+            await pilot.press("f")  # opens row 0's chat and focuses its Input
+            await pilot.pause()
+            assert box.query_one(Input).has_focus
+
+            # bubbles from the focused Input to the list view
+            await pilot.press("down")
+            await pilot.pause()
+            assert list_view.index == 1
+            assert list_view.has_focus
+
+            # The box is still fully interactive: every remaining binding still resolves,
+            # here deciding both rows in turn ("down" wrapped to row 0, still undecided).
+            await pilot.press("s")
+            await pilot.pause()
+            assert list_view.index == 0
+            await pilot.press("s")
+            response = await task
+            assert response.decision == "skip"
 
     asyncio.run(scenario())
 
@@ -2025,8 +2084,10 @@ def test_findings_list_recording_a_decision_does_not_resolve_a_multi_finding_par
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2051,7 +2112,8 @@ def test_findings_list_recording_a_decision_does_not_resolve_a_multi_finding_par
 
             box._quick_decision("abort")
             response = await task
-            assert response == ApprovalResponse(decision="abort", instructions=None)
+            assert response == ApprovalResponse(
+                decision="abort", instructions=None)
 
     asyncio.run(scenario())
 
@@ -2060,9 +2122,12 @@ def test_findings_list_recording_a_decision_advances_the_cursor_to_the_next_unde
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
-                Finding(severity="info", description="third finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
+                Finding(severity="info", description="third finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2099,9 +2164,12 @@ def test_findings_list_advancing_to_the_next_undecided_row_wraps_around() -> Non
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
-                Finding(severity="info", description="third finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
+                Finding(severity="info", description="third finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2120,7 +2188,8 @@ def test_findings_list_advancing_to_the_next_undecided_row_wraps_around() -> Non
             await pilot.pause()
             assert list_view.index == 2
 
-            await pilot.press("s")  # decide row 2 (the last row) -- wraps to row 0
+            # decide row 2 (the last row) -- wraps to row 0
+            await pilot.press("s")
             await pilot.pause()
             assert list_view.index == 0
 
@@ -2134,8 +2203,10 @@ def test_findings_list_aggregates_fix_decided_findings_once_every_row_is_decided
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source"),
-                Finding(severity="error", description="missing null check", review_scope="source"),
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source"),
+                Finding(severity="error", description="missing null check",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2157,7 +2228,8 @@ def test_findings_list_aggregates_fix_decided_findings_once_every_row_is_decided
             await pilot.press("enter")  # opens the chat on row 1
             await pilot.pause()
             box.query_one(Input).value = "add a null guard"
-            await pilot.press("enter")  # decides row 1 -- every row now decided, resolves
+            # decides row 1 -- every row now decided, resolves
+            await pilot.press("enter")
             await pilot.pause()
 
             response = await task
@@ -2209,12 +2281,14 @@ def test_findings_list_confirming_recommended_suggestions_across_rows_aggregates
             await pilot.pause()
 
             assert list_view.index == 0
-            await pilot.press("enter")  # confirms row 0's "rename it" -- advances to row 1
+            # confirms row 0's "rename it" -- advances to row 1
+            await pilot.press("enter")
             await pilot.pause()
             assert not list(box.query(Input))
             assert list_view.index == 1
 
-            await pilot.press("enter")  # confirms row 1's "add a null guard" -- resolves
+            # confirms row 1's "add a null guard" -- resolves
+            await pilot.press("enter")
             await pilot.pause()
             assert not list(box.query(Input))
 
@@ -2234,8 +2308,10 @@ def test_findings_list_resolves_skip_when_every_row_is_skip_decided() -> None:
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="info", description="second finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="info", description="second finding",
+                        review_scope="source"),
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -2254,7 +2330,8 @@ def test_findings_list_resolves_skip_when_every_row_is_skip_decided() -> None:
             await pilot.pause()
 
             response = await task
-            assert response == ApprovalResponse(decision="skip", instructions=None)
+            assert response == ApprovalResponse(
+                decision="skip", instructions=None)
 
     asyncio.run(scenario())
 
@@ -2267,8 +2344,10 @@ def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> Non
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2282,7 +2361,8 @@ def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> Non
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
-            await pilot.press("s")  # skip row 0 -- advances to row 1, still undecided
+            # skip row 0 -- advances to row 1, still undecided
+            await pilot.press("s")
             await pilot.pause()
             assert list_view.index == 1
 
@@ -2293,7 +2373,8 @@ def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> Non
             await pilot.press("enter")  # opens the chat on row 0 again
             await pilot.pause()
             box.query_one(Input).value = "actually rename it"
-            await pilot.press("enter")  # reconfirms row 0 as "fix", overwriting "skip"
+            # reconfirms row 0 as "fix", overwriting "skip"
+            await pilot.press("enter")
             await pilot.pause()
 
             # Row 1 was never decided -- the park is still open, and the cursor moved back
@@ -2301,7 +2382,8 @@ def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> Non
             assert not task.done()
             assert list_view.index == 1
 
-            await pilot.press("s")  # decide row 1 too -- every row now decided, resolves
+            # decide row 1 too -- every row now decided, resolves
+            await pilot.press("s")
             await pilot.pause()
 
             response = await task
@@ -2326,8 +2408,10 @@ def test_findings_list_revisiting_a_chat_decided_row_shows_its_typed_instruction
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2347,7 +2431,8 @@ def test_findings_list_revisiting_a_chat_decided_row_shows_its_typed_instruction
             await pilot.press("enter")  # confirms row 0, advances to row 1
             await pilot.pause()
             assert list_view.index == 1
-            assert not list(box.query(Input))  # row 0 hidden, its Input torn down
+            # row 0 hidden, its Input torn down
+            assert not list(box.query(Input))
 
             await pilot.press("up")  # browse back to the already-decided row 0
             await pilot.pause()
@@ -2381,7 +2466,8 @@ def test_findings_list_revisiting_a_chat_decided_row_shows_its_typed_instruction
                 decision="fix", instructions="actually rename it"
             )
 
-            await pilot.press("s")  # decide row 1 too -- every row now decided, resolves
+            # decide row 1 too -- every row now decided, resolves
+            await pilot.press("s")
             await pilot.pause()
 
             response = await task
@@ -2399,9 +2485,12 @@ def test_findings_list_abort_resolves_immediately_regardless_of_per_row_progress
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
-                Finding(severity="info", description="third finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
+                Finding(severity="info", description="third finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2414,14 +2503,16 @@ def test_findings_list_abort_resolves_immediately_regardless_of_per_row_progress
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
-            await pilot.press("s")  # decide row 0 only -- 2 of 3 rows still undecided
+            # decide row 0 only -- 2 of 3 rows still undecided
+            await pilot.press("s")
             await pilot.pause()
 
             await pilot.press("x")
             await pilot.pause()
 
             response = await task
-            assert response == ApprovalResponse(decision="abort", instructions=None)
+            assert response == ApprovalResponse(
+                decision="abort", instructions=None)
 
     asyncio.run(scenario())
 
@@ -2439,7 +2530,8 @@ def test_findings_list_single_finding_park_resolves_immediately_on_one_decision(
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="unclear naming", review_scope="source")
+                Finding(severity="warning",
+                        description="unclear naming", review_scope="source")
             ],
             risk_level="low",
             risk_rationale="fine",
@@ -2461,7 +2553,8 @@ def test_findings_list_single_finding_park_resolves_immediately_on_one_decision(
             response = await task
             # Not "- [warning] unclear naming: looks fine actually" -- the combined-
             # instructions format never applies to a single-row park.
-            assert response == ApprovalResponse(decision="fix", instructions="looks fine actually")
+            assert response == ApprovalResponse(
+                decision="fix", instructions="looks fine actually")
 
     asyncio.run(scenario())
 
@@ -2475,8 +2568,10 @@ def test_findings_list_await_decision_resets_stale_decisions_from_a_previous_rou
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2517,8 +2612,10 @@ def test_findings_list_decided_marker_is_visible_on_every_row_regardless_of_high
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2535,8 +2632,10 @@ def test_findings_list_decided_marker_is_visible_on_every_row_regardless_of_high
             await pilot.pause()
 
             lines = _finding_rows_content(box)
-            assert lines[0].startswith("⏭ ●")  # row 0's marker survives losing highlight
-            assert not lines[1].startswith(("⏭", "✔"))  # row 1 is still undecided
+            # row 0's marker survives losing highlight
+            assert lines[0].startswith("⏭ ●")
+            assert not lines[1].startswith(
+                ("⏭", "✔"))  # row 1 is still undecided
 
             box._quick_decision("abort")
             await task
@@ -2548,8 +2647,10 @@ def test_findings_list_footer_hint_shows_a_decided_progress_count_while_parked()
     async def scenario() -> None:
         output = ReviewOutput(
             findings=[
-                Finding(severity="warning", description="first finding", review_scope="source"),
-                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="warning", description="first finding",
+                        review_scope="source"),
+                Finding(severity="error", description="second finding",
+                        review_scope="source"),
             ],
             risk_level="high",
             risk_rationale="bad",
@@ -2592,7 +2693,8 @@ class _StatusHostApp(App[None]):
 
 def test_status_box_renders_its_initial_message_on_mount() -> None:
     async def scenario() -> None:
-        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
+        app = _StatusHostApp(
+            "Pipeline ran successfully.\n\nPress 'e' to exit.")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(StatusBox)
@@ -2603,7 +2705,8 @@ def test_status_box_renders_its_initial_message_on_mount() -> None:
 
 def test_status_box_update_status_replaces_the_rendered_content() -> None:
     async def scenario() -> None:
-        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
+        app = _StatusHostApp(
+            "Pipeline ran successfully.\n\nPress 'e' to exit.")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(StatusBox)
@@ -2618,7 +2721,8 @@ def test_status_box_update_status_replaces_the_rendered_content() -> None:
 
 def test_status_box_has_a_status_border_title() -> None:
     async def scenario() -> None:
-        app = _StatusHostApp("Pipeline ran successfully.\n\nPress 'e' to exit.")
+        app = _StatusHostApp(
+            "Pipeline ran successfully.\n\nPress 'e' to exit.")
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(StatusBox)

@@ -180,7 +180,14 @@ class FindingsList(Vertical):
         then re-opens that row's chat in place, pre-filled with its own recorded
         instructions, whenever that cursor landed on `_CUSTOM_ENTRY` -- so revisiting a
         chat-decided row shows what was actually typed instead of the bare "Chat about it"
-        label, with no extra keypress needed."""
+        label, with no extra keypress needed.
+
+        Refocuses `_FindingsListView` at the end of the parked branch -- this handler also
+        fires when up/down bubbles here from a row's own live chat `Input` (which doesn't
+        bind either key itself), and hiding the old row tears that focused `Input` down via
+        `set_hidden`. Every parked-mode binding lives only on `_FindingsListView` (see its
+        own docstring), so leaving focus on a just-removed `Input` strands it at `None`
+        with no key able to reach any binding again -- the whole box reads as hung."""
 
         if self._last_highlighted is not None:
             self._last_highlighted.set_hidden()
@@ -192,6 +199,9 @@ class FindingsList(Vertical):
             self._last_highlighted.reset_decision()
             self._last_highlighted.set_decision()
             self._last_highlighted.restore_chat_preview()
+            list_view = self._list_view()
+            if list_view is not None:
+                list_view.focus()
         else:
             self._last_highlighted.set_plain()
 
