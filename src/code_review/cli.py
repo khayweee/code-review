@@ -1,30 +1,14 @@
 """CLI entry point (`code-review`).
 
-Milestone 1+ wires this up to a real pipeline run. For now it only proves the Typer
-app is installed and importable.
+`review` requires a real TTY on stdin and stdout (the live progress view can't render into
+a pipe/redirect), then runs `tui.app.ReviewApp` driven by `_run_pipeline` -- an async
+generator that builds `StepContext` from `git diff HEAD...<branch>` (fetched in a worker
+thread so a slow diff doesn't delay the TUI's first paint) and runs the implemented steps
+through `run_steps`. The branch ref is verified synchronously before the TUI starts, so a
+bad BRANCH fails fast with no TUI flash.
 
-Milestone 3 (issue #19) adds validation and construction of the explicit `Intent` from
-`--intent`: `Intent` is fully known before the pipeline starts (it's a CLI flag, not
-something discovered mid-run), so it is constructed once here, before anything else, and
-threaded through the same immutable `StepContext` every step receives.
-
-Milestone 12 (issues #31-#33) adds `update` and `uninstall` alongside `review`, so the
-full install lifecycle is discoverable via `code-review --help` once installed (see
-`scripts/install.sh` for first-time install). Both shell out to `uv tool
-upgrade`/`uv tool uninstall` for this package -- no dependency resolution, virtual
-environment management, or binary replacement is reimplemented here; `uv` already owns
-all of that.
-
-Milestone 13's #40 wires `review` up for real: it requires a real TTY on both stdin and
-stdout (the live progress view cannot render into a pipe or redirect), then starts
-`tui.app.ReviewApp` immediately off `_run_pipeline` -- an async generator that builds
-`StepContext` from a `git diff HEAD...<branch>` against the current checkout (fetched in a
-worker thread, off the TUI's own event loop, so a slow diff can't delay the TUI's first
-paint) and runs the fixed prefix of implemented steps (`steps.registry.IMPLEMENTED_STEPS`)
-through `run_steps`. Only the cheap `git rev-parse --verify` ref check
-(`_verify_branch_exists`) runs synchronously before the TUI starts, so a bad BRANCH still
-fails fast with no TUI flash. See `docs/ROADMAP.md` milestone 13 and `tui/AGENTS.md` for
-the design; this docstring only tracks what's wired where.
+`update`/`uninstall` shell out to `uv tool upgrade`/`uv tool uninstall`; `uv` owns all
+dependency/env/binary management, nothing is reimplemented here.
 """
 
 from __future__ import annotations
@@ -56,14 +40,10 @@ PACKAGE_NAME = "code-review"
 
 
 def _version_callback(show_version: bool) -> None:
-    """Eager `--version` handler: print and exit before any other option/command
-    resolves. Reads `code_review.__version__` directly (kept in sync with
-    `pyproject.toml`'s own `version` by hand -- this project has no automated
-    version-bumping, issue #28) rather than `importlib.metadata`, so it reports correctly
-    even against an editable/`uv run` checkout with no installed distribution metadata.
-    Added to make a stale vs. freshly rebuilt `code-review` install trivially
-    distinguishable at a glance (`uv tool install` reinstalls in place with no
-    version-mismatch warning of its own)."""
+    """Eager `--version` handler: print and exit before any other option/command resolves.
+    Reads `code_review.__version__` directly (kept in sync with `pyproject.toml` by hand)
+    rather than `importlib.metadata`, so it works against an editable/`uv run` checkout
+    with no installed distribution metadata."""
 
     if show_version:
         typer.echo(f"{PACKAGE_NAME} {__version__}")
@@ -89,8 +69,7 @@ _UV_NOT_FOUND_MESSAGE = (
     "  https://docs.astral.sh/uv/getting-started/installation/"
 )
 
-# Matches uv's own "+ code-review==<version> (from <source>[@<git-rev>])" line, printed
-# for both a fresh reinstall and a real version bump -- the same shape either way.
+# Matches uv's "+ code-review==<version> (from <source>[@<git-rev>])" upgrade-line output.
 _UPGRADE_LINE = re.compile(
     rf"^\s*\+\s*{re.escape(PACKAGE_NAME)}==(?P<version>\S+)"
     rf"(?:\s*\(from .*?@(?P<rev>[0-9a-f]{{7,40}})\))?",
@@ -109,16 +88,11 @@ def _require_uv() -> str:
 def _run_uv_tool_command(
     args: list[str], *, failure_prefix: str
 ) -> subprocess.CompletedProcess[str]:
-    """Run a `uv tool ...` subcommand, echoing a clear message and exiting on failure.
-
-    Shared by `update`/`uninstall`, which differ only in which `uv tool` subcommand they
-    run and how they interpret a successful result.
-    """
+    """Run a `uv tool ...` subcommand, echoing a clear message and exiting on failure."""
 
     uv = _require_uv()
-    # `--color never` keeps stderr plain text regardless of environment/terminal color
-    # detection -- observed in practice: `uv` still emits ANSI escapes in captured
-    # (non-TTY) output, which breaks `_UPGRADE_LINE`'s regex match on the version line.
+    # --color never: uv still emits ANSI escapes in captured output otherwise, breaking
+    # _UPGRADE_LINE's regex match.
     result = subprocess.run([uv, "--color", "never", *args], capture_output=True, text=True)
     if result.returncode != 0:
         typer.echo(f"{failure_prefix}: {result.stderr.strip()}", err=True)
@@ -127,10 +101,8 @@ def _run_uv_tool_command(
 
 
 def _complete_branch(ctx: object, args: list[str], incomplete: str) -> list[str]:
-    """List local git branch names for `review BRANCH` shell completion.
-
-    Returns no candidates (not an error) if `git` is missing or the cwd isn't a repo --
-    shell completion must never crash the shell it runs inside.
+    """List local git branch names for `review BRANCH` shell completion. Returns no
+    candidates (not an error) if `git` is missing or the cwd isn't a repo.
     """
     git = shutil.which("git")
     if git is None:
@@ -154,8 +126,7 @@ def _describe_upgrade(stderr: str) -> str:
 
     match = _UPGRADE_LINE.search(stderr)
     if match is None:
-        # `uv` reported success but not in the shape this parses -- still don't claim
-        # nothing happened, since the command's own exit code says it succeeded.
+        # Exit code says success even if stderr doesn't match the expected shape.
         return f"{PACKAGE_NAME} was upgraded."
 
     version = match.group("version")
@@ -182,11 +153,8 @@ def _require_git() -> str:
 
 
 def _verify_branch(git: str, branch: str) -> None:
-    """Raise a clear, code-review-specific error if BRANCH isn't a valid ref in this repo.
-
-    Checked separately from the `diff` call in `_diff_against_head` so a bad BRANCH gets
-    this message instead of `git diff`'s own "ambiguous argument" phrasing, which talks
-    about revision/path syntax that has nothing to do with this CLI's own arguments.
+    """Raise a clear, code-review-specific error if BRANCH isn't a valid ref in this repo,
+    instead of letting `git diff` fail later with its own "ambiguous argument" phrasing.
     """
     verify = subprocess.run(
         [git, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"],
@@ -200,20 +168,15 @@ def _verify_branch(git: str, branch: str) -> None:
 
 
 def _verify_branch_exists(branch: str) -> None:
-    """Fast, synchronous pre-flight check `review` runs before starting the TUI: only
-    `git rev-parse --verify` (cheap), not the full `git diff` capture (`_diff_against_head`
-    below) -- that one can be slow on a large diff and is deferred until after the TUI's
-    own event loop is running (see `_run_pipeline`), so a bad BRANCH still fails instantly
-    with no TUI flash, while a large diff no longer blocks the TUI from appearing at all.
+    """Fast pre-flight check `review` runs before starting the TUI: only the cheap
+    `git rev-parse --verify`, not the full diff capture (deferred to `_run_pipeline` so a
+    large diff doesn't block the TUI from appearing).
     """
     _verify_branch(_require_git(), branch)
 
 
 def _diff_against_head(branch: str) -> str:
-    """Return `git diff HEAD...<branch>`: BRANCH's changes since its merge-base with the
-    current HEAD. Diff-base semantics beyond "against current HEAD" (e.g. against a
-    configured default branch instead) are explicitly out of scope here - Rebase/Review own
-    that once they land (see docs/ROADMAP.md milestones 4-5)."""
+    """Return `git diff HEAD...<branch>`: BRANCH's changes since its merge-base with HEAD."""
     git = _require_git()
     _verify_branch(git, branch)
 
@@ -237,18 +200,10 @@ async def _run_pipeline(
     """Build the events `ReviewApp` renders: fetch the diff, then run every implemented
     step against it, in order.
 
-    `_diff_against_head` runs in a worker thread (`asyncio.to_thread`), not on the main
-    thread -- by the time this generator's first iteration reaches it, `ReviewApp.run()`
-    (`review` below) is already driving the terminal, so a slow `git diff` capture no
-    longer delays the TUI's own first paint (all steps "pending"); it only delays that
-    first paint from progressing to `IntentStep` actually starting.
-
-    `activity_relay` (issue #66) becomes `ctx.activity_reporter` -- optional, defaulting to
-    `None`, matching `StepContext.activity_reporter`'s own default so existing callers of
-    this generator (e.g. `tests/test_cli_review.py`'s event-loop test) keep working
-    unchanged. `approval_relay` (issue #80) is the same "optional, defaults to None" shape
-    again, becoming `ctx.on_approval_needed`. `review` below always passes a real one of
-    each.
+    `_diff_against_head` runs in a worker thread so a slow `git diff` capture doesn't delay
+    the TUI's first paint. `activity_relay`/`approval_relay` are optional (default `None`)
+    and become `ctx.activity_reporter`/`ctx.on_approval_needed`; `review` below always
+    passes real ones.
     """
     diff = await asyncio.to_thread(_diff_against_head, branch)
     ctx = StepContext(
@@ -300,13 +255,9 @@ def review(
     asyncio.run(agent.close())
 
     if tui_app.error is not None:
-        # Reports any pipeline failure the same way, no dedicated branch per exception type
-        # -- including `pipeline.executor.RunAbortedError` (issue #80: a human chose
-        # "abort" in response to a parked step's approval request). `RunAbortedError`'s own
-        # message already names which step and that no further steps ran, so this generic
-        # path already gives a clear, specific, non-traceback error -- the same UX class as
-        # the bad-branch/no-TTY errors above, just surfaced once the TUI itself has exited
-        # cleanly rather than before it ever started.
+        # One generic path for any pipeline failure, including RunAbortedError (a human
+        # chose "abort" on a parked step's approval request) -- its message already names
+        # the step, so no dedicated branch per exception type is needed.
         typer.echo(f"code-review review failed: {tui_app.error}", err=True)
         raise typer.Exit(code=1)
 

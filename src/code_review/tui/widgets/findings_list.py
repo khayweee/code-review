@@ -1,18 +1,12 @@
 """The Findings box: the most recently completed step's findings, one row per finding.
 
-- Shows a `ReviewOutput`, `TestSufficiencyOutput`, or bare `list[Finding]` (see
-  `state.py`'s `latest_findings`), one `Finding` row per finding plus a severity-count
-  summary line.
-- While a step is parked, turns the highlighted row's `FindingsSuggestion` into a live
-  inline decision selector: each finding's own `suggestions` plus a single "Chat about
-  it" entry, always recording "fix" for whichever row is highlighted when confirmed.
-- Skip ("s") records "skip" for the highlighted row the same per-row way; the park itself
-  only resolves once every row has a decision, aggregating them into one
-  `ApprovalResponse`.
-- Abort ("x") is the one binding that stays a separate, global, step-scoped control -- it
-  stops the whole run outright regardless of how many rows are already decided.
-- Takes the data it displays as plain data, never reads a `StepEvent` stream or a
-  registry/agent output itself.
+Shows a `ReviewOutput`, `TestSufficiencyOutput`, or bare `list[Finding]`, one row per
+finding plus a severity-count summary line. While parked, turns the highlighted row's
+`FindingsSuggestion` into a live decision selector (suggestions plus "Chat about it");
+confirming an entry records "fix" for that row, "s" records "skip". The park resolves
+once every row has a decision, aggregating them into one `ApprovalResponse`. Abort ("x")
+is a separate global control that stops the run immediately regardless of per-row
+progress.
 """
 
 from __future__ import annotations
@@ -39,10 +33,8 @@ from code_review.tui.widgets.findings_suggestion import _CUSTOM_ENTRY
 def _findings_of(
     output: ReviewOutput | TestSufficiencyOutput | list[FindingData],
 ) -> list[FindingData]:
-    """Extract the plain `list[Finding]` from whichever of `ReviewOutput`/
-    `TestSufficiencyOutput`/bare `list[Finding]` `state.py`'s `latest_findings` picked --
-    the one place `FindingsList`'s helpers need to branch on shape, so nothing downstream
-    does."""
+    """Extract the plain `list[Finding]` regardless of which of the three shapes was
+    passed."""
 
     return output if isinstance(output, list) else output.findings
 
@@ -56,8 +48,7 @@ def _findings_summary(output: ReviewOutput | TestSufficiencyOutput | list[Findin
     return f"{counts['error']} error, {counts['warning']} warning, {counts['info']} info"
 
 
-# `FindingsList._set_footer_hint` appends a live "N/M decided" progress count after this
-# fixed copy while parked, recomputed on every recorded decision, not just at park start/end.
+# `_set_footer_hint` appends a live "N/M decided" count after this while parked.
 _FOOTER_HINT = (
     "Enter to confirm this finding  |  left/right or 1-9 browse options  |  f to chat"
     "  |  s to skip this finding  |  x to abort the run"
@@ -67,14 +58,10 @@ _FOOTER_HINT = (
 class FindingsList(Vertical):
     """A bordered box showing the most recently completed step's findings.
 
-    - Hosts a child `_FindingsListView`, which hosts one `Finding` per finding, plus a
-      trailing severity-count summary line and a bound-key footer hint.
-    - Only the finding currently under the cursor shows anything in its
-      `FindingsSuggestion` column; arrow keys move the cursor.
-    - While parked, `await_decision` turns the highlighted row's `FindingsSuggestion` into
-      a live decision selector; outside a park, the box is read-only.
-    - A `Vertical`, not a `_BorderedBox` (`Static`) subclass -- it needs to host three
-      children, which a `Static` can't.
+    Hosts a child `_FindingsListView` (one `Finding` per finding), a severity-count
+    summary line, and a bound-key footer hint. Only the highlighted row shows anything in
+    its `FindingsSuggestion` column. A `Vertical`, not a `_BorderedBox`, since it needs to
+    host three children.
     """
 
     DEFAULT_CSS = (
@@ -94,16 +81,13 @@ class FindingsList(Vertical):
         super().__init__(id=id, classes=classes)
         self._output = output
         self.border_title = f"Findings -- {step_name}"
-        # Set only for the duration of `await_decision` -- see that method's docstring.
         self._parked = False
         self._pending: asyncio.Future[ApprovalResponse] | None = None
-        # The `Finding` row `on_list_view_highlighted` most recently hid -- tracked so the
-        # handler can un-highlight it without re-deriving it from `_FindingsListView`'s own
-        # (already-advanced) `index`. `None` before anything has ever been highlighted.
+        # Row on_list_view_highlighted most recently hid, so it can be un-highlighted
+        # without re-deriving it from the ListView's already-advanced index.
         self._last_highlighted: Finding | None = None
-        # This box's own authoritative list of `Finding` rows, in order -- `update_findings`
-        # reconciles against *this*, never against `_FindingsListView.children` fresh each
-        # call. See that method's docstring for why.
+        # Authoritative row list; update_findings reconciles against this, not a fresh
+        # _FindingsListView.children read (which may not have settled into the DOM yet).
         self._rows = [Finding(finding) for finding in _findings_of(output)]
 
     def compose(self) -> ComposeResult:
@@ -112,9 +96,7 @@ class FindingsList(Vertical):
         yield Static("", id="findings-footer", classes="footer-hint")
 
     def on_mount(self) -> None:
-        # Safety net: `_FindingsListView`'s own initial `index=0` may or may not have
-        # already posted `Highlighted` by the time this runs -- explicitly prime row 0
-        # rather than depend on message-delivery ordering between two widgets.
+        # Explicitly prime row 0 rather than depend on Highlighted message-delivery order.
         self._prime_highlighted()
 
     def update_findings(
@@ -122,17 +104,11 @@ class FindingsList(Vertical):
     ) -> None:
         """Replace the displayed findings with `output`'s, and update `border_title`.
 
-        Called on every periodic render tick, whether or not `output` actually changed. The
-        common case (finding count unchanged) updates every existing row in place, touching
-        no `_FindingsListView`-level DOM structure -- so its cursor index and every row's
-        own mode survive untouched. Only a growing/shrinking finding count mounts or
-        removes rows, and only the ones beyond the overlap with the old list.
-
-        Reconciles against `self._rows` (this box's own authoritative row list), never a
-        fresh `_FindingsListView.children` read -- Textual mounts/removes children
-        asynchronously, so a live query mid-tick could under/over-count rows still settling
-        into the DOM. No-ops the child rebuild (but still updates `border_title`) if
-        `_FindingsListView` hasn't composed yet.
+        Called on every periodic render tick, whether or not `output` changed. The common
+        case (finding count unchanged) updates every existing row in place, leaving cursor
+        index and row modes untouched. A growing/shrinking count only mounts/removes rows
+        beyond the overlap with the old list. No-ops the child rebuild (but still updates
+        `border_title`) if `_FindingsListView` hasn't composed yet.
         """
 
         self._output = output
@@ -157,9 +133,8 @@ class FindingsList(Vertical):
             del self._rows[overlap:]
             for item in removed:
                 item.remove()
-            # If the row `on_list_view_highlighted` most recently hid is one of the rows
-            # just removed, drop the reference now rather than leaving it to that handler
-            # to call `.set_hidden()` on an already-unmounted `Finding`.
+            # Drop the reference now rather than later calling set_hidden() on an
+            # already-unmounted Finding.
             if self._last_highlighted in removed:
                 self._last_highlighted = None
             if list_view.index is not None and list_view.index >= len(new_findings):
@@ -174,19 +149,11 @@ class FindingsList(Vertical):
         """Hide the previously-highlighted row's suggestions and show the newly
         highlighted one's -- `plain` outside a park, or `decision` while parked.
 
-        `reset_decision` starts an undecided row's cycle fresh at entry 0, but leaves a
-        "fix"-decided row's cursor exactly where it was confirmed -- `restore_chat_preview`
-        then re-opens that row's chat in place, pre-filled with its own recorded
-        instructions, whenever that cursor landed on `_CUSTOM_ENTRY` -- so revisiting a
-        chat-decided row shows what was actually typed instead of the bare "Chat about it"
-        label, with no extra keypress needed.
-
-        Refocuses `_FindingsListView` at the end of the parked branch -- this handler also
-        fires when up/down bubbles here from a row's own live chat `Input` (which doesn't
-        bind either key itself), and hiding the old row tears that focused `Input` down via
-        `set_hidden`. Every parked-mode binding lives only on `_FindingsListView` (see its
-        own docstring), so leaving focus on a just-removed `Input` strands it at `None`
-        with no key able to reach any binding again -- the whole box reads as hung."""
+        Refocuses `_FindingsListView` at the end of the parked branch: this handler also
+        fires when up/down bubbles here from a row's live chat `Input`, and hiding the old
+        row tears that focused `Input` down via `set_hidden`. Without refocusing,
+        focus is stranded at `None` and no key binding can be reached -- the box reads as
+        hung."""
 
         if self._last_highlighted is not None:
             self._last_highlighted.set_hidden()
@@ -206,9 +173,8 @@ class FindingsList(Vertical):
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Confirm whatever the cursor currently points at for the selected row's finding
-        -- a no-op outside a park. A suggestion entry records itself as the fix immediately,
-        verbatim, with no edit step -- "Chat about it" is the one entry with no text of its
-        own to record, so confirming it opens the inline chat instead."""
+        -- a no-op outside a park. A suggestion entry records itself as the fix verbatim;
+        confirming "Chat about it" opens the inline chat instead."""
 
         if not self._parked:
             return
@@ -232,8 +198,7 @@ class FindingsList(Vertical):
         self._last_highlighted = item
 
     def _list_view(self) -> _FindingsListView | None:
-        """This box's `_FindingsListView`, or `None` when it hasn't composed yet. Every
-        caller below treats `None` as "nothing to do yet, will settle on its own"."""
+        """This box's `_FindingsListView`, or `None` when it hasn't composed yet."""
 
         try:
             return self.query_one(_FindingsListView)
@@ -241,8 +206,7 @@ class FindingsList(Vertical):
             return None
 
     async def _await_list_view(self) -> _FindingsListView | None:
-        """Give `_FindingsListView` a few event-loop turns to exist if it doesn't yet,
-        rather than the fire-and-forget guard every synchronous caller uses -- so
+        """Give `_FindingsListView` a few event-loop turns to exist if it doesn't yet, so
         `await_decision`'s `.focus()` call actually lands. Bounded: gives up and returns
         `None` rather than hang the whole park if it never turns up."""
 
@@ -258,14 +222,12 @@ class FindingsList(Vertical):
         if list_view is None:
             return None
         item = list_view.highlighted_child
-        # `_FindingsListView.__init__` asserts every mounted child is a `Finding`, and this
-        # module never mounts anything else into it.
+        # _FindingsListView.__init__ asserts every mounted child is a Finding.
         return cast("Finding | None", item)
 
     def _cycle_decision(self, delta: int) -> None:
         """Move the highlighted row's decision cursor by `delta`, then open the inline
-        chat the moment it lands on "Chat about it" -- so browsing onto that entry already
-        puts the human straight into typing."""
+        chat if it lands on "Chat about it"."""
 
         if not self._parked:
             return
@@ -277,9 +239,7 @@ class FindingsList(Vertical):
             self._open_chat()
 
     def _jump_decision(self, index: int) -> None:
-        """Digit-key counterpart to `_cycle_decision` -- same "open the chat the instant
-        the cursor lands on 'Chat about it'" behavior, checked after the call regardless
-        of whether `Finding.jump_decision` itself no-op'd."""
+        """Digit-key counterpart to `_cycle_decision`: same auto-open-chat behavior."""
 
         if not self._parked:
             return
@@ -291,10 +251,9 @@ class FindingsList(Vertical):
             self._open_chat()
 
     def _quick_decision(self, decision: ApprovalDecision) -> None:
-        """ "s"/"x"'s shared entry point. "abort" resolves `self._pending` directly and
-        immediately, regardless of how many rows are already decided -- a whole-run action
-        with no coherent per-finding meaning. Every other value reaching this method is
-        "skip", recorded against the highlighted row only."""
+        """ "s"/"x"'s shared entry point. "abort" resolves `self._pending` immediately
+        regardless of per-row progress; any other value is "skip", recorded against the
+        highlighted row only."""
 
         if not self._parked or self._pending is None:
             return
@@ -304,14 +263,10 @@ class FindingsList(Vertical):
         self._record_decision(decision, None)
 
     def _chat_prefill(self, item: Finding) -> str:
-        """The text to seed a freshly (re)opened chat with: the highlighted row's own
-        previously recorded "fix" instructions, if it has any, so browsing away from a
-        decided row and back -- then reopening its chat via Enter/"f"/cycling back onto
-        "Chat about it" -- shows what was already confirmed instead of an empty box.
-        Without this, a stray Enter on a revisited row would resubmit an empty `Input` and
-        silently overwrite the real instructions with "" in the aggregated fix prompt
-        (`pipeline.findings.describe_finding_decisions`). Empty for an undecided row, or
-        one decided "skip" -- there is no fix text to restore."""
+        """The text to seed a freshly (re)opened chat with: the row's previously recorded
+        "fix" instructions, if any. Without this, a stray Enter on a revisited row would
+        resubmit an empty `Input` and silently overwrite the real instructions with "" in
+        the aggregated fix prompt. Empty for an undecided or "skip"-decided row."""
 
         response = item.row_decision
         if response is not None and response.decision == "fix":
@@ -319,15 +274,9 @@ class FindingsList(Vertical):
         return ""
 
     def _open_chat(self, prefill: str | None = None) -> None:
-        """Open the highlighted row's chat, seeded with `prefill`, in place inside that
-        row's own `FindingsSuggestion`. Idempotent, so calling this twice in a row -- via a
-        cycle/jump auto-open and again via a redundant Enter/"f" -- never stacks or resets
-        anything. Focuses the returned `Input`.
-
-        `prefill` defaults to `_chat_prefill`'s own row-decision-aware guess rather than
-        always `""`, so every real key-binding call site (Enter/"f"/cycle/jump) gets that
-        behavior for free. Tests pass an explicit string (including `""`) to force a
-        specific seed regardless of the row's recorded decision."""
+        """Open the highlighted row's chat, seeded with `prefill`, and focus the resulting
+        `Input`. Idempotent. `prefill` defaults to `_chat_prefill`'s row-decision-aware
+        guess; tests pass an explicit string to force a specific seed."""
 
         if not self._parked:
             return
@@ -341,9 +290,8 @@ class FindingsList(Vertical):
             input_widget.focus()
 
     def _close_chat(self) -> None:
-        """Escape counterpart to `_open_chat`: cancel the highlighted row's live chat
-        without resolving `self._pending` -- the park stays open exactly as it was before
-        the chat opened. Refocuses `_FindingsListView` explicitly."""
+        """Cancel the highlighted row's live chat without resolving `self._pending`, and
+        refocus `_FindingsListView`."""
 
         if not self._parked:
             return
@@ -356,27 +304,22 @@ class FindingsList(Vertical):
             list_view.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle the highlighted row's live chat `Input` being submitted -- this
-        `Message` bubbles up to `FindingsList` regardless of where it lives in the row
-        tree. Delegating to `_resolve_chat` is enough on its own; no explicit cleanup
-        needed here."""
+        """Handle the highlighted row's live chat `Input` being submitted."""
 
         self._resolve_chat(event.value)
 
     def _resolve_chat(self, instructions: str) -> None:
-        """The highlighted row's chat `Input` was submitted -- records "fix" for that row
-        only, via `_record_decision`."""
+        """Records "fix" for the highlighted row only."""
 
         self._record_decision("fix", instructions)
 
     def _record_decision(self, decision: ApprovalDecision, instructions: str | None) -> None:
         """Record `decision`/`instructions` against the currently highlighted row only.
 
-        - Once every row in `self._rows` has its own decision, aggregates them into the
-          one final `ApprovalResponse` and resolves the pending park (`_resolve_park`).
-        - Otherwise leaves the park open and moves the highlighted cursor on to the next
-          undecided row (`_advance_to_next_undecided`).
-        - The footer's decided/total progress count is recomputed either way.
+        Once every row has a decision, aggregates them and resolves the pending park
+        (`_resolve_park`); otherwise moves the highlighted cursor to the next undecided
+        row (`_advance_to_next_undecided`). The footer's progress count is recomputed
+        either way.
         """
 
         if self._pending is None:
@@ -392,11 +335,8 @@ class FindingsList(Vertical):
             self._advance_to_next_undecided()
 
     def _advance_to_next_undecided(self) -> None:
-        """After a decision is recorded but the park is not yet fully decided: move the
-        highlighted cursor to the next undecided row, searching forward from the current
-        index and wrapping past the end. Reuses `on_list_view_highlighted`'s existing
-        reset-cursor/`set_decision()` plumbing for free by only moving
-        `_FindingsListView.index`. Explicitly refocuses `_FindingsListView` afterward."""
+        """Move the highlighted cursor to the next undecided row, searching forward from
+        the current index and wrapping past the end, then refocus `_FindingsListView`."""
 
         list_view = self._list_view()
         if list_view is None or not self._rows:
@@ -411,14 +351,11 @@ class FindingsList(Vertical):
                 return
 
     def _resolve_park(self) -> None:
-        """Aggregate every row's now-final decision into the one `ApprovalResponse` that
-        resolves `self._pending` -- called once every row in `self._rows` has a decision;
-        never called directly by a key binding.
-
-        A single-row park resolves with that row's own `ApprovalResponse`, unwrapped.
-        Otherwise every "fix"-decided row's instructions are combined via
-        `describe_finding_decisions` into one `decision="fix"` response; if every row chose
-        "skip" instead, resolves `decision="skip", instructions=None`.
+        """Aggregate every row's final decision into the one `ApprovalResponse` that
+        resolves `self._pending`. A single-row park resolves with that row's own
+        response, unwrapped; otherwise every "fix"-decided row's instructions are
+        combined via `describe_finding_decisions`, or if every row chose "skip",
+        resolves `decision="skip"`.
         """
 
         assert self._pending is not None
@@ -441,9 +378,7 @@ class FindingsList(Vertical):
 
     def _set_footer_hint(self, parked: bool) -> None:
         """Show/clear `#findings-footer`'s bound-key copy. While parked, also appends a
-        live "N/M decided" progress count. Called both at park start/end and after every
-        single recorded decision, since the count must move the instant a decision is
-        recorded."""
+        live "N/M decided" progress count."""
 
         try:
             footer = self.query_one("#findings-footer", Static)
@@ -457,19 +392,15 @@ class FindingsList(Vertical):
 
     async def await_decision(self) -> ApprovalResponse:
         """Turn the highlighted row's `FindingsSuggestion` into a live decision selector
-        until every row in `self._rows` has its own decision and the park resolves.
+        until every row has its own decision and the park resolves.
 
-        Confirming a suggestion or "Chat about it" records "fix" for the highlighted row;
-        "s" records "skip"; "x" (abort) resolves the whole run immediately regardless of
-        per-row progress. Each recorded decision either resolves the park (once every row
-        is decided) or moves the highlighted cursor to the next undecided row via
-        `_record_decision`, leaving the park open for the rest.
-
-        Resets every row's decision to undecided at the start, since a fix-round can
-        re-park the same `FindingsList` on a fresh round. Awaits `_await_list_view()` (not
-        the plain `_list_view()`) so the initial `.focus()` call lands even if this
-        coroutine starts before `FindingsList` finishes composing; restores plain display
-        in a `finally` regardless of how the park resolved.
+        Confirming a suggestion or "Chat about it" records "fix"; "s" records "skip"; "x"
+        (abort) resolves the whole run immediately regardless of per-row progress. Resets
+        every row's decision to undecided at the start, since a fix-round can re-park the
+        same `FindingsList`. Awaits `_await_list_view()` rather than the plain
+        `_list_view()` so the initial `.focus()` lands even if this coroutine starts
+        before `FindingsList` finishes composing; restores plain display in a `finally`
+        regardless of how the park resolved.
         """
 
         self._parked = True

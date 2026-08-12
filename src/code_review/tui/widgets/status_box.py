@@ -1,8 +1,7 @@
 """The Status box: a one-line outcome shown once the pipeline run finishes.
 
-- Mounted dynamically, only once the run is done -- a still-running pipeline shows no
-  Status box at all.
-- Driven by `app.py`'s `_render_status`/`state.py`'s `final_status_message`.
+Mounted dynamically only once the run is done; a still-running pipeline shows no
+Status box.
 """
 
 from __future__ import annotations
@@ -11,10 +10,7 @@ from code_review.tui.widgets.base import _BorderedBox
 
 
 class StatusBox(_BorderedBox):
-    """A bordered box shown once the pipeline run finishes, successfully or not.
-
-    - Displays a one-line outcome plus the reminder that "e" now closes the app.
-    """
+    """A bordered box shown once the pipeline run finishes, successfully or not."""
 
     def __init__(
         self,

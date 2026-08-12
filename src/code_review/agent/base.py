@@ -14,52 +14,30 @@ OutputT = TypeVar("OutputT", bound=BaseModel)
 
 @dataclass(frozen=True, slots=True)
 class RunOpts(Generic[OutputT]):
-    """Everything a backend needs to perform one isolated Agent call.
+    """Everything a backend needs to perform one run (one isolated Agent call; see
+    `docs/GLOSSARY.md`'s "run" vs. a whole pipeline run).
 
-    Whether `on_input_needed` (see its field comment below) is ever reachable depends on
-    `tools_allowlist` and `permission_mode` together, since both feed `claude_cli.py`'s
-    `_build_args` decision to append `--dangerously-skip-permissions` or route the call
-    through the stdin-relay path instead (see `agent/AGENTS.md`):
-
-    | `tools_allowlist` | `permission_mode` | CLI flag(s)                            | reachable? |
-    |---|---|---|---|
-    | empty (`()`) | `None` | `--dangerously-skip-permissions`                  | No -- fast path |
-    | empty (`()`) | set    | `--permission-mode <value>`                       | Yes |
-    | non-empty    | `None` | `--allowedTools ... --permission-mode auto`       | Yes |
-    | non-empty    | set    | `--allowedTools ... --permission-mode <value>`    | Yes |
-
-    In short: only the pure default (`tools_allowlist` empty and `permission_mode` `None`)
-    skips permissions and stays on the untouched fast path. Setting either one at all opts
-    into the stdin-relay path -- the specific non-default `permission_mode` string doesn't
-    change reachability, only which flag value is passed to the CLI.
+    `on_input_needed` is only reachable when `tools_allowlist` is non-empty or
+    `permission_mode` is set -- either opts out of the default
+    `--dangerously-skip-permissions` fast path and routes the call through the
+    stdin-relay path instead (see `claude_cli.py`).
     """
 
-    prompt: str  # sent over stdin, never argv, to avoid per-argument size limits
+    prompt: str  # sent over stdin, not argv, to avoid per-argument size limits
     cwd: Path  # working directory the backend subprocess runs in
-    # pydantic model the answer must validate against
-    output_schema: type[OutputT]
-    # subprocess test seam; swap for a fake CLI in tests
-    executable: str | Path = "claude"
+    output_schema: type[OutputT]  # pydantic model the answer must validate against
+    executable: str | Path = "claude"  # subprocess test seam; swap for a fake CLI in tests
     model: str = "sonnet"  # backend model alias/name for this call
-    # replaces the backend's default system prompt when set
-    system_prompt: str | None = None
-    # adds instructions, keeps the default; prefer this
-    append_system_prompt: str | None = None
-    # scopes permissions to this list via --allowedTools; empty means no scoped list
-    tools_allowlist: tuple[str, ...] = ()
-    # None: no permission mode pinned by the caller, so the backend defaults to
-    # --dangerously-skip-permissions
-    # Set this to opt out of that default.
+    system_prompt: str | None = None  # replaces the backend's default system prompt
+    append_system_prompt: str | None = None  # adds instructions, keeps the default; prefer this
+    tools_allowlist: tuple[
+        str, ...
+    ] = ()  # scopes permissions via --allowedTools; empty = no scoping
+    # None: no mode pinned, so the backend defaults to --dangerously-skip-permissions.
     permission_mode: str | None = None
-    # Invoked with the detected prompt text when the backend subprocess appears blocked
-    # waiting on stdin, and expected to return the human's answer to write back. Only
-    # reachable once `permission_mode` opts out of the skip-permissions default above --
-    # the default `--dangerously-skip-permissions` path never blocks on stdin, so this is
-    # never consulted there. `None` (the default for every existing call site) means no
-    # relay is available: the backend fails closed with `StdinBlockedError` instead of
-    # hanging or fabricating an answer. Consumer: `claude_cli.py`'s non-default-permission
-    # read/write loop; supplied by `tui.input_relay.InputRelay.request_input` for
-    # interactive runs (see `cli.py`'s `review` command).
+    # Called with the detected prompt text when the subprocess looks blocked on stdin;
+    # must return the answer to write back. None means fail closed with
+    # StdinBlockedError rather than hang or fabricate an answer.
     on_input_needed: Callable[[str], Awaitable[str]] | None = None
 
 

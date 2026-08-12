@@ -1,51 +1,27 @@
 """Finding schema, the fail-safe action default, the blocking-findings gate, and the
-deterministic pipeline-owned-delivery scope filter -- Milestone 5 (schema, issue #26).
-Milestone 7's fix-round mechanism (issue #81) adds one more pure helper here,
-`describe_auto_fix_findings` -- see its own docstring; the fix/approval state machine
-itself (the round loop, the park) lives in `pipeline/executor.py`, not this module. Issue
-#98 adds a sibling pure helper, `describe_finding_decisions`, for `tui.widgets.
-FindingsList`'s per-finding approval-park aggregation -- see its own docstring for how it
-reuses `describe_auto_fix_findings`'s exact rendering convention for a related but distinct
-purpose (a human's own typed instructions per finding, not the automatic auto-fix path).
+deterministic pipeline-owned-delivery scope filter.
 
-`Finding` is a pydantic `BaseModel`, not this repo's usual frozen/slotted dataclass (see
-`steps/intent.py`'s `Intent`), because it is passed as `RunOpts.output_schema` to an
-`Agent.run` call (see `agent/base.py`) and validated via `agent/schema.py`'s
-`validate_output` -- both require a pydantic model, not a dataclass.
+`Finding` is a pydantic `BaseModel`, not this repo's usual frozen/slotted dataclass,
+because it's passed as `RunOpts.output_schema` to an `Agent.run` call and validated via
+`agent/schema.py`'s `validate_output`, both of which require a pydantic model.
 
-The fail-safe default (see docs/GLOSSARY.md) is the single most important rule in this
-module: an unset, null, or unrecognized `action` must resolve to `ask-user`, never to
-`no-op` or `auto-fix`. Getting this backwards is a fail-open hole -- the pipeline would
-silently proceed precisely in the cases it understood least. `Finding.action` is
-deliberately typed as an open `str | None` rather than a closed `Literal`, mirroring
-`Intent.source` in `steps/intent.py`: a pydantic `Literal` field would *reject* an
-unrecognized action at validation time, but the fail-safe default requires accepting it and
-routing it toward a human instead, so validation must not fail on it. `action_or_default`
-is the one place that resolves an `action` value to one of the three known outcomes;
-`has_blocking_finding` (the shared blocking-findings gate, reused as-is by Milestone 6's
-test-sufficiency step, see docs/GLOSSARY.md's "Blocking finding") is the one place that
-turns a list of findings into a single yes/no "does this run need a human" answer. Both
-are pure functions with no agent or subprocess dependency.
+Fail-safe default (see docs/GLOSSARY.md): an unset, null, or unrecognized `action` must
+resolve to `ask-user`, never `no-op`/`auto-fix` -- getting this backwards is a fail-open
+hole. `Finding.action` is deliberately `str | None`, not a closed `Literal`: a `Literal`
+field would reject an unrecognized action at validation time, but the fail-safe default
+requires accepting it and routing it to a human instead. `action_or_default` resolves an
+`action` to one of the three known outcomes; `has_blocking_finding` (see docs/GLOSSARY.md's
+"Blocking finding") turns a list of findings into a single yes/no "needs a human" answer.
+Both are pure.
 
-`filter_pipeline_owned_delivery_findings` (moved here from `steps/review.py` in a later
-structural refactor, alongside its `Finding`-processing siblings above) strips
-pipeline-owned-delivery-scoped findings from a `ReviewStep` answer and resets `risk_level`
-back to `"low"` when that was the sole basis for an elevated verdict -- see the function's
-own docstring for the exact rule, its documented limits, and a note on how it avoids a
-`pipeline/` -> `steps/` import.
+`filter_pipeline_owned_delivery_findings` strips pipeline-owned-delivery-scoped findings
+from a `ReviewStep` answer and resets `risk_level` to `"low"` when that was the sole basis
+for an elevated verdict -- see its own docstring for the exact rule and limits.
 
-`Finding.suggestions` (issue #76, part of #75) defaults to `[]` and is populated by the
-producing step's prompt (`prompt/review.py`'s and `prompt/test_sufficiency.py`'s
-suggestion-obligation clause), never enforced here at the schema level. This was an open
-design question in #75: whether an `ask-user` finding with empty `suggestions` should be
-accepted as-is, or rejected by a pydantic validator. Prompt-only enforcement won, for the
-same reason `action` itself is `str | None` rather than a closed `Literal` (see above): a
-validator that rejects a response missing `suggestions` would fail the whole schema
-validation exactly when a human's judgement is needed most, trading a fail-safe "ask the
-human, with a thinner set of options" outcome for a hard failure. A finding with `action`
-resolving to `"ask-user"` and empty `suggestions` is therefore valid, just less useful --
-mirroring how `action_or_default` already accepts (rather than rejects) responses it
-cannot fully trust.
+`Finding.suggestions` defaults to `[]`, populated by the producing step's prompt, never
+enforced at the schema level: a validator that rejected a missing-suggestions response
+would fail schema validation exactly when a human's judgement is needed most. An
+`ask-user` finding with empty `suggestions` is valid, just less useful.
 """
 
 from __future__ import annotations
@@ -54,32 +30,21 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-# A top-level (not `TYPE_CHECKING`-gated) import, unlike `ReviewOutput` below -- both
-# `findings.py` and `step.py` live in `pipeline/`, and `step.py` itself never imports
-# `findings.py`, so there is no cycle to avoid the way there is with `steps/review.py`'s
-# `ReviewOutput`. Consumed by `describe_finding_decisions` (issue #98) below.
+# Top-level import (not TYPE_CHECKING-gated): findings.py and step.py both live in
+# pipeline/, and step.py never imports findings.py, so no cycle here.
 from code_review.pipeline.step import ApprovalResponse
 
 if TYPE_CHECKING:
-    # Import-direction note: `steps/` depends on `pipeline/`, never the reverse (see root
-    # AGENTS.md's invariants and `pipeline/step.py`'s matching `TYPE_CHECKING`-gated import
-    # of `steps.intent.Intent`, the precedent this follows). `ReviewOutput` is defined in
-    # `steps/review.py`, so a top-level import of it here would be circular in spirit even
-    # if not literally circular today. This module has `from __future__ import
-    # annotations`, so the `output: ReviewOutput` / `-> ReviewOutput` annotations below are
-    # lazy strings never evaluated at runtime -- a type-checking-only import is sufficient,
-    # and the function body only ever does duck-typed attribute access
-    # (`.findings`/`.risk_level`/`.model_copy`) that needs no runtime import at all.
+    # steps/ depends on pipeline/, never the reverse; ReviewOutput lives in steps/review.py,
+    # so a top-level import would invert that. Lazy annotations make TYPE_CHECKING-only
+    # sufficient; the function body only does duck-typed attribute access at runtime.
     from code_review.steps.review import ReviewOutput
 
-# The three outcomes `action_or_default` ever returns. `Finding.action` itself is typed
-# more loosely (see module docstring) so this alias is only used for return/parameter
-# types on the resolving helpers below, never as the field type on `Finding`.
+# The three outcomes action_or_default ever returns. Finding.action itself is typed more
+# loosely (see module docstring).
 Action = Literal["no-op", "auto-fix", "ask-user"]
 
-# The fail-safe default every unset/null/unrecognized `action` resolves to (see
-# docs/GLOSSARY.md's "Fail-safe default"). Named as a constant, not inlined, so a future
-# reader searching for "ask-user" finds the one place this rule is encoded.
+# Fail-safe default every unset/null/unrecognized action resolves to.
 DEFAULT_ACTION: Action = "ask-user"
 
 _VALID_ACTIONS: frozenset[str] = frozenset({"no-op", "auto-fix", "ask-user"})
@@ -88,80 +53,47 @@ _VALID_ACTIONS: frozenset[str] = frozenset({"no-op", "auto-fix", "ask-user"})
 class Finding(BaseModel):
     """One structured observation from a review-family step: what is wrong, how serious,
     what should happen about it, and which delivery scope it belongs to (see
-    docs/GLOSSARY.md's "Finding"). Shared across Milestone 5 (Review) and Milestone 6
-    (test sufficiency) so "what a finding looks like" has one answer.
+    docs/GLOSSARY.md's "Finding"). Shared across review and test-sufficiency steps.
     """
 
-    # How serious this observation is. Consumer: a step's own prompt/logic; no code in
-    # this module branches on it, `action_or_default`/`has_blocking_finding` look only at
-    # `action`.
     severity: Literal["error", "warning", "info"]
 
-    # Human-readable explanation of what is wrong and where. Consumer: rendered to the
-    # user (TUI findings display, Milestone 13 issue #42; PR body, Milestone 8).
     description: str
 
     # What should happen about this finding, in {"no-op", "auto-fix", "ask-user"}.
-    # Deliberately `str | None` rather than the closed `Action` Literal: an agent
-    # response with this field missing, null, or set to an unrecognized string must
-    # still validate successfully so the fail-safe default in `action_or_default` can
-    # resolve it to "ask-user" rather than the whole response failing schema validation
-    # over exactly the case where a human's judgement is needed most. Consumers:
-    # `action_or_default` (this module) and, once built, Milestone 7's fix/approval loop.
+    # str | None, not the closed Action Literal, so a missing/null/unrecognized value still
+    # validates and can be resolved by action_or_default's fail-safe default instead of
+    # failing schema validation.
     action: str | None = None
 
-    # Which delivery scope this finding concerns: "source" is author-written code,
-    # "pipeline-owned-delivery" is content this pipeline itself generates or manages
-    # (see `steps/review.py`'s scope filter, the only current consumer of this field
-    # today). "external-delivery" is a reserved value with no current producer or
-    # consumer -- this project has no separate Push/CI pipeline step (see parent issue
-    # #25's Implementation Decisions) -- kept only so the enum shape does not need to
-    # change if one is ever added.
+    # Delivery scope: "source" is author-written code, "pipeline-owned-delivery" is content
+    # the pipeline itself generates (see steps/review.py's scope filter). "external-delivery"
+    # is reserved, no current producer or consumer.
     review_scope: Literal["source", "pipeline-owned-delivery", "external-delivery"]
 
-    # Human-readable file/line locator, e.g. "steps/review.py:42", or `None` when a
-    # finding has no specific location to point at. Optional and defaults to `None` so
-    # this field is backward-compatible with every `Finding` already validated by #26/#27's
-    # tests. Consumer: `tui/widgets.py`'s `FindingsBox`/`render_findings` (issue #42), the
-    # only current consumer -- it renders this alongside severity and description when
-    # present, and omits it when `None`. No current producer sets it: `ReviewStep`'s prompt
-    # (`steps/review.py`) does not yet ask the agent to fill it in, so every finding
-    # produced today leaves this at its default. That is a future refinement, not this
-    # field's job.
+    # File/line locator, e.g. "steps/review.py:42", or None when there's no specific
+    # location. No current producer sets this.
     location: str | None = None
 
-    # Agent-proposed remediation options for this finding, e.g. ["revert the rewrap",
-    # "add a comment explaining the exit key"]. Defaults to `[]` so this field is
-    # backward-compatible with every `Finding` already validated by earlier tickets'
-    # tests, mirroring how `location` was added. Populated by the producing step's prompt
-    # (`prompt/review.py`'s and `prompt/test_sufficiency.py`'s suggestion-obligation
-    # clause), for findings whose `action` resolves to `"ask-user"` (see
-    # `action_or_default`) -- not enforced at the schema level (see module docstring for
-    # why). Consumer: `tui/widgets.py`'s `FindingsBox` (issue #77), not yet built.
+    # Agent-proposed remediation options, populated by the producing step's prompt, not
+    # enforced at the schema level (see module docstring).
     suggestions: list[str] = []
 
 
 def action_or_default(action: str | None) -> Action:
-    """Resolve `action` to itself if it is one of the three known values, else to the
-    fail-safe default `ask-user` (see module docstring). Handles all three cases the
-    acceptance criteria call out identically, because they collapse to the same check:
-    an unset field, a JSON `null`, and an unrecognized string all fail the membership
-    test below and fall through to the same default.
+    """Resolve `action` to itself if it's one of the three known values, else to the
+    fail-safe default `ask-user` (see module docstring).
     """
 
     if action in _VALID_ACTIONS:
-        # Safe: membership in `_VALID_ACTIONS` (whose members are exactly `Action`'s
-        # literal values) is what mypy cannot infer from `in` alone.
+        # mypy can't infer membership in _VALID_ACTIONS implies Action's literal values.
         return action  # type: ignore[return-value]
     return DEFAULT_ACTION
 
 
 def has_blocking_finding(findings: list[Finding]) -> bool:
-    """True if any finding in `findings`, after resolving its action via
-    `action_or_default`, needs a human (`action == "ask-user"`) -- the shared blocking-
-    findings gate (see docs/GLOSSARY.md's "Blocking finding"). Operates on `list[Finding]`
-    rather than anything review-specific so Milestone 6's test-sufficiency step can reuse
-    it unchanged.
+    """True if any finding, after `action_or_default`, resolves to `ask-user` (see
+    docs/GLOSSARY.md's "Blocking finding").
     """
 
     return any(action_or_default(finding.action) == "ask-user" for finding in findings)
@@ -169,9 +101,7 @@ def has_blocking_finding(findings: list[Finding]) -> bool:
 
 # --- Deterministic pipeline-owned-delivery scope filter ---------------------------------
 
-# Severities treated as capable of justifying an elevated (`medium`/`high`) `risk_level`.
-# "info" findings are never, on their own, treated as elevating risk -- see the filter's
-# docstring for what this assumption does and does not cover.
+# Severities that can justify an elevated (medium/high) risk_level; "info" alone never does.
 _RISK_SUPPORTING_SEVERITIES: frozenset[str] = frozenset({"error", "warning"})
 
 _RESET_RATIONALE = (
@@ -184,33 +114,21 @@ _RESET_RATIONALE = (
 
 def filter_pipeline_owned_delivery_findings(output: ReviewOutput) -> ReviewOutput:
     """Strip `pipeline-owned-delivery`-scoped findings from `output` and return a new
-    `ReviewOutput` (pure function; `output` itself is left untouched).
+    `ReviewOutput` (pure; `output` is left untouched).
 
-    Also resets `risk_level` to `"low"` and overwrites `risk_rationale` (never appends to
-    it, so the rationale always matches the level actually returned) when, after
-    stripping, no surviving finding is at `"error"` or `"warning"` severity -- meaning
-    every finding that could have justified an elevated `risk_level` was itself
-    pipeline-owned-delivery-scoped and is now gone. If a `"source"`- (or
-    `"external-delivery"`-) scoped finding at `"error"`/`"warning"` severity survives
-    filtering, or `risk_level` was already `"low"`, the risk verdict is left untouched.
+    Also resets `risk_level` to `"low"` and overwrites `risk_rationale` when, after
+    stripping, no surviving finding is `"error"`/`"warning"` severity -- meaning every
+    finding that could have justified the elevated level is now gone. Otherwise the risk
+    verdict is left untouched.
 
-    This is a severity-based heuristic, not a per-finding causal link: it assumes an
-    elevated `risk_level` is always attributable to at least one surviving
-    error/warning-severity finding. A `risk_level` the agent elevated on narrative
-    judgement alone, with no error/warning finding backing it, would also be reset by
-    this rule -- that case is out of scope for this filter (there is no field connecting
-    a risk verdict to the specific findings that justify it) and is not exercised by this
-    ticket's regression tests.
+    This is a severity-based heuristic, not a per-finding causal link: a `risk_level` the
+    agent elevated on narrative judgement alone, with no error/warning finding backing it,
+    would also get reset by this rule.
 
-    Import-direction note: `output`'s real type, `ReviewOutput`, is defined in
-    `steps/review.py`. This function is defined here (`pipeline/`, not `steps/`) because it
-    is a pure `Finding`-processing helper alongside `action_or_default`/
-    `has_blocking_finding` above, and `steps/` depends on `pipeline/`, never the reverse
-    (see root AGENTS.md). Rather than import `ReviewOutput` at runtime -- which would
-    invert that dependency -- the parameter/return annotation is type-checking-only (see
-    the module-level `TYPE_CHECKING` import above); at runtime this function only ever
-    does duck-typed attribute access (`.findings`, `.risk_level`, `.model_copy`), which any
-    object shaped like `ReviewOutput` satisfies without a runtime import of the real class.
+    Defined here rather than `steps/` (where `ReviewOutput` lives) to keep it alongside its
+    `Finding`-processing siblings without inverting the `steps/` depends on `pipeline/`
+    invariant; the annotation is `TYPE_CHECKING`-only and the body uses only duck-typed
+    attribute access.
     """
 
     remaining = [f for f in output.findings if f.review_scope != "pipeline-owned-delivery"]
@@ -228,27 +146,17 @@ def filter_pipeline_owned_delivery_findings(output: ReviewOutput) -> ReviewOutpu
     return output.model_copy(update={"findings": remaining})
 
 
-# --- describe_auto_fix_findings (issue #81) ----------------------------------------------
-
-
 def describe_auto_fix_findings(findings: object) -> str:
     """Render every finding in `findings` whose resolved action is "auto-fix" as fix-round
-    instructions text (`pipeline.step.FixRound.instructions`) for the automatic path of
-    Milestone 7's fix-round loop (`pipeline/executor.py`).
+    instructions text (`pipeline.step.FixRound.instructions`).
 
-    `findings` is `StepOutcome.findings: object` (see `pipeline/step.py`), which in
-    practice is either a `ReviewOutput`/`TestSufficiencyOutput`-shaped object with a
-    `.findings` attribute or already a bare `list[Finding]` -- duck-typed the same way
-    `filter_pipeline_owned_delivery_findings` above handles the same ambiguity (see that
-    function's own docstring). Anything else (an unrecognized shape) yields no lines,
-    matching this module's "pure function, no exceptions on a shape it doesn't recognize"
-    style elsewhere (e.g. `action_or_default`'s own fail-safe fallback).
+    `findings` is `StepOutcome.findings: object`, duck-typed as either a
+    `ReviewOutput`/`TestSufficiencyOutput`-shaped object with a `.findings` attribute or a
+    bare `list[Finding]`. An unrecognized shape yields no lines rather than raising.
 
     One line per matching finding, in list order: `"- [severity] description (location)"`,
-    with the `(location)` suffix omitted when `Finding.location` is `None`. This is a
-    deliberately simple, human-readable rendering -- there is no schema contract on this
-    text (it becomes free-form prompt text via `FixRound.instructions`), so the exact
-    wording is this function's own call, not a fixed format other code parses back.
+    omitting `(location)` when `None`. Free-form text with no schema contract -- it becomes
+    prompt text, not something other code parses back.
     """
 
     raw = getattr(findings, "findings", findings)
@@ -267,40 +175,18 @@ def describe_auto_fix_findings(findings: object) -> str:
     return "\n".join(lines)
 
 
-# --- describe_finding_decisions (issue #98) -----------------------------------------------
-
-
 def describe_finding_decisions(decisions: list[tuple[Finding, ApprovalResponse]]) -> str:
-    """Render every `"fix"`-decided finding in `decisions` as one line of combined
-    fix-round instructions text (`pipeline.step.ApprovalResponse.instructions`), for
-    `tui.widgets.FindingsList`'s per-finding approval-park aggregation (issue #98,
-    extending issue #87's original step-scoped park): once every row in a park has its own
-    decision, `FindingsList._resolve_park` combines them into the single `ApprovalResponse`
-    that actually resolves the park, and this is the pure function that builds that combined
-    text -- see that method's own docstring for the full model, including why a single-row
-    park bypasses this function entirely and resolves with that row's own `ApprovalResponse`
-    unwrapped instead.
+    """Render every `"fix"`-decided finding in `decisions` as combined fix-round
+    instructions text, for `tui.widgets.FindingsList`'s per-finding approval-park
+    aggregation (`FindingsList._resolve_park` combines per-row decisions into the single
+    `ApprovalResponse` that resolves the park).
 
-    `decisions` is every decided row as a `(Finding, ApprovalResponse)` pair -- both
-    `"fix"`- and `"skip"`-decided rows are accepted, the caller need not pre-filter,
-    mirroring `describe_auto_fix_findings`'s own "accept the whole list, filter inside"
-    shape above. A `"skip"`-decided finding contributes no line, the same way
-    `describe_auto_fix_findings` already omits a finding whose action does not resolve to
-    `"auto-fix"` -- skipping a finding means "don't act on it", so there is nothing to
-    render for it here either.
+    `decisions` accepts both `"fix"`- and `"skip"`-decided rows unfiltered; a `"skip"`
+    contributes no line.
 
-    One line per `"fix"`-decided finding, in `decisions`' own order:
+    One line per `"fix"`-decided finding, in order:
     `"- [severity] description (location): <human's instructions>"`, reusing
-    `describe_auto_fix_findings`'s exact `"- [severity] description (location)"` prefix (the
-    `(location)` suffix omitted when `Finding.location` is `None`, same as there) with a
-    trailing `": <instructions>"` naming what the human actually typed for that finding.
-    `ApprovalResponse.instructions` is typed `str | None` generally, but every `"fix"`-
-    decided response `tui.widgets.Finding.record_decision`'s two callers
-    (`FindingsList._resolve_chat`/`_quick_decision`) ever build always sets it to at least
-    `""` -- rendered as an empty instructions suffix rather than raising if `None` ever
-    reaches here regardless, matching this module's "no exceptions on data outside its
-    documented shape" style elsewhere (e.g. `describe_auto_fix_findings`'s own unrecognized-
-    shape fallback).
+    `describe_auto_fix_findings`'s prefix format with a trailing `": <instructions>"`.
     """
 
     lines = []

@@ -1,12 +1,5 @@
-"""`InputPromptScreen`: a modal collecting one line of human input for a relayed request.
-
-Split out from `app.py` so `ReviewApp`'s worker logic and this screen's presentation stay
-separately readable -- see the `InputRelay` seam in `input_relay.py`.
-
-Approval used to have its own modal pair here too; that flow now resolves inline via
-`FindingsList` instead (see `widgets/findings_list.py`), so this module holds only the
-unrelated `InputRelay` seam's screen.
-"""
+"""`InputPromptScreen`: a modal collecting one line of human input for a relayed request
+(see `InputRelay` in `input_relay.py`)."""
 
 from __future__ import annotations
 

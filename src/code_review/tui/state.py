@@ -1,33 +1,22 @@
 """Pure, Textual-independent backfill of pipeline progress into display rows.
 
 `backfill` turns `pipeline.step.StepEvent`s seen so far into one `StepRow` per registry
-entry, with no Textual import anywhere in this module -- so it can be unit-tested directly
-against hand-built `StepEvent`s, independent of a running `App`.
+entry; no Textual import, so it's unit-testable against hand-built `StepEvent`s.
 
 `StepEvent.status` only distinguishes `"running"`/`"completed"` -- a step that raises never
-gets a "completed" event, so "failed" is not something the executor reports. The caller
-(the App) is the only thing that knows a run aborted mid-step, so it passes that step's name
-in as `failed_step`.
-
-`parked_step`/`skipped_steps` are the same kind of caller-supplied override, for a different
-reason: `pipeline.executor.run_steps` already yields a step's "completed" event *before*
-checking `outcome.needs_approval`, so by the time a park happens the event stream already
-says that step is `"completed"`. Park/skip are not a third state alongside
-pending/running/completed the way "failed" is -- they override what "completed" would
-otherwise render. `ReviewApp` learns which step is parked/skipped from its own
-`ApprovalRelay`-driven worker, not from `StepEvent`/`StepOutcome` itself.
+gets a "completed" event, so the caller passes the failing step's name in as `failed_step`.
+`parked_step`/`skipped_steps` are the same kind of caller-supplied override: `run_steps`
+already yields a step's "completed" event before checking `outcome.needs_approval`, so
+park/skip override what "completed" would otherwise render, rather than being a third state.
 
 `latest_findings` scans `events` for the most recently completed step whose outcome carries
-a non-empty `ReviewOutput`/`TestSufficiencyOutput`/bare `list[Finding]` -- imported from
-`steps.review`/`steps.test_sufficiency` as a data-schema import only (no cycle, since
-`steps/` never imports `tui/`).
+a non-empty `ReviewOutput`/`TestSufficiencyOutput`/bare `list[Finding]`.
 
 `final_status_message` is the Status box's text once a run has finished.
 
-`ActivityRow`/`backfill_activities` do the same kind of pure extraction for the second,
-independent activity stream `tui.activity.ActivityRelay` produces: grouping the tagged
-`(step_name, ActivityEvent)` pairs `app.py`'s activity worker collects into one
-`ActivityRow` per activity, attached to its owning `StepRow.activities`.
+`ActivityRow`/`backfill_activities` do the same kind of extraction for the activity stream
+`tui.activity.ActivityRelay` produces, grouping tagged `(step_name, ActivityEvent)` pairs
+into one `ActivityRow` per activity, attached to its owning `StepRow.activities`.
 """
 
 from __future__ import annotations
@@ -49,27 +38,24 @@ Status = Literal["pending", "running", "completed", "failed", "parked", "skipped
 class ActivityRow:
     """One nested activity line, rendered under its owning step's `StepRow`.
 
-    Reuses `Status` (only ever `"running"`/`"completed"` here) so `widgets/pipeline_box.py`
-    can render it with the same icon/duration formatting a `StepRow` uses.
+    Reuses `Status` (only ever `"running"`/`"completed"` here) so it renders with the same
+    icon/duration formatting a `StepRow` uses.
     """
 
     label: str
     status: Status
-    # None only transiently -- elapsed-so-far while running, final duration once finished.
-    # Mirrors `StepRow.duration`.
-    duration: float | None
+    duration: float | None  # elapsed-so-far while running, final duration once finished
 
 
 def backfill_activities(
     step_name: str, activity_events: Sequence[tuple[str | None, ActivityEvent]], *, now: float
 ) -> list[ActivityRow]:
-    """Turn `activity_events` -- `(owning_step_name, ActivityEvent)` pairs, as `app.py`'s
-    activity worker tags and collects them -- into one `ActivityRow` per activity reported
-    under `step_name`, in first-seen order. Pairs tagged with a different step (or `None`)
-    are ignored here; correlation itself already happened at the tagging site (`app.py`).
+    """Turn `activity_events` -- `(owning_step_name, ActivityEvent)` pairs -- into one
+    `ActivityRow` per activity reported under `step_name`, in first-seen order. Pairs tagged
+    with a different step (or `None`) are ignored.
 
-    Mirrors `backfill`'s own duration rule: an activity with no matching "finished" event
-    yet reports `now - started_at`; a finished one reports its own final elapsed time.
+    An activity with no matching "finished" event yet reports `now - started_at`; a
+    finished one reports its own final elapsed time.
     """
 
     started_at: dict[int, float] = {}
@@ -113,20 +99,10 @@ def backfill_activities(
 class StepRow:
     """One line of the live pipeline-progress view."""
 
-    # Registry display name (e.g. "IntentStep"), identical to `Step.get_name()`.
-    name: str
-
-    # Current render state, derived by `backfill` from the events seen so far plus an
-    # optional `failed_step` override -- never set directly by `StepEvent` itself.
+    name: str  # registry display name, e.g. "IntentStep"
     status: Status
-
-    # None while pending; elapsed-so-far while running or failed; the event's own final
-    # duration once completed.
-    duration: float | None
-
-    # Nested activity lines reported under this step, in first-seen order -- `()` for a
-    # step with none. See `backfill_activities`.
-    activities: tuple[ActivityRow, ...] = ()
+    duration: float | None  # None while pending; elapsed-so-far while running/failed
+    activities: tuple[ActivityRow, ...] = ()  # nested activity lines, first-seen order
 
 
 def backfill(
@@ -143,11 +119,9 @@ def backfill(
 
     A registry entry with no event yet is `"pending"`. A `"running"` event with no matching
     `"completed"` yet is `"running"` (or `"failed"` if its name equals `failed_step`), with
-    `duration` computed as `now - started_at`. A `"completed"` event is `"completed"` --
+    `duration` computed as `now - started_at`. A `"completed"` event is `"completed"`
     unless its name equals `parked_step` (`"parked"`) or is in `skipped_steps`
-    (`"skipped"`), both caller-supplied overrides of what the event stream alone would say.
-    Either way `duration` is taken from that event itself. Each row's `activities` comes
-    from `backfill_activities(name, activity_events, now=now)`.
+    (`"skipped"`). Each row's `activities` comes from `backfill_activities`.
     """
 
     started_at_by_step: dict[str, float] = {}
@@ -210,14 +184,9 @@ def latest_findings(
     """Return the most recently completed step's name paired with its
     `ReviewOutput`/`TestSufficiencyOutput`/bare `list[Finding]`, or `None` if none exists.
 
-    A `"completed"` event counts only when its `outcome.findings` is one of those three
-    shapes (guarding against e.g. `IntentStep`'s outcome, whose `findings` is an `Intent` --
-    see `pipeline/step.py`'s `StepOutcome.findings`, deliberately untyped as `object`) AND
-    that output's findings list is non-empty. The bare-`list[Finding]` case is
-    `steps/rebase.py`'s `needs_approval=True` returns, which carry findings without either
-    wrapper schema. Scans `events` in order and keeps the last match, so two completed steps
-    that both carry findings resolve to whichever completed later -- one box, most-recent-
-    completion-wins, not an accumulated history across steps.
+    A `"completed"` event counts only when `outcome.findings` is one of those three shapes
+    (other steps' outcomes carry other types) and non-empty. Scans `events` in order and
+    keeps the last match, so most-recent-completion wins rather than accumulating history.
     """
 
     result: tuple[str, ReviewOutput | TestSufficiencyOutput | list[Finding]] | None = None
@@ -236,9 +205,8 @@ def latest_findings(
 
 
 def final_status_message(error: BaseException | None) -> str:
-    """The Status box's message once a run has finished: one line naming the outcome, then
-    the reminder that pressing "e" now closes the app. `error` is `None` for a clean run and
-    the raised exception for one that broke mid-step."""
+    """The Status box's message once a run has finished. `error` is `None` for a clean run
+    or the raised exception for one that broke mid-step."""
 
     outcome = "Pipeline ran successfully." if error is None else f"Pipeline failed: {error}"
     return f"{outcome}\n\nPress 'e' to exit."

@@ -1,12 +1,11 @@
 """One row per finding inside `_FindingsListView`.
 
-- Composes `FindingsDescription`/`FindingsSuggestion` in a horizontal split.
-- Owns this row's own display mode (`hidden`/`plain`/`decision`), its own per-row browsing
-  cursor within this finding's own suggestion list, and its own recorded park decision.
-- `ListItem.can_focus=False`: this class carries no key bindings of its own -- all
-  parked-mode bindings live on `_FindingsListView`, the only focusable node in this subtree.
-- Named `Finding`, shadowing `pipeline.findings.Finding` (imported here as `FindingData`) --
-  deliberate, since this widget's identity *is* "one finding, rendered".
+Composes `FindingsDescription`/`FindingsSuggestion` in a horizontal split; owns this
+row's display mode (`hidden`/`plain`/`decision`), browsing cursor, and recorded park
+decision. Carries no key bindings of its own -- all parked-mode bindings live on
+`_FindingsListView`. Named `Finding`, shadowing `pipeline.findings.Finding` (imported
+here as `FindingData`) deliberately, since this widget's identity is "one finding,
+rendered".
 """
 
 from __future__ import annotations
@@ -27,11 +26,10 @@ from code_review.tui.widgets.findings_suggestion import FindingsSuggestion, _dec
 class Finding(ListItem):
     """One row per finding inside `_FindingsListView`.
 
-    - Confirming this row's chat or pressing "s" while it's highlighted records *this
-      row's own* decision, not the whole park's -- see `FindingsList.await_decision`'s
-      docstring for the per-row-then-aggregate model.
-    - Abort ("x") is the one exception: it stays `_FindingsListView`'s own separate global
-      binding, resolving the whole park directly with no per-row recording step.
+    Confirming this row's chat, or pressing "s" while highlighted, records this row's own
+    decision only (see `FindingsList.await_decision` for the per-row-then-aggregate
+    model). Abort ("x") is the exception: it resolves the whole park directly with no
+    per-row recording.
     """
 
     DEFAULT_CSS = (
@@ -51,21 +49,15 @@ class Finding(ListItem):
         self.finding = finding
         self._decision_cursor = 0
         self._mode: Literal["hidden", "plain", "decision"] = "hidden"
-        # This row's own recorded park decision -- `None` until a human confirms this
-        # row's chat ("fix") or presses "s" while it's highlighted ("skip"); reset back to
-        # `None` at the start of every `FindingsList.await_decision()` park, so a
-        # fix-round's re-park never carries over the previous round's decision. Distinct
-        # from `_decision_cursor` above, which is purely a per-row browsing position.
+        # None until confirmed ("fix") or skipped ("s"); reset at the start of every park.
         self._row_decision: ApprovalResponse | None = None
 
     def compose(self) -> ComposeResult:
         yield FindingsDescription(self.finding)
         suggestion = FindingsSuggestion()
         yield suggestion
-        # Prime it from whatever `_mode`/`_decision_cursor` already are -- a `set_hidden`/
-        # `set_plain`/`set_decision`/`update_finding` call can land on this row before
-        # `compose()` has run, in which case those calls updated state but could not reach
-        # a `FindingsSuggestion` that didn't exist yet.
+        # A set_hidden/set_plain/set_decision/update_finding call may have landed before
+        # compose() ran, updating state with no FindingsSuggestion yet to apply it to.
         self._apply_mode(suggestion)
 
     def set_hidden(self) -> None:
@@ -89,9 +81,8 @@ class Finding(ListItem):
             suggestion.show_decision(self.finding, self._decision_cursor)
 
     def _render_suggestion(self) -> None:
-        """Apply the current `_mode` to this row's `FindingsSuggestion`, unless this row's
-        own `compose()` hasn't run yet -- not lossy, since `compose()`'s own `_apply_mode`
-        call picks up `_mode` once it does run."""
+        """Apply the current `_mode` to this row's `FindingsSuggestion`; no-ops if
+        `compose()` hasn't run yet (it applies `_mode` itself once it does)."""
 
         try:
             suggestion = self.query_one(FindingsSuggestion)
@@ -100,15 +91,9 @@ class Finding(ListItem):
         self._apply_mode(suggestion)
 
     def reset_decision(self) -> None:
-        """Reset the browsing cursor to 0 -- called whenever an undecided row becomes
-        highlighted, so its decision cycle starts fresh. A row that already has a
-        recorded "fix" decision instead keeps its cursor exactly where it was when that
-        decision was confirmed, so revisiting it re-renders what was actually chosen (a
-        suggestion's own marker, or the chat's typed text via `restore_chat_preview`)
-        instead of resetting back to entry 0. A "skip" decision carries no such meaning --
-        it bypasses the cursor entirely, via "s" -- so a skip-decided row still resets to
-        0. Distinct from `clear_decision`, which resets the recorded decision itself, not
-        the cursor."""
+        """Reset the browsing cursor to 0, unless this row has a recorded "fix" decision
+        -- then the cursor stays where it was confirmed, so revisiting the row shows what
+        was actually chosen instead of jumping back to entry 0."""
 
         if self._row_decision is None or self._row_decision.decision != "fix":
             self._decision_cursor = 0
@@ -132,15 +117,14 @@ class Finding(ListItem):
         self._render_description()
 
     def clear_decision(self) -> None:
-        """Reset this row back to undecided -- called for every row at the start of each
-        park, so a fix-round's re-park never carries over the previous round's decision."""
+        """Reset this row back to undecided."""
 
         self._row_decision = None
         self._render_description()
 
     def _render_description(self) -> None:
-        """Apply this row's decision marker to `FindingsDescription`, guarded like
-        `_render_suggestion` for a row that hasn't composed yet."""
+        """Apply this row's decision marker to `FindingsDescription`; no-ops if this row
+        hasn't composed yet."""
 
         try:
             description = self.query_one(FindingsDescription)
@@ -151,8 +135,7 @@ class Finding(ListItem):
 
     def update_finding(self, finding: FindingData) -> None:
         """Data changed in place, same list position -- refresh every child, preserving
-        this row's display mode and decision marker. `self.finding` is updated regardless
-        of whether this row has composed yet."""
+        this row's display mode and decision marker."""
 
         self.finding = finding
         self._render_description()
@@ -164,9 +147,8 @@ class Finding(ListItem):
         self.set_decision()
 
     def jump_decision(self, index: int) -> None:
-        """Jump the cursor straight to `index` (0-based) -- the digit-key counterpart to
-        `cycle_decision`'s relative left/right step. No-ops past this finding's entry
-        count."""
+        """Jump the cursor straight to `index` (0-based). No-ops past this finding's
+        entry count."""
 
         entries = _decision_entries(self.finding)
         if not 0 <= index < len(entries):
@@ -178,11 +160,8 @@ class Finding(ListItem):
         return _decision_entries(self.finding)[self._decision_cursor]
 
     def open_chat(self, prefill: str) -> Input | None:
-        """A human deliberately opened the chat on this row -- via Enter/"f", or a
-        cycle/jump landing the cursor on `_CUSTOM_ENTRY`. Moves the cursor to the trailing
-        entry regardless of where it was, so a confirmed suggestion's text has somewhere
-        live to render. Returns the `Input` once this row has composed, `None` otherwise.
-        """
+        """Open the chat on this row, moving the cursor to the trailing entry. Returns
+        the `Input` once this row has composed, `None` otherwise."""
 
         entries = _decision_entries(self.finding)
         self._decision_cursor = len(entries) - 1
@@ -194,9 +173,8 @@ class Finding(ListItem):
         return suggestion.ensure_input(prefill)
 
     def close_chat(self) -> None:
-        """Cancel a chat open on this row -- the Escape counterpart to `open_chat`. Leaves
-        `_decision_cursor` exactly where it was and resolves nothing; a no-op if this row
-        hasn't composed yet or has no live `Input` open."""
+        """Cancel a chat open on this row without resolving anything. Leaves
+        `_decision_cursor` unchanged; a no-op if there's no live `Input` open."""
 
         try:
             suggestion = self.query_one(FindingsSuggestion)
@@ -205,19 +183,15 @@ class Finding(ListItem):
         suggestion.cancel_input(self.finding, self._decision_cursor)
 
     def restore_chat_preview(self) -> None:
-        """Re-open this row's chat, pre-filled with its own recorded "fix" instructions,
-        when the decision cursor -- left exactly where `reset_decision` found it -- is
-        sitting on `_CUSTOM_ENTRY` and this row has such a decision recorded. Lets a human
-        revisiting a chat-decided row see what was actually typed instead of the bare
-        "Chat about it" label, with no further keypress needed.
+        """Re-open this row's chat, pre-filled with its recorded "fix" instructions, if
+        the decision cursor is sitting on `_CUSTOM_ENTRY` and this row has such a decision
+        recorded -- so revisiting a chat-decided row shows what was typed instead of the
+        bare "Chat about it" label.
 
-        Called only from `FindingsList`'s own highlight-transition call sites
-        (`on_list_view_highlighted`/`_prime_highlighted`/`await_decision`'s initial
-        priming) -- never from a redundant re-render, so a human's own Escape
-        (`close_chat`) isn't immediately undone by the next periodic tick. Idempotent and
-        focus-free, unlike `open_chat`: a no-op if the cursor isn't on `_CUSTOM_ENTRY`,
-        there's no recorded "fix" decision, or an `Input` is already mounted
-        (`ensure_input`'s own idempotency)."""
+        Call only from highlight-transition sites, never a redundant re-render, so a
+        human's own Escape (`close_chat`) isn't immediately undone on the next tick.
+        No-op if the cursor isn't on `_CUSTOM_ENTRY`, there's no recorded "fix" decision,
+        or an `Input` is already mounted."""
 
         entries = _decision_entries(self.finding)
         if self._decision_cursor != len(entries) - 1:

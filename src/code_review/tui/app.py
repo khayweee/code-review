@@ -1,14 +1,11 @@
 """`ReviewApp`: full-screen live view of a review run.
 
-Takes `registry` and `events` (an `AsyncIterator[StepEvent]`) as constructor args instead of
-building them itself -- `cli.py` passes `run_steps(steps, ctx)`; tests pass a hand-built fake
-generator. This seam is what makes the app testable via Textual's `Pilot`/`run_test()`,
-independent of a real agent subprocess.
+Takes `registry` and `events` (an `AsyncIterator[StepEvent]`) as constructor args rather than
+building them itself, so tests can drive it with a hand-built fake generator via Textual's
+`Pilot`/`run_test()`.
 
-`input_relay`, `activity_relay`, and `approval_relay` are three optional, independently
-polled seams of the same shape (see their own modules): each starts its own worker in
-`on_mount` only when supplied, relaying human input, sub-step activity, and park decisions.
-None of them add a new `StepEvent` status or change `run_steps`'s yield shape.
+`input_relay`, `activity_relay`, and `approval_relay` are optional, independently polled
+seams (see their own modules): each starts its own worker in `on_mount` only when supplied.
 """
 
 from __future__ import annotations
@@ -35,20 +32,18 @@ _TICK_INTERVAL = 0.25
 class ReviewApp(App[None]):
     """Renders `registry` as a live Pipeline box, driven by `events`.
 
-    Re-renders the Pipeline box on every `StepEvent` and on a timer tick, so a running
-    step's elapsed duration ticks visibly between events. Once `events` is exhausted or
-    raises, the run is marked done, the tick timer stops, and a Status box appears naming
-    the outcome -- the app no longer exits itself; see `action_exit_when_done`. On an
-    exception, the failing step is inferred as whichever step was last seen `"running"`
-    with no matching `"completed"` yet (`StepEvent` itself has no "failed" status -- see
-    `state.py`).
+    Re-renders on every `StepEvent` and on a timer tick, so a running step's elapsed
+    duration ticks visibly between events. Once `events` is exhausted or raises, the run is
+    marked done, the tick timer stops, and a Status box appears naming the outcome (the app
+    no longer exits itself; see `action_exit_when_done`). On an exception, the failing step
+    is inferred as whichever step was last seen `"running"` with no matching `"completed"`
+    yet.
 
-    Also mounts a Findings box, driven by `state.latest_findings`, at the same points the
-    Pipeline box re-renders -- mounted only while there is something to show.
+    Also mounts a Findings box, driven by `state.latest_findings`, only while there is
+    something to show.
     """
 
-    # "e" is a no-op until `self._done` -- see `action_exit_when_done`.
-    BINDINGS = [("e", "exit_when_done", "Exit")]
+    BINDINGS = [("e", "exit_when_done", "Exit")]  # no-op until `self._done`
 
     def __init__(
         self,
@@ -59,40 +54,31 @@ class ReviewApp(App[None]):
         approval_relay: ApprovalRelay | None = None,
     ) -> None:
         super().__init__()
-        # Not `_registry` -- `textual.app.App` already owns that attribute (its mounted-
-        # widget registry); shadowing it corrupts app teardown instead of raising here.
+        # Not `_registry` -- shadows `textual.app.App`'s own mounted-widget registry.
         self._step_registry = tuple(registry)
         self._events = events
         # None disables the corresponding worker in `on_mount` below.
         self._input_relay = input_relay
         self._activity_relay = activity_relay
         self._approval_relay = approval_relay
-        # Raw events in receipt order, NOT yet tagged with an owning step -- `_rows` tags
-        # them from here via `_tag_activity_events` immediately before every render.
+        # Raw events in receipt order, not yet tagged with an owning step; `_rows` tags
+        # them via `_tag_activity_events` immediately before every render.
         self._activity_events: list[ActivityEvent] = []
         self._seen: list[StepEvent] = []
-        # Step last seen "running" with no "completed" yet -- who to blame if `events`
-        # raises. Reset to None once that step's "completed" event arrives.
+        # Step last seen "running" with no "completed" yet; who to blame if `events` raises.
         self._running_step: str | None = None
-        # Set once, in `_consume_events`'s `except` branch, to whichever step was running
-        # when it raised -- read by every later render so the Pipeline box keeps showing
-        # that step as failed for the rest of the app's lifetime.
+        # Set if `events` raises, to whichever step was running; keeps rendering as failed.
         self._failed_step: str | None = None
         # Step currently awaiting a human's approve/skip/fix/abort decision, or None.
         self._parked_step: str | None = None
-        # Steps a human has answered "skip" for -- kept for the app's lifetime, the same
-        # "stays visible" rule `_failed_step` follows.
+        # Steps a human has answered "skip" for; stays visible for the app's lifetime.
         self._skipped_steps: set[str] = set()
-        # `id()` of every `StepOutcome` a human has already resolved. Without this,
-        # `latest_findings` keeps re-matching the same resolved outcome forever once no
-        # later step has findings of its own to supersede it, leaving `FindingsList`
-        # mounted at full parked height after the run ends.
+        # id() of every StepOutcome a human has resolved, so `latest_findings` stops
+        # re-matching it once no later step supersedes it.
         self._resolved_outcome_ids: set[int] = set()
-        # True once `events` is exhausted or raises.
-        self._done = False
+        self._done = False  # True once `events` is exhausted or raises
 
-        # Set only if iterating `events` raised; `cli.py` checks this after `run()` returns
-        # to surface a step failure as a real nonzero CLI exit.
+        # Set only if iterating `events` raised; `cli.py` uses it for a nonzero exit code.
         self.error: BaseException | None = None
 
     def compose(self) -> ComposeResult:
@@ -102,8 +88,7 @@ class ReviewApp(App[None]):
         self._tick_timer: Timer = self.set_interval(_TICK_INTERVAL, self._render)
         self.run_worker(self._consume_events(), exclusive=True)
         if self._input_relay is not None:
-            # Own worker group -- `exclusive` only cancels other workers in the *same*
-            # group, so this must not share the (default, exclusive) events worker's group.
+            # Separate group so `exclusive` on the events worker doesn't cancel this one.
             self.run_worker(self._relay_input(), group="input-relay")
         if self._activity_relay is not None:
             self.run_worker(self._consume_activities(), group="activity-relay")
@@ -111,7 +96,7 @@ class ReviewApp(App[None]):
             self.run_worker(self._relay_approval(), group="approval-relay")
 
     def action_exit_when_done(self) -> None:
-        """Bound to "e" -- exits only once the run has finished."""
+        """Exits only once the run has finished."""
 
         if self._done:
             self.exit()
@@ -130,16 +115,11 @@ class ReviewApp(App[None]):
     def _render(self) -> None:
         """Re-render every box driven by current state.
 
-        Four independent callers can reach this -- the tick timer, `_consume_events`,
-        `_consume_activities`, and `_relay_approval` -- any of which can still be
-        scheduled to run after `self.exit()` fires (e.g. a background worker's own
-        pending render, mid-flight when the app starts exiting). `Widget.mount()` treats
-        a widget already flagged `_closing`/`_pruning` as a graceful no-op, but that flag
-        lags one step behind `App.exit()` itself: `is_attached` (which every mount call
-        checks first) goes `False` the instant `exit()` sets `App._exit`, before
-        `_closing`/`_pruning` catch up -- so a render landing in that gap raises
-        `MountError` instead of no-op'ing. Nothing is worth rendering once the app is on
-        its way out either way, so this simply drops the render rather than crash it.
+        Swallows `MountError`: a render can still be scheduled (tick timer or a worker)
+        right as `self.exit()` fires, and `is_attached` goes False slightly before
+        `Widget.mount()`'s own closing/pruning check catches up, so a render landing in
+        that gap raises instead of no-op'ing. Nothing is worth rendering at that point
+        anyway.
         """
 
         try:
@@ -151,9 +131,7 @@ class ReviewApp(App[None]):
 
     def _render_findings(self) -> None:
         """Mount, update in place, or remove the Findings box, driven by
-        `latest_findings(self._seen)`. Unlike `PipelineBox`, which is always composed,
-        this box is mounted dynamically and only while there is something to show -- no
-        findings means no box at all, not an empty one."""
+        `latest_findings(self._seen)`. Mounted only while there is something to show."""
 
         visible_events = [
             event for event in self._seen if id(event.outcome) not in self._resolved_outcome_ids
@@ -171,8 +149,8 @@ class ReviewApp(App[None]):
                 self.mount(FindingsList(output, step_name))
 
     def _render_status(self) -> None:
-        """Mount, update in place, or remove the Status box, mirroring
-        `_render_findings`'s dynamic-mount pattern: it appears only once `self._done`."""
+        """Mount, update in place, or remove the Status box; appears only once
+        `self._done`."""
 
         boxes = list(self.query(StatusBox))
         if not self._done:
@@ -200,8 +178,8 @@ class ReviewApp(App[None]):
             self._render()
 
     async def _relay_input(self) -> None:
-        """Poll `self._input_relay` for prompts a blocked backend subprocess relayed --
-        show a modal, resolve the matching `request_input` call with the human's answer."""
+        """Poll `self._input_relay` for relayed prompts, show a modal, and resolve the
+        matching `request_input` call with the human's answer."""
 
         assert self._input_relay is not None
         while True:
@@ -212,8 +190,7 @@ class ReviewApp(App[None]):
     async def _consume_activities(self) -> None:
         """Poll `self._activity_relay` for reported sub-step activity and re-render.
 
-        Owner correlation does NOT happen here at receipt time -- see
-        `_tag_activity_events` for why that has to be computed later, at render time.
+        Owner correlation happens later, at render time -- see `_tag_activity_events`.
         """
 
         assert self._activity_relay is not None
@@ -225,13 +202,11 @@ class ReviewApp(App[None]):
     async def _relay_approval(self) -> None:
         """Poll `self._approval_relay` for a parked step's approve/skip/fix/abort request.
 
-        Marks `self._parked_step` and re-renders (the Findings box already shows this
-        step's outcome -- it mounted on the "completed" event before the park was noticed),
-        then awaits the mounted `FindingsList.await_decision()` directly -- no modal.
-        "skip" is recorded into `self._skipped_steps`; "abort" is `run_steps`'s own job via
-        `RunAbortedError` once the resolved future lets it resume. Clears `_parked_step`
-        and re-renders again before resolving `future`, so the app's own rendered state
-        already reflects the decision by the time the parked `run_steps` call resumes.
+        Marks `self._parked_step`, re-renders, then awaits the mounted
+        `FindingsList.await_decision()` directly (no modal). "skip" is recorded into
+        `self._skipped_steps`; "abort" is `run_steps`'s own job via `RunAbortedError`.
+        Clears `_parked_step` and re-renders again before resolving `future`, so rendered
+        state reflects the decision before the parked `run_steps` call resumes.
         """
 
         assert self._approval_relay is not None
@@ -252,23 +227,16 @@ class ReviewApp(App[None]):
 def _tag_activity_events(
     seen: Sequence[StepEvent], activity_events: Sequence[ActivityEvent]
 ) -> list[tuple[str | None, ActivityEvent]]:
-    """Attribute each of `activity_events` to the step that reported it, purely from
-    `seen`'s own `StepEvent` timestamps -- computed fresh on every render, not tagged once
-    at collection time.
+    """Attribute each of `activity_events` to the step that reported it, from `seen`'s
+    `StepEvent` timestamps. Computed fresh on every render, not tagged at receipt time,
+    because `_consume_activities` and `_consume_events` are two independently scheduled
+    workers -- tagging at receipt could split one activity span's started/finished pair
+    across two owners if a step transition races the activity events.
 
-    `_consume_activities` and `_consume_events` are two independently scheduled workers
-    draining two independent queues, so nothing guarantees a "finished" `ActivityEvent` is
-    tagged before the owning step's own "completed" `StepEvent` advances
-    `self._running_step` to the next step. Tagging at receipt time can therefore split one
-    activity span's started/finished pair across two different owners and crash
-    `state.backfill_activities`' duration lookup.
-
-    Sound because steps run strictly sequentially (`pipeline/AGENTS.md`): each step's own
-    running window -- its "running" event's `started_at` through its "completed" event's
-    implied end time, or open-ended while still running -- fully contains every activity it
-    reports. Both events of one span get the SAME owner, computed once from the "started"
-    event and reused for "finished", so a "finished" timestamp landing a hair outside the
-    window can never split one span across two owners.
+    Steps run strictly sequentially, so each step's running window (its "running" event's
+    `started_at` through its "completed" event's implied end, or open-ended while running)
+    fully contains every activity it reports. Both events of one span get the same owner,
+    computed once from the "started" event and reused for "finished".
     """
 
     windows: dict[str, tuple[float, float | None]] = {}
@@ -277,8 +245,7 @@ def _tag_activity_events(
             windows[step_event.step_name] = (step_event.started_at, None)
         else:
             assert step_event.duration is not None
-            # Falls back to this event's own `started_at` if no "running" event preceded
-            # it -- some hand-built test fixtures skip straight to "completed".
+            # Falls back to this event's own started_at if no "running" event preceded it.
             started_at, _ = windows.get(step_event.step_name, (step_event.started_at, None))
             windows[step_event.step_name] = (started_at, started_at + step_event.duration)
 
@@ -294,8 +261,7 @@ def _tag_activity_events(
 
 
 def _owning_step(timestamp: float, windows: dict[str, tuple[float, float | None]]) -> str | None:
-    """Which step's running window `timestamp` falls inside, or `None` if it falls inside
-    none of them (not expected in practice, but a safe fallback rather than an assertion)."""
+    """Which step's running window `timestamp` falls inside, or `None` if none do."""
 
     for name, (started_at, completed_at) in windows.items():
         if timestamp < started_at:

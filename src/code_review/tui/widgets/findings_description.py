@@ -1,10 +1,8 @@
 """The left column of one `Finding` row: severity dot, description, location.
 
-- `FindingsDescription` renders on every row, unlike `FindingsSuggestion` which only
-  ever shows for the highlighted row.
-- While parked, it also shows a decided-marker prefix (`render_description`'s `decision`
-  parameter) so a human browsing away from a row they just decided still sees it recorded.
-- `format_finding`/`render_description` are pure and unit-tested without Textual.
+Renders on every row (unlike `FindingsSuggestion`, which only shows for the highlighted
+row). While parked, also shows a decided-marker prefix so a row's recorded decision
+stays visible after browsing away from it.
 """
 
 from __future__ import annotations
@@ -33,13 +31,10 @@ def format_finding(finding: FindingData) -> str:
 
 
 def render_description(finding: FindingData, decision: ApprovalDecision | None = None) -> Text:
-    """`FindingsDescription`'s content: severity dot (`_SEVERITY_DOT_STYLES`, keyed by
-    `finding.severity`), then `format_finding`'s text.
+    """`FindingsDescription`'s content: severity dot, then `format_finding`'s text.
 
-    `decision` is this row's own recorded park decision; `None` (the default, used by every
-    non-parked call site) renders no marker. "fix"/"skip" prefix a small marker
-    (`_DECISION_MARKER_ICONS`/`_STYLES`) so a human can tell a decided row apart from an
-    undecided one while browsing any row during a park, not just the highlighted one.
+    `decision` is this row's recorded park decision; `None` (the default) renders no
+    marker, "fix"/"skip" prefix a small marker so a decided row is visually distinct.
     """
 
     text = Text()
@@ -55,11 +50,8 @@ def render_description(finding: FindingData, decision: ApprovalDecision | None =
 class FindingsDescription(Static):
     """The left column of one `Finding` row: severity dot, description, location.
 
-    - `width: 1fr`, matched to `FindingsSuggestion`'s own `1fr`, so every row shares the
-      same 50/50 split regardless of highlight state or description length.
-    - A long description wraps within its half of the row via Textual's default word-wrap.
-    - No `border-right` divider -- `FindingsSuggestion` draws its own full border when
-      visible, which already marks the split.
+    `width: 1fr` matches `FindingsSuggestion`'s own `1fr` for an even 50/50 split. No
+    `border-right` divider -- `FindingsSuggestion` draws its own full border when visible.
     """
 
     DEFAULT_CSS = (
