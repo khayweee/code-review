@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from code_review.pipeline.step import Step
 from code_review.steps.intent import IntentStep
+from code_review.steps.pr import PRStep
 from code_review.steps.rebase import RebaseStep
 from code_review.steps.review import ReviewStep
 from code_review.steps.test_sufficiency import TestSufficiencyStep
@@ -38,6 +39,7 @@ IMPLEMENTED_STEPS: tuple[type[Step], ...] = (
     RebaseStep,
     ReviewStep,
     TestSufficiencyStep,
+    PRStep,
 )
 
 # Friendly display name for every `STEP_REGISTRY` entry -- `tui/` shows these instead of the

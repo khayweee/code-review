@@ -1,7 +1,11 @@
 """Tests for `code-review review` (Milestone 13, issue #40; four-step pipeline wiring,
-issue #60): the TTY-required fail-fast path, `_diff_against_head`, and real end-to-end
-runs of the full `IntentStep` -> `RebaseStep` -> `ReviewStep` -> `TestSufficiencyStep`
-pipeline (`steps/registry.py`'s `IMPLEMENTED_STEPS`).
+issue #60; `PRStep` joined as a fifth step in issue #119): the TTY-required fail-fast path,
+`_diff_against_head`, and real end-to-end runs of the full `IntentStep` -> `RebaseStep` ->
+`ReviewStep` -> `TestSufficiencyStep` -> `PRStep` pipeline (`steps/registry.py`'s
+`IMPLEMENTED_STEPS`). `repo_with_branch` (see its own docstring) leaves the checkout on its
+local "main" -- equal to `PRStep`'s own default `default_branch` -- so `PRStep` always
+takes its clean-skip path in every full-run test below, with no `gh` call and no fake `gh`
+executable needed on `PATH`.
 
 `CliRunner`'s captured stdio is never a TTY, so it is this file's natural test of the
 "needs a real terminal" error path -- no mocking `isatty` (see `cli.py`'s `review`
@@ -564,8 +568,9 @@ def _run_review_and_press_e_to_exit(
     wait_until`), then sends "e" to close it, resending once if the process doesn't
     actually start exiting (see `_send_e_and_confirm_exit`). `wait_before_keypress`'s
     default is a generous upper bound over the run's own real duration (well under two
-    seconds even with all four steps running -- `IntentStep`/`RebaseStep` are pure local
-    `git`, and `ReviewStep`/`TestSufficiencyStep` each spawn one fake `claude` process that
+    seconds even with all five steps running -- `IntentStep`/`RebaseStep`/`PRStep` are pure
+    local `git` (`PRStep` takes its clean-skip path here, see this module's own docstring),
+    and `ReviewStep`/`TestSufficiencyStep` each spawn one fake `claude` process that
     drains stdin and prints immediately), not a tight one, since this is a real subprocess
     and terminal, not a mock -- but the actual wait is normally a small fraction of it.
     `env` defaults to `None` (inherit this process's own environment); the full-run tests
@@ -731,14 +736,16 @@ def _assert_no_leftover_code_review_process(pgid: int) -> None:
 def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
-    """A real terminal (pty), a real git repo and diff, a real four-step pipeline run
-    (`IntentStep` -> `RebaseStep` -> `ReviewStep` -> `TestSufficiencyStep`, real `git`
-    subprocesses and a real `ClaudeCLI` subprocess against a fake `claude` on `PATH`)
+    """A real terminal (pty), a real git repo and diff, a real five-step pipeline run
+    (`IntentStep` -> `RebaseStep` -> `ReviewStep` -> `TestSufficiencyStep` -> `PRStep`, real
+    `git` subprocesses and a real `ClaudeCLI` subprocess against a fake `claude` on `PATH`;
+    `PRStep` itself takes its clean-skip path here, see this module's own docstring)
     through the real executor and `ReviewApp` -- exits with code 0 once "e" is pressed, no
     traceback, every step name rendered as completed in the Pipeline box, the clean-run
     Status message shown, and (checked via `ps` right after `script` returns) no leftover
-    `code-review`/textual process. This is acceptance criterion 1 (all four steps run, in
-    order) and criterion 4 (demoable end to end) from issue #60."""
+    `code-review`/textual process. This is acceptance criterion 1 (all four steps from
+    issue #60 run, in order -- `PRStep` joined later, issue #119) and criterion 4 (demoable
+    end to end) from issue #60."""
 
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
@@ -753,7 +760,7 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency"):
+    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
@@ -902,7 +909,7 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency"):
+    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
@@ -938,7 +945,7 @@ def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency"):
+    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 

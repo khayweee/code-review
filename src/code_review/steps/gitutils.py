@@ -66,6 +66,20 @@ def rebase_in_progress(cwd: Path) -> bool:
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
+async def current_branch(cwd: Path) -> str | None:
+    """Resolve the currently checked-out branch name in `cwd`, or `None` on failure or a
+    detached HEAD (`rev-parse --abbrev-ref HEAD` prints the literal string "HEAD" when
+    detached, treated the same as a resolution failure) -- mirrors `ref_sha`'s
+    `None`-on-failure convention.
+    """
+
+    result = await run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return None if branch == "HEAD" else branch
+
+
 async def ref_sha(ref: str, cwd: Path) -> str | None:
     """Resolve `ref` to a SHA in `cwd`, or `None` if it does not exist (uses `rev-parse
     --verify --quiet` so a missing ref is a plain result, not an exception).
