@@ -126,12 +126,12 @@ class RebaseStep(Step):
         # Must run after fetch, before rebase -- see module docstring.
         unpushed_finding = await _unpushed_local_default_finding(ctx.cwd, self.default_branch)
         if unpushed_finding is not None:
-            return StepOutcome(needs_approval=True, auto_fixable=False, findings=[unpushed_finding])
+            return StepOutcome(needs_approval=True, auto_fixable=False, payload=[unpushed_finding])
 
         # One-argument form rebases current HEAD in place; see module docstring.
         rebase = await run_git(["rebase", f"origin/{self.default_branch}"], ctx.cwd)
         if rebase.returncode == 0:
-            return StepOutcome(needs_approval=False, auto_fixable=False, findings=[])
+            return StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
 
         if not rebase_in_progress(ctx.cwd):
             # Not a conflict this step can classify (e.g. dirty tree, bad upstream ref).
@@ -160,4 +160,4 @@ class RebaseStep(Step):
             for path in conflicts
         ]
 
-        return StepOutcome(needs_approval=True, auto_fixable=False, findings=findings)
+        return StepOutcome(needs_approval=True, auto_fixable=False, payload=findings)

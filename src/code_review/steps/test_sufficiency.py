@@ -124,5 +124,5 @@ class TestSufficiencyStep(Step):
         return StepOutcome(
             needs_approval=blocking,
             auto_fixable=auto_fixable,
-            findings=output,
+            payload=output,
         )

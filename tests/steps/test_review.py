@@ -164,7 +164,7 @@ def test_review_step_outcome_is_clean_and_auto_fixable_after_scope_filtering(
     "ask-user" finding alongside "source"-scoped "no-op"/"auto-fix" findings. Without
     filtering, the "ask-user" finding would make this outcome need approval; proving
     `needs_approval` comes back `False` here proves the scope filter ran before the
-    blocking-findings gate did, and `StepOutcome.findings` carries the already-filtered
+    blocking-findings gate did, and `StepOutcome.payload` carries the already-filtered
     `ReviewOutput`, not the raw agent answer.
 
     Calls `step.run(ctx)` directly, not via `run_steps`/`_collect`: this outcome is
@@ -183,7 +183,7 @@ def test_review_step_outcome_is_clean_and_auto_fixable_after_scope_filtering(
     outcome = asyncio.run(step.run(ctx))
     asyncio.run(agent.close())
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, ReviewOutput)
     # The pipeline-owned-delivery finding was stripped by the scope filter.
     assert len(findings.findings) == 2
@@ -211,7 +211,7 @@ def test_review_step_needs_approval_and_is_not_auto_fixable_on_an_ask_user_findi
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
     asyncio.run(agent.close())
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, ReviewOutput)
     assert len(findings.findings) == 2
 
@@ -234,7 +234,7 @@ def test_review_step_prompt_includes_intent_conformance_clause_for_explicit_inte
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
     asyncio.run(agent.close())
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, ReviewOutput)
     assert findings.risk_rationale == "saw intent-conformance clause"
 
@@ -254,7 +254,7 @@ def test_review_step_prompt_omits_intent_conformance_clause_for_non_explicit_int
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
     asyncio.run(agent.close())
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, ReviewOutput)
     assert findings.risk_rationale == "did not see intent-conformance clause"
 
@@ -330,14 +330,14 @@ def test_review_step_automatic_fix_round_edits_the_tree_and_returns_a_fresh_revi
 
     assert first_outcome.auto_fixable is True
     assert first_outcome.needs_approval is False
-    first_findings = first_outcome.findings
+    first_findings = first_outcome.payload
     assert isinstance(first_findings, ReviewOutput)
     assert len(first_findings.findings) == 1
     assert first_findings.risk_rationale == "initial pass: one auto-fixable style finding"
 
     assert second_outcome.auto_fixable is False
     assert second_outcome.needs_approval is False
-    second_findings = second_outcome.findings
+    second_findings = second_outcome.payload
     assert isinstance(second_findings, ReviewOutput)
     # A fresh verdict, not an echo of round 1's finding.
     assert second_findings.findings == []

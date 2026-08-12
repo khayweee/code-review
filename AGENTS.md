@@ -44,7 +44,18 @@ meaning changes, edit the glossary in the same commit. It owns what words mean;
 - `uv run ruff format .`
 - `uv run ruff check .`
 - `uv run mypy src`
-- `uv run pytest`
+- `uv run pytest` -- serial, deliberately: pytest-xdist (`-n auto`) can't preserve the
+  classic "one line of dots per file" report (it streams results from several concurrently
+  running workers, so dots from different files interleave with no per-file grouping
+  possible) -- see `ci.yml`, which runs the exact same suite with `-n auto` instead, a
+  tradeoff worth making there (nobody watches CI logs scroll live; the wall-clock/dollar
+  cost is what matters) but not here (you *are* watching it, and 25s isn't worth losing
+  per-file readability for). Every test is independently isolated -- own `tmp_path`, own env
+  overrides, own subprocess -- so switching between the two is always safe either direction.
+  See `tests/tui/`'s note on Textual's `wait_for_idle` and `test_cli_review.py`'s
+  `_assert_no_leftover_code_review_process` for the two things that had to be fixed to make
+  `-n auto` itself safe/fast, before adding a third real-subprocess or Textual-`Pilot`-driven
+  test.
 
 (All wired into `make check`.)
 

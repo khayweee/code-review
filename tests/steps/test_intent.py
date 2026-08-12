@@ -79,7 +79,7 @@ def test_intent_step_returns_a_deterministic_outcome_carrying_ctx_intent() -> No
     assert isinstance(outcome, StepOutcome)
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
-    assert outcome.findings is ctx.intent
+    assert outcome.payload is ctx.intent
 
 
 def test_intent_step_raises_a_clear_error_if_ctx_intent_is_missing() -> None:

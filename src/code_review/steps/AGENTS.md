@@ -13,7 +13,7 @@ Holds the `Intent` dataclass and `IntentStep`, the pipeline's first step — car
 - Each later step (`review.py`, `test_sufficiency.py`, `pr.py`) calls
   `wrap_intent(ctx.intent.summary, ctx.intent.source)` itself, at its own prompt site, off
   the shared `ctx.intent` — never via a prior step's outcome. Get this backwards (threading
-  wrapped text through `StepOutcome.findings` instead of re-deriving it) and a step
+  wrapped text through `StepOutcome.payload` instead of re-deriving it) and a step
   downstream of a hypothetical future intent-mutating step would silently see stale wrapped
   text.
 - The prompt-construction functions themselves — `wrap_intent`/`redact_secrets`/

@@ -25,7 +25,7 @@ from code_review.tui.state import (
 
 REGISTRY = ("IntentStep", "RebaseStep", "ReviewStep")
 
-_OUTCOME = StepOutcome(needs_approval=False, auto_fixable=False, findings=None)
+_OUTCOME = StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
 
 
 def test_backfill_with_no_events_renders_every_registry_entry_as_pending() -> None:
@@ -146,7 +146,7 @@ def test_backfill_a_completed_step_is_not_recolored_failed_even_if_named() -> No
 
 # --- parked_step/skipped_steps (issue #80) -----------------------------------------------
 
-_PARK_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, findings=["a finding"])
+_PARK_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, payload=["a finding"])
 
 
 def test_backfill_marks_the_named_parked_step_as_parked_over_its_own_completed_event() -> None:
@@ -323,11 +323,11 @@ def test_latest_findings_with_no_events_returns_none() -> None:
 
 
 def test_latest_findings_ignores_a_completed_step_whose_outcome_is_not_a_review_output() -> None:
-    # IntentStep-shaped: `outcome.findings` is an `Intent`, not a `ReviewOutput`.
+    # IntentStep-shaped: `outcome.payload` is an `Intent`, not a `ReviewOutput`.
     intent_outcome = StepOutcome(
         needs_approval=False,
         auto_fixable=False,
-        findings=Intent(summary="add retries", source="explicit", score=1.0),
+        payload=Intent(summary="add retries", source="explicit", score=1.0),
     )
     events = [
         StepEvent(
@@ -343,7 +343,7 @@ def test_latest_findings_ignores_a_completed_step_whose_outcome_is_not_a_review_
 
 
 def test_latest_findings_ignores_a_completed_step_with_an_empty_findings_list() -> None:
-    outcome = StepOutcome(needs_approval=False, auto_fixable=False, findings=_review_output())
+    outcome = StepOutcome(needs_approval=False, auto_fixable=False, payload=_review_output())
     events = [
         StepEvent(
             step_name="ReviewStep",
@@ -359,7 +359,7 @@ def test_latest_findings_ignores_a_completed_step_with_an_empty_findings_list() 
 
 def test_latest_findings_returns_the_review_output_when_findings_are_non_empty() -> None:
     output = _review_output(_FINDING)
-    outcome = StepOutcome(needs_approval=True, auto_fixable=False, findings=output)
+    outcome = StepOutcome(needs_approval=True, auto_fixable=False, payload=output)
     events = [
         StepEvent(
             step_name="ReviewStep",
@@ -384,14 +384,14 @@ def test_latest_findings_with_two_completed_steps_the_later_one_wins() -> None:
         StepEvent(
             step_name="ReviewStep",
             status="completed",
-            outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+            outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=earlier),
             started_at=1.0,
             duration=0.1,
         ),
         StepEvent(
             step_name="TestSufficiencyStep",
             status="completed",
-            outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+            outcome=StepOutcome(needs_approval=True, auto_fixable=False, payload=later),
             started_at=2.0,
             duration=0.1,
         ),
@@ -402,7 +402,7 @@ def test_latest_findings_with_two_completed_steps_the_later_one_wins() -> None:
 
 def test_latest_findings_ignores_a_completed_test_sufficiency_step_with_empty_findings() -> None:
     outcome = StepOutcome(
-        needs_approval=False, auto_fixable=False, findings=_test_sufficiency_output()
+        needs_approval=False, auto_fixable=False, payload=_test_sufficiency_output()
     )
     events = [
         StepEvent(
@@ -419,7 +419,7 @@ def test_latest_findings_ignores_a_completed_test_sufficiency_step_with_empty_fi
 
 def test_latest_findings_returns_the_test_sufficiency_output_when_findings_are_non_empty() -> None:
     output = _test_sufficiency_output(_FINDING)
-    outcome = StepOutcome(needs_approval=True, auto_fixable=False, findings=output)
+    outcome = StepOutcome(needs_approval=True, auto_fixable=False, payload=output)
     events = [
         StepEvent(
             step_name="TestSufficiencyStep",
@@ -446,14 +446,14 @@ def test_latest_findings_with_a_review_output_then_a_test_sufficiency_output_the
         StepEvent(
             step_name="ReviewStep",
             status="completed",
-            outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+            outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=earlier),
             started_at=1.0,
             duration=0.1,
         ),
         StepEvent(
             step_name="TestSufficiencyStep",
             status="completed",
-            outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+            outcome=StepOutcome(needs_approval=True, auto_fixable=False, payload=later),
             started_at=2.0,
             duration=0.1,
         ),
@@ -475,14 +475,14 @@ def test_latest_findings_with_a_test_sufficiency_output_then_a_review_output_the
         StepEvent(
             step_name="TestSufficiencyStep",
             status="completed",
-            outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+            outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=earlier),
             started_at=1.0,
             duration=0.1,
         ),
         StepEvent(
             step_name="ReviewStep",
             status="completed",
-            outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+            outcome=StepOutcome(needs_approval=True, auto_fixable=False, payload=later),
             started_at=2.0,
             duration=0.1,
         ),

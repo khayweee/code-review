@@ -21,5 +21,8 @@ jobs:
       - run: uv run ruff check .
       # Run type checking across the source tree.
       - run: uv run mypy src
-      # Execute the test suite.
-      - run: uv run pytest
+      # Execute the test suite, parallelized across available cores -- tests are
+      # independently isolated (own tmp_path/git repos/subprocesses), so this is safe and
+      # cuts wall time substantially on the mix of real-subprocess and Textual-driven tests
+      # here (see AGENTS.md's "Local verification sequence").
+      - run: uv run pytest -n auto

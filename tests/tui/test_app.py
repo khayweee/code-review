@@ -95,7 +95,7 @@ async def _wait_until_done(pilot: Pilot[None], app: ReviewApp) -> None:
     raise AssertionError("ReviewApp never reached its done state (no StatusBox mounted)")
 
 
-_OUTCOME = StepOutcome(needs_approval=False, auto_fixable=False, findings=None)
+_OUTCOME = StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
 
 
 async def _one_step_completes() -> AsyncIterator[StepEvent]:
@@ -431,7 +431,7 @@ def test_review_app_relays_a_queued_input_request_through_a_modal() -> None:
 _PARK_OUTCOME = StepOutcome(
     needs_approval=True,
     auto_fixable=False,
-    findings=[
+    payload=[
         Finding(severity="error", description="unpushed local commits", review_scope="source")
     ],
 )
@@ -733,7 +733,7 @@ def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_marku
         outcome = StepOutcome(
             needs_approval=True,
             auto_fixable=False,
-            findings=ReviewOutput(
+            payload=ReviewOutput(
                 findings=[
                     Finding(
                         severity="error",
@@ -799,7 +799,7 @@ async def _review_step_completes_with_findings() -> AsyncIterator[StepEvent]:
     output = _review_output(
         Finding(severity="error", description="removes error handling", review_scope="source")
     )
-    outcome = StepOutcome(needs_approval=True, auto_fixable=False, findings=output)
+    outcome = StepOutcome(needs_approval=True, auto_fixable=False, payload=output)
     yield StepEvent(
         step_name="ReviewStep",
         status="completed",
@@ -824,7 +824,7 @@ async def _test_sufficiency_step_completes_with_findings() -> AsyncIterator[Step
             severity="warning", description="no test covers the retry path", review_scope="source"
         )
     )
-    outcome = StepOutcome(needs_approval=False, auto_fixable=False, findings=output)
+    outcome = StepOutcome(needs_approval=False, auto_fixable=False, payload=output)
     yield StepEvent(
         step_name="TestSufficiencyStep",
         status="completed",
@@ -840,7 +840,7 @@ async def _review_step_completes_with_no_findings() -> AsyncIterator[StepEvent]:
         step_name="ReviewStep", status="running", outcome=None, started_at=started, duration=None
     )
     await asyncio.sleep(0)
-    outcome = StepOutcome(needs_approval=False, auto_fixable=False, findings=_review_output())
+    outcome = StepOutcome(needs_approval=False, auto_fixable=False, payload=_review_output())
     yield StepEvent(
         step_name="ReviewStep",
         status="completed",
@@ -861,7 +861,7 @@ async def _two_steps_complete_with_findings() -> AsyncIterator[StepEvent]:
     yield StepEvent(
         step_name="ReviewStep",
         status="completed",
-        outcome=StepOutcome(needs_approval=False, auto_fixable=False, findings=earlier),
+        outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=earlier),
         started_at=started,
         duration=0.01,
     )
@@ -869,7 +869,7 @@ async def _two_steps_complete_with_findings() -> AsyncIterator[StepEvent]:
     yield StepEvent(
         step_name="TestSufficiencyStep",
         status="completed",
-        outcome=StepOutcome(needs_approval=True, auto_fixable=False, findings=later),
+        outcome=StepOutcome(needs_approval=True, auto_fixable=False, payload=later),
         started_at=started,
         duration=0.01,
     )
@@ -946,7 +946,7 @@ def test_review_app_shows_no_findings_box_when_the_only_completed_outcome_has_no
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            # `_one_step_completes` reports an outcome with `findings=None` -- not a
+            # `_one_step_completes` reports an outcome with an empty `payload=[]` -- not a
             # `ReviewOutput` -- so no Findings box should ever mount.
             assert list(app.query(FindingsList)) == []
 

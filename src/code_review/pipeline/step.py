@@ -23,8 +23,10 @@ branch.
 that opts in via `Step.supports_fix_round = True` get bounded automatic re-runs before
 falling through to a park. A park's "fix" response lets a human re-run with their own
 instructions, uncapped -- see `executor.py`'s module docstring for the full loop.
-`StepOutcome.findings` is typed as bare `object`; a step narrows it back to whatever schema
-it validated its agent call against.
+`StepOutcome.payload` is the closed union of every shape a step actually reports:
+`list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent`. A generic consumer (the
+executor's fix-round path, the TUI's findings display) narrows it with `isinstance` over
+that same closed set instead of duck-typing an `object`.
 
 `StepEvent` is `executor.run_steps`'s progress unit: one per "running" and one per
 "completed" per step/round. `started_at`/`duration` use `time.monotonic()`, not wall-clock
@@ -46,8 +48,12 @@ from code_review.agent import Agent
 if TYPE_CHECKING:
     # steps/ depends on pipeline/, never the reverse; a top-level import would be circular.
     # Lazy annotation (from __future__ import annotations) makes a type-checking-only
-    # import sufficient.
+    # import sufficient. findings.py imports this module at top level (see its own
+    # docstring), so Finding must stay TYPE_CHECKING-only here too or the cycle inverts.
+    from code_review.pipeline.findings import Finding
     from code_review.steps.intent import Intent
+    from code_review.steps.review import ReviewOutput
+    from code_review.steps.test_sufficiency import TestSufficiencyOutput
 
 
 class ActivityReporter(Protocol):
@@ -134,7 +140,7 @@ class StepContext:
     activity_reporter: ActivityReporter | None = None
     # Approval-park seam: executor.run_steps awaits this with (step_name, outcome) whenever
     # a step parks, blocking until an ApprovalResponse comes back. Takes the full step name
-    # + outcome rather than a prompt string because formatting StepOutcome.findings for
+    # + outcome rather than a prompt string because formatting StepOutcome.payload for
     # display is the relay/modal's job, not pipeline/'s. None means run_steps fails closed
     # with ApprovalNotAttachedError rather than hanging or silently approving. cli.py wires
     # this to tui.approval_relay.ApprovalRelay.request_approval.
@@ -165,7 +171,9 @@ class StepOutcome:
 
     needs_approval: bool
     auto_fixable: bool
-    findings: object
+    # The closed set of shapes a step actually reports -- see module docstring. A step
+    # narrows this back to whichever member it produced, typically via isinstance.
+    payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent
 
 
 class Step(ABC):

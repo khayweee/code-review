@@ -15,6 +15,21 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import textual._wait as _textual_wait
+
+# Textual's `Pilot`/`App` call `wait_for_idle()` after every simulated key press and mouse
+# event to let pending render work settle before the next action -- it infers "idle" by
+# comparing CPU time consumed against wall-clock time in each 20ms slice, falling back to a
+# hardcoded 1-second wait if that slice never reads as idle enough (`SLEEP_IDLE`, upstream
+# default 1ms out of 20ms). This sandbox's background CPU noise (unrelated to any actual
+# pending render work -- `_wait_for_screen()`, the same call's first step, already provides
+# real, deterministic synchronization via Textual's own `call_later` counting) sits right at
+# that 1ms line, so nearly every keypress/click in `tests/tui/` was hitting the full 1-second
+# fallback -- ten-plus such calls in one test compounds into a 10+ second test. Raising the
+# threshold to 15ms lets `wait_for_idle` return in ~20ms instead, cutting `tests/tui/`'s
+# wall time by roughly an order of magnitude with no loss of the real synchronization
+# `_wait_for_screen()` already guarantees.
+_textual_wait.SLEEP_IDLE = _textual_wait.SLEEP_GRANULARITY * 0.75
 
 _PYPROJECT = """\
 [project]

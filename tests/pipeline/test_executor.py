@@ -113,7 +113,7 @@ class _ReviewStep(Step):
         return StepOutcome(
             needs_approval=False,
             auto_fixable=False,
-            findings=result.output,
+            payload=result.output,
         )
 
 
@@ -144,7 +144,7 @@ class _OrderStep(Step):
         return StepOutcome(
             needs_approval=False,
             auto_fixable=False,
-            findings=result.output,
+            payload=result.output,
         )
 
 
@@ -189,7 +189,7 @@ def test_step_round_trips_through_executor_against_real_diff(tmp_path: Path) -> 
     assert isinstance(outcome, StepOutcome)
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, ReviewFindings)
     assert findings.saw_added_line is True
     expected_prompt = f"Review this diff:\n{diff}"
@@ -214,15 +214,15 @@ def test_executor_runs_steps_in_fixed_list_order_against_real_diff(tmp_path: Pat
     outcomes = _completed_outcomes(events)
     assert len(outcomes) == 2
     first, second = outcomes
-    assert isinstance(first.findings, OrderProbe)
-    assert isinstance(second.findings, OrderProbe)
+    assert isinstance(first.payload, OrderProbe)
+    assert isinstance(second.payload, OrderProbe)
 
     # Step "a" ran first: it could not yet see step "b"'s marker on disk.
-    assert first.findings.step == "a"
-    assert first.findings.saw_other is False
+    assert first.payload.step == "a"
+    assert first.payload.saw_other is False
     # Step "b" ran second: step "a"'s marker was already there for it to see.
-    assert second.findings.step == "b"
-    assert second.findings.saw_other is True
+    assert second.payload.step == "b"
+    assert second.payload.saw_other is True
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +236,7 @@ class _IntentReadingStep(Step):
         return StepOutcome(
             needs_approval=False,
             auto_fixable=False,
-            findings=ctx.intent.summary,
+            payload=ctx.intent.summary,
         )
 
 
@@ -267,10 +267,10 @@ def test_intent_step_runs_first_and_a_later_step_reads_the_same_intent_via_ctx(
 
     assert intent_outcome.needs_approval is False
     assert intent_outcome.auto_fixable is False
-    assert intent_outcome.findings is intent
+    assert intent_outcome.payload is intent
 
     # The later step never saw `intent_outcome` -- it read `ctx.intent.summary` directly.
-    assert later_outcome.findings == intent_text
+    assert later_outcome.payload == intent_text
 
 
 def test_run_steps_yields_a_running_and_completed_event_per_step_in_order(
@@ -310,10 +310,10 @@ def test_run_steps_yields_a_running_and_completed_event_per_step_in_order(
     first_outcome, second_outcome = events[1].outcome, events[3].outcome
     assert isinstance(first_outcome, StepOutcome)
     assert isinstance(second_outcome, StepOutcome)
-    assert isinstance(first_outcome.findings, OrderProbe)
-    assert isinstance(second_outcome.findings, OrderProbe)
-    assert first_outcome.findings.step == "a"
-    assert second_outcome.findings.step == "b"
+    assert isinstance(first_outcome.payload, OrderProbe)
+    assert isinstance(second_outcome.payload, OrderProbe)
+    assert first_outcome.payload.step == "a"
+    assert second_outcome.payload.step == "b"
 
 
 def test_run_steps_binds_the_ambient_activity_reporter_but_a_step_with_no_git_call_reports_nothing(
@@ -340,7 +340,7 @@ def test_run_steps_binds_the_ambient_activity_reporter_but_a_step_with_no_git_ca
 
     outcomes = _completed_outcomes(events)
     assert len(outcomes) == 1
-    assert outcomes[0].findings is intent
+    assert outcomes[0].payload is intent
 
     # Nothing was ever reported: `relay.next_event()` would hang forever with nothing
     # queued, so bound it with a short timeout instead of asserting on a private queue.
@@ -375,10 +375,10 @@ class _MarkerStep(Step):
     loop actually reached it -- i.e. that the run continued past a park."""
 
     async def run(self, ctx: StepContext) -> StepOutcome:
-        return StepOutcome(needs_approval=False, auto_fixable=False, findings="ran")
+        return StepOutcome(needs_approval=False, auto_fixable=False, payload="ran")
 
 
-_PARKING_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, findings=["a finding"])
+_PARKING_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, payload=["a finding"])
 
 
 def _fixed_response(decision: str, instructions: str | None = None) -> object:
@@ -418,7 +418,7 @@ def test_run_steps_continues_to_the_next_step_when_the_decision_is_approve(
     outcomes = _completed_outcomes(events)
     assert len(outcomes) == 2
     assert outcomes[0] is _PARKING_OUTCOME
-    assert outcomes[1].findings == "ran"
+    assert outcomes[1].payload == "ran"
     assert answer.calls == [("_ParkingStep", _PARKING_OUTCOME)]  # type: ignore[attr-defined]
 
 
@@ -445,7 +445,7 @@ def test_run_steps_continues_to_the_next_step_when_the_decision_is_skip(tmp_path
 
     outcomes = _completed_outcomes(events)
     assert len(outcomes) == 2
-    assert outcomes[1].findings == "ran"
+    assert outcomes[1].payload == "ran"
 
 
 def test_run_steps_raises_run_aborted_error_and_runs_no_further_step_on_abort(
@@ -613,8 +613,8 @@ def test_run_steps_auto_fix_round_re_runs_exactly_once_with_fix_round_context_be
         action="auto-fix",
         review_scope="source",
     )
-    round_one = StepOutcome(needs_approval=False, auto_fixable=True, findings=[auto_fix_finding])
-    round_two = StepOutcome(needs_approval=False, auto_fixable=False, findings=[])
+    round_one = StepOutcome(needs_approval=False, auto_fixable=True, payload=[auto_fix_finding])
+    round_two = StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
     step = _FixableStep(outcomes=[round_one, round_two])
     answer = _fixed_response("abort")  # would blow up the run if this were ever called
 
@@ -654,7 +654,7 @@ def test_run_steps_stops_automatic_fix_rounds_once_the_cap_is_exhausted_and_park
         severity="info", description="keep fixing forever", action="auto-fix", review_scope="source"
     )
     always_auto_fixable = StepOutcome(
-        needs_approval=False, auto_fixable=True, findings=[auto_fix_finding]
+        needs_approval=False, auto_fixable=True, payload=[auto_fix_finding]
     )
     # More outcomes than the cap could ever consume -- proves the loop actually stops
     # rather than merely running out of a short sequence.
@@ -704,7 +704,7 @@ def test_run_steps_never_auto_fixes_a_finding_with_unset_action_even_on_a_fix_ro
     outcome = StepOutcome(
         needs_approval=blocking,
         auto_fixable=has_auto_fix and not blocking,
-        findings=[unset_action_finding],
+        payload=[unset_action_finding],
     )
     # The fail-safe default: unset action resolves to "ask-user", never "auto-fix".
     assert outcome.needs_approval is True
@@ -744,7 +744,7 @@ def test_run_steps_does_not_round_or_park_a_step_that_does_not_support_fix_round
 
     repo, diff = _real_repo_with_diff(tmp_path)
     always_auto_fixable_no_approval = StepOutcome(
-        needs_approval=False, auto_fixable=True, findings=["would be auto-fixable"]
+        needs_approval=False, auto_fixable=True, payload=["would be auto-fixable"]
     )
     step = _NonFixableStep(always_auto_fixable_no_approval)
     assert step.supports_fix_round is False
@@ -768,7 +768,7 @@ def test_run_steps_does_not_round_or_park_a_step_that_does_not_support_fix_round
     # -- no automatic re-run, no park.
     assert len(outcomes) == 2
     assert outcomes[0] is always_auto_fixable_no_approval
-    assert outcomes[1].findings == "ran"
+    assert outcomes[1].payload == "ran"
     assert answer.calls == []  # type: ignore[attr-defined]
 
 
@@ -781,7 +781,7 @@ def test_run_steps_fix_approval_response_re_runs_with_instructions_and_is_never_
 
     repo, diff = _real_repo_with_diff(tmp_path)
     parking_outcome = StepOutcome(
-        needs_approval=True, auto_fixable=False, findings=["needs a human"]
+        needs_approval=True, auto_fixable=False, payload=["needs a human"]
     )
     # `_MAX_AUTO_FIX_ROUNDS + 2` fix rounds, well past the automatic path's own cap, to
     # prove this path is genuinely uncapped rather than merely under-tested against it.

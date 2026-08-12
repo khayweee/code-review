@@ -111,5 +111,5 @@ class ReviewStep(Step):
         return StepOutcome(
             needs_approval=blocking,
             auto_fixable=auto_fixable,
-            findings=filtered,
+            payload=filtered,
         )

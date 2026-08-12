@@ -57,5 +57,5 @@ class IntentStep(Step):
         return StepOutcome(
             needs_approval=False,
             auto_fixable=False,
-            findings=ctx.intent,
+            payload=ctx.intent,
         )
