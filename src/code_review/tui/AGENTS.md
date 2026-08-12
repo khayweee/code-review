@@ -43,6 +43,11 @@ without a real agent subprocess.
   modal. "skip" is recorded into `self._skipped_steps` (kept for the app's lifetime, same as
   `_failed_step`); "abort" unwinds via `pipeline.executor.RunAbortedError` through the
   normal `ReviewApp.error` path.
+- `branch` (optional, default `None`) is display-only: `cli.py` already has the branch
+  string under review, so this is a plain constructor param, read once at startup (not
+  live-polled — a run's branch can't change mid-run under this project's own concurrency
+  model) and passed straight to `PipelineBox` as its `border_subtitle`. `None` means no
+  subtitle at all, not a fabricated placeholder.
 - `_tag_activity_events`/`_owning_step`: attribute each `ActivityEvent` to its owning step
   purely from `StepEvent` timestamps, computed fresh at render time — not from
   `self._running_step` at receipt time. `_consume_activities` and `_consume_events` are two
@@ -144,6 +149,12 @@ renders as a pending placeholder.
   doesn't reset every render).
 - Self-driven 60fps `_animate_shimmer` timer re-renders the running row's colors between
   `StepEvent`s; `update_rows` replaces the full row set on every `app.py` render tick.
+- Its own `DEFAULT_CSS` (`pipeline_box.tcss`, on top of `_BorderedBox`'s inherited one)
+  sets `border-subtitle-align: right`, scoped to this widget only — `StatusBox` has no
+  subtitle to align, so this rule lives here rather than in the shared `base.tcss`. The
+  optional `branch` constructor arg (`app.py`'s `ReviewApp(branch=...)`) becomes
+  `border_subtitle` when not `None`, landing bottom-right per Textual's own border
+  rendering.
 
 ### `StatusBox` (`status_box.py`)
 

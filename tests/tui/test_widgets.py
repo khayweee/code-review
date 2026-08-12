@@ -366,9 +366,7 @@ def test_pipeline_box_update_rows_replaces_the_rendered_content() -> None:
 
             content = _render_content(box.content)
             assert "IntentStep" in content
-            assert any(
-                frame in content for frame in ("🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘")
-            )
+            assert any(frame in content for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
     asyncio.run(scenario())
 
