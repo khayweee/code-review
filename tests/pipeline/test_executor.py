@@ -772,6 +772,97 @@ def test_run_steps_does_not_round_or_park_a_step_that_does_not_support_fix_round
     assert answer.calls == []  # type: ignore[attr-defined]
 
 
+# --- step_outcomes threading (issue #119) -------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportingStep(Step):
+    """Minimal real `Step` that records `ctx.step_outcomes` exactly as seen at call time,
+    then returns a fixed outcome -- proves a later step can read an earlier step's already
+    -settled `StepOutcome` via `StepContext.step_outcomes` (issue #119)."""
+
+    outcome: StepOutcome
+    seen_step_outcomes: list[object] = field(default_factory=list)
+
+    async def run(self, ctx: StepContext) -> StepOutcome:
+        self.seen_step_outcomes.append(ctx.step_outcomes)
+        return self.outcome
+
+
+def test_run_steps_threads_an_earlier_steps_settled_outcome_into_a_later_steps_ctx(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion: a later step's `StepContext.step_outcomes` carries the exact
+    `StepOutcome` an earlier step in the same run produced, keyed by `get_name()`."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    reporting_step = _ReportingStep(
+        outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+    )
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    steps: list[Step] = [_MarkerStep(), reporting_step]
+
+    asyncio.run(_collect(steps, ctx))
+    asyncio.run(agent.close())
+
+    assert len(reporting_step.seen_step_outcomes) == 1
+    seen = reporting_step.seen_step_outcomes[0]
+    assert seen == {
+        "_MarkerStep": StepOutcome(needs_approval=False, auto_fixable=False, payload="ran")
+    }
+
+
+def test_run_steps_gives_the_first_step_in_a_run_an_empty_step_outcomes(tmp_path: Path) -> None:
+    repo, diff = _real_repo_with_diff(tmp_path)
+    reporting_step = _ReportingStep(
+        outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+    )
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+
+    asyncio.run(_collect([reporting_step], ctx))
+    asyncio.run(agent.close())
+
+    assert reporting_step.seen_step_outcomes == [{}]
+
+
+def test_run_steps_only_records_a_fix_round_steps_final_settled_outcome_not_each_round(
+    tmp_path: Path,
+) -> None:
+    """A step that goes through one or more automatic fix rounds before settling must land
+    exactly one entry in a later step's `step_outcomes` -- the final, settled outcome, never
+    a stale intermediate round's outcome."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    auto_fix_finding = Finding(
+        severity="warning", description="extract a helper", action="auto-fix", review_scope="source"
+    )
+    round_one = StepOutcome(needs_approval=False, auto_fixable=True, payload=[auto_fix_finding])
+    round_two = StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+    fixable_step = _FixableStep(outcomes=[round_one, round_two])
+    reporting_step = _ReportingStep(
+        outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+    )
+
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    steps: list[Step] = [fixable_step, reporting_step]
+
+    events = asyncio.run(_collect(steps, ctx))
+    asyncio.run(agent.close())
+
+    # Sanity: the fix round actually happened (two completed events for _FixableStep, one
+    # for _ReportingStep).
+    assert len(_completed_outcomes(events)) == 3
+
+    assert len(reporting_step.seen_step_outcomes) == 1
+    seen = reporting_step.seen_step_outcomes[0]
+    assert seen == {"_FixableStep": round_two}
+
+
 def test_run_steps_fix_approval_response_re_runs_with_instructions_and_is_never_capped(
     tmp_path: Path,
 ) -> None:

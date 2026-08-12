@@ -72,10 +72,48 @@ schema/orchestration split and its fix-mode support.
 
 ## pr.py
 
-Assembles PR evidence and opens the pull request — the pipeline's last step.
+Assembles PR evidence and opens the pull request via `gh` - the pipeline's last step
+(Milestone 8, issue #119).
 
-- Remains unimplemented (Milestone 8, see [docs/ROADMAP.md](../../../docs/ROADMAP.md)).
-- Once its real prompt/schema lands, record here any PR-body byte-budget/truncation rules.
+- Fully deterministic for this ticket - no agent/LLM call anywhere in `PRStep.run`. Title
+  is a static conventional-commit-style placeholder (`"chore: update pull request"`);
+  "What Changed" comes straight from `gitutils.run_git(["diff", "--name-status",
+  f"origin/{default_branch}...{branch}"], ...)`, called directly here per `gitutils.py`'s
+  own anticipated-consumer note rather than needing a second gitutils primitive. #121
+  (blocked by this ticket) replaces the title/"What Changed" section with an agent draft
+  plus this same deterministic fallback; #122 adds a PR-body byte-budget/truncation rule
+  and screenshot/video artifacts. Neither exists yet.
+- Diffs against `origin/<default_branch>`, never the literal local `<default_branch>` ref -
+  mirrors `RebaseStep`'s own `git rebase origin/<default_branch>` for the identical reason:
+  `RebaseStep` runs earlier in this same pipeline and already does `git fetch origin
+  <default_branch>`, which updates the remote-tracking ref, not the local one, so the local
+  ref can be arbitrarily stale (never pulled) by the time `PRStep` runs. Diffing against it
+  would over-report files - everything origin gained since the local ref was last updated,
+  on top of the real feature-branch delta (pinned by a regression test in
+  `tests/steps/test_pr.py`).
+- **"The branch under review" is HEAD**, exactly like `rebase.py`: resolved via
+  `gitutils.current_branch(ctx.cwd)`, never a `StepContext` field. Equal to
+  `default_branch` (a constructor field, same "not auto-detected" reasoning as
+  `RebaseStep`'s own) means skip immediately - no `git diff`/`gh` call at all.
+- Intent/Risk/Testing sections are assembled from the pipeline's own already-computed
+  state: `ctx.intent.summary` for Intent, and `ctx.step_outcomes.get("ReviewStep")` /
+  `ctx.step_outcomes.get("TestSufficiencyStep")` (see `pipeline/AGENTS.md`'s
+  `StepContext.step_outcomes` section) narrowed via `isinstance` against
+  `ReviewOutput`/`TestSufficiencyOutput` imported directly from their sibling step
+  modules - the same runtime import `tui/state.py`'s `latest_findings` already does for
+  identical isinstance-narrowing, not the cross-step prompt-function sharing issue #58
+  prohibited. A missing or wrong-shaped entry (e.g. a `StepContext` built directly in a
+  test with `step_outcomes={}`) omits that section entirely rather than raising or
+  rendering a placeholder heading - `PRStep` must work standalone, not only when driven
+  through the full executor.
+- Find-or-create/update goes through `scm/github.py`: `find_pull_request_for_branch` first,
+  then `create_pull_request` or `update_pull_request` depending on whether one already
+  exists for the branch. `gh_executable: str | Path = "gh"` is the subprocess test seam,
+  mirroring `ReviewStep.executable`.
+- Returns the same empty-findings-shape `StepOutcome(needs_approval=False,
+  auto_fixable=False, payload=[])` on every path (skip, create, update) - a PR isn't a
+  review target with findings to fix, so `supports_fix_round` stays at `Step`'s default
+  `False`.
 
 ## rebase.py
 
@@ -99,8 +137,14 @@ of its own.
   `StepOutcome`, or `Finding`.
 - Left unprefixed (no leading underscore), matching `steps/intent.py`'s
   `wrap_intent`/`redact_secrets`/`strip_adversarial` convention, signalling "safe for a
-  sibling step module to import" — anticipated future consumer is `steps/pr.py`'s
-  deterministic fallback, which will need the same kind of `git diff --name-status` call.
+  sibling step module to import" - realized by `steps/pr.py` (issue #119), which calls
+  `run_git(["diff", "--name-status", ...])` directly for its deterministic "What Changed"
+  section, and by `current_branch` (issue #119, mirrors `ref_sha`'s `None`-on-failure
+  convention), which both `pr.py` and `scm/github.py`'s `resolve_repo_slug` call. The
+  latter is this module's first consumer *outside* `steps/` -- `scm/` importing
+  `steps.gitutils.run_git` (rather than a new `gh`-only subprocess helper) is a deliberate,
+  narrow exception, not a general "scm/ may import steps/" license; see
+  `scm/AGENTS.md`.
 - `run_git` reports itself as a timed activity (Milestone 14, issue #64) for every call it
   makes, with zero changes at any of `rebase.py`'s own call sites — it reaches the running
   step's `ActivityReporter` ambiently (`pipeline.step.current_activity_reporter`), not

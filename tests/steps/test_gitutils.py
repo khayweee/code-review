@@ -39,6 +39,7 @@ import pytest
 from code_review.pipeline.step import current_activity_reporter
 from code_review.steps.gitutils import (
     conflicted_files,
+    current_branch,
     is_ancestor,
     rebase_in_progress,
     ref_sha,
@@ -144,6 +145,27 @@ def test_rebase_in_progress_is_true_once_a_real_rebase_pauses_on_conflict(
     # Clean up so the repo isn't left mid-rebase for any test run after this one.
     asyncio.run(run_git(["rebase", "--abort"], checkout))
     assert rebase_in_progress(checkout) is False
+
+
+# --- current_branch -------------------------------------------------------------------------
+
+
+def test_current_branch_resolves_the_checked_out_branch_name(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    _origin, checkout = origin_and_checkout
+
+    assert asyncio.run(current_branch(checkout)) == "feature"
+
+
+def test_current_branch_returns_none_for_a_detached_head(
+    origin_and_checkout: tuple[Path, Path],
+) -> None:
+    _origin, checkout = origin_and_checkout
+    head_sha = asyncio.run(run_git(["rev-parse", "HEAD"], checkout)).stdout.strip()
+    asyncio.run(run_git(["checkout", "-q", head_sha], checkout))
+
+    assert asyncio.run(current_branch(checkout)) is None
 
 
 # --- ref_sha -------------------------------------------------------------------------------

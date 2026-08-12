@@ -42,12 +42,25 @@ construction. A human's "fix" response at that park is never counted against the
 this executor -- the one place that calls `step.run(ctx)` uniformly -- binds
 `pipeline.step.current_activity_reporter` from `ctx.activity_reporter` around each call
 (`.set()`/`.reset()` in a `try`/`finally`, so a raising step still unbinds it).
+
+**`step_outcomes` threading**: once a step's slot fully settles -- the inner `while True`
+loop has broken, whether because no park was needed or because a park resolved to
+"approve"/"skip" -- this folds `{step_name: outcome}` into the *outer* `ctx.step_outcomes`
+via `dataclasses.replace` and reassigns `ctx` for the next outer-loop iteration to see,
+exactly once per step slot (never once per fix round, and never onto `round_ctx`, which is
+discarded and rebuilt from the updated `ctx` at the top of the next step's slot anyway).
+This is a read-only reporting channel a later step may use to summarize an earlier step's
+already-computed output (e.g. `PRStep` rendering `ReviewStep`'s risk verdict) -- it changes
+no step's execution or the pipeline's step order, so it does not undermine this module's
+"nothing here inspects a prior step's `StepOutcome` to decide whether or how to run the
+next one" invariant; see `pipeline/AGENTS.md` for the full rationale.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from code_review.pipeline.findings import describe_auto_fix_findings
 from code_review.pipeline.step import (
@@ -168,3 +181,9 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
             # "approve"/"skip" both just move on; the caller (tui/app.py) decides how to
             # render the distinction.
             break
+
+        # This step's slot has fully settled (fix rounds, if any, are done) -- fold its
+        # final outcome into the outer ctx's step_outcomes exactly once per step, never once
+        # per round, so a later step can read it. round_ctx (about to be rebuilt for the
+        # next step) is never the target here; only the outer ctx carries this forward.
+        ctx = replace(ctx, step_outcomes={**ctx.step_outcomes, step_name: outcome})

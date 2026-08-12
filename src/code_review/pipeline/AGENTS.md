@@ -130,6 +130,52 @@ fixes first, and a human can request as many manual fix rounds as they want at a
   None` -- since the aggregation happens entirely on the `tui/` side before a park resolves;
   see `tui/AGENTS.md`'s "Findings box" section for the full per-finding decision model.
 
+## Milestone 8: `StepContext.step_outcomes`, a read-only cross-step reporting channel (#119)
+
+`PRStep` (issue #119) needs to summarize `ReviewStep`'s risk verdict and
+`TestSufficiencyStep`'s testing summary in its PR body, but no existing seam let a step
+read a sibling's already-computed `StepOutcome` -- `executor.run_steps`'s `ctx` was never
+reassigned across steps (only `round_ctx` evolved, within one step's own fix-round loop,
+then got discarded). This adds a narrow, read-only, additive extension, deliberately
+mirroring `fix_round`/`with_fix_round`'s own precedent (same file, same shape, low risk):
+
+- `step.py`: `StepContext` gains `step_outcomes: Mapping[str, StepOutcome] =
+  field(default_factory=dict)` -- earlier steps' final outcomes, keyed by
+  `step.get_name()`.
+- `executor.py`'s `run_steps`: once a step's slot fully settles -- the inner `while True`
+  loop has broken, whether via "no park needed" or a park resolving to "approve"/"skip" --
+  one line folds `{step_name: outcome}` into the *outer* `ctx.step_outcomes` via
+  `dataclasses.replace` and reassigns `ctx` for the next outer-loop iteration, exactly once
+  per step slot (never once per fix round, and never onto `round_ctx`, which the next
+  step's slot rebuilds from this updated `ctx` anyway).
+- `pr.py` reads it via `ctx.step_outcomes.get("ReviewStep")` /
+  `ctx.step_outcomes.get("TestSufficiencyStep")`, narrowed with `isinstance` against
+  `ReviewOutput`/`TestSufficiencyOutput` imported directly from their sibling step modules
+  -- the same runtime import `tui/state.py`'s `latest_findings` already does for identical
+  isinstance-narrowing, not the cross-step prompt-function sharing issue #58 prohibited (a
+  plain data-type import is a different thing from importing another step's
+  prompt-assembly function). A missing or wrong-shaped entry is treated as absent -- the
+  section is omitted, never rendered as a placeholder -- so `PRStep` still works when
+  driven directly against a hand-built `StepContext` in a test, not only through the full
+  executor.
+
+**Why this doesn't reverse the "no step decides control flow from a sibling's outcome"
+invariant** (this file's Milestone 2 entry, and `executor.py`'s own module docstring):
+nothing here changes which steps run, their order, or whether/how a step re-runs itself --
+`step_outcomes` is data a step may choose to read for its own *output* (what it puts in its
+own `StepOutcome.payload`), never a signal consulted to decide *whether or how to run*.
+Contrast `fix_round`, which does drive control flow (which prompt-assembly function a step
+calls) but only ever for that same step re-running itself, never a sibling. `step_outcomes`
+crosses that boundary in the opposite, safer direction: read-only, cross-step, but
+execution-inert.
+
+Proven in `tests/pipeline/test_executor.py`'s "step_outcomes threading" section: a
+synthetic `_ReportingStep` records exactly what `ctx.step_outcomes` it was called with,
+proving (a) a later step sees an earlier step's real `StepOutcome`, (b) the first step in a
+run sees an empty `step_outcomes`, and (c) a step that goes through automatic fix rounds
+before settling contributes exactly one entry -- the final, settled outcome -- never a
+stale intermediate round's outcome.
+
 ## Findings rename + closed union
 
 `StepOutcome.findings: object` was accurate but unclear -- the field holds four genuinely

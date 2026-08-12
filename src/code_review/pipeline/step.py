@@ -3,7 +3,10 @@
 `StepContext` is a bag of per-pipeline-run dependencies a step needs (see
 `docs/GLOSSARY.md`'s "run" entry for the pipeline-run vs agent-call distinction): working
 directory, `Agent`, diff, `Intent`, plus fix-loop/approval-park state (`on_approval_needed`,
-`fix_round`).
+`fix_round`), plus `step_outcomes`, a read-only record of earlier steps' already-settled
+`StepOutcome`s a later step may summarize (see that field's own docstring and
+`pipeline/AGENTS.md` for why this doesn't reverse the "no step branches on a sibling's
+outcome" invariant).
 
 `ActivityReporter` is a structural `Protocol` so `pipeline/`/`steps/` never import `tui/`
 directly; satisfied structurally by `tui.activity.ActivityRelay`. `StepContext.
@@ -37,9 +40,9 @@ from __future__ import annotations
 
 import contextvars
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
 
@@ -149,6 +152,16 @@ class StepContext:
     # means a normal run, not a fix round. executor.run_steps is the sole writer, via
     # dataclasses.replace (ctx itself is never mutated).
     fix_round: FixRound | None = None
+    # Read-only reporting channel: outcomes already produced by earlier steps in this
+    # pipeline run, keyed by step.get_name(). executor.run_steps is the sole writer, via
+    # dataclasses.replace, once each step's slot fully settles (after its fix-round loop,
+    # if any, resolves to a final outcome) -- never once per round. A later step may read
+    # this to summarize a sibling's already-computed output (e.g. PRStep rendering
+    # ReviewStep's risk verdict); it is never a signal a step uses to decide whether or how
+    # to run itself or a sibling -- that would reverse the "step order/execution never
+    # branches on a prior StepOutcome" invariant this field is deliberately scoped not to
+    # touch. See pipeline/AGENTS.md for the full rationale.
+    step_outcomes: Mapping[str, StepOutcome] = field(default_factory=dict)
 
     def report_activity(self, label: str) -> AbstractAsyncContextManager[None]:
         """Report one nested unit of work: `async with ctx.report_activity("fetch"): ...`."""
