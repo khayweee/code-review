@@ -1,7 +1,7 @@
 """Correctness/alignment review + risk assessment schema, and `ReviewStep` itself.
 
-`ReviewStep` is not yet added to `steps/registry.py`'s `IMPLEMENTED_STEPS` or wired into
-`cli.py`'s step list; that wiring is a later ticket.
+`ReviewStep` is registered in `steps/registry.py`'s `IMPLEMENTED_STEPS`, which `cli.py`
+builds its step list from directly.
 
 Single prompt, single schema: `ReviewOutput` carries findings *and* required
 `risk_level`/`risk_rationale` together, so the agent structurally cannot return a review

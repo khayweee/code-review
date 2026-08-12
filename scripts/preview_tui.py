@@ -1,5 +1,7 @@
 """Dev-only TUI preview: launches `ReviewApp` against a hand-written fake event stream, with
-no git repo, branch, `--intent`, or `claude` subprocess involved anywhere.
+no real git repo, `--intent`, or `claude` subprocess involved anywhere -- `branch` below is a
+hardcoded display string, not read from an actual checkout, so the Pipeline box's border
+subtitle has something to show while eyeballing styling.
 
 Exists so a styling/layout change to `tui/widgets.py`/`app.py`/`*.tcss` can be eyeballed in
 one command instead of a real `code-review review BRANCH --intent ...` run, which needs a
@@ -35,7 +37,7 @@ from collections.abc import AsyncIterator
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
-from code_review.steps.registry import STEP_REGISTRY
+from code_review.steps.registry import STEP_DISPLAY_NAMES, STEP_REGISTRY
 from code_review.steps.review import ReviewOutput
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
@@ -185,6 +187,8 @@ def main() -> None:
         _fake_events(args.fail, activity_relay, approval_relay),
         activity_relay=activity_relay,
         approval_relay=approval_relay,
+        branch="fix/nil-check",
+        display_names=STEP_DISPLAY_NAMES,
     )
     app.run()
 

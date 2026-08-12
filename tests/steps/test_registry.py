@@ -8,7 +8,7 @@ added out of registry order must fail loudly, not silently render under the wron
 
 from __future__ import annotations
 
-from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_REGISTRY
+from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_DISPLAY_NAMES, STEP_REGISTRY
 
 
 def test_step_registry_is_non_empty() -> None:
@@ -28,3 +28,11 @@ def test_implemented_steps_names_match_the_registrys_prefix_in_order() -> None:
     assert len(IMPLEMENTED_STEPS) <= len(STEP_REGISTRY)
     for registry_name, step_cls in zip(STEP_REGISTRY, IMPLEMENTED_STEPS, strict=False):
         assert step_cls().get_name() == registry_name
+
+
+def test_every_registry_entry_has_a_display_name() -> None:
+    """`STEP_DISPLAY_NAMES` must cover exactly `STEP_REGISTRY`'s entries -- a step added to
+    one but not the other would either render under its raw class name or carry a dead
+    mapping entry."""
+
+    assert set(STEP_DISPLAY_NAMES) == set(STEP_REGISTRY)

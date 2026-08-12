@@ -193,6 +193,29 @@ def test_review_app_leaves_pipeline_box_border_subtitle_unset_when_branch_is_omi
     asyncio.run(scenario())
 
 
+def test_review_app_translates_pipeline_box_row_names_via_display_names() -> None:
+    """`display_names` relabels what's rendered without changing registry order or
+    matching (issue: TUI should show "Review", not "ReviewStep")."""
+
+    async def never_yields() -> AsyncIterator[StepEvent]:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    async def scenario() -> None:
+        app = ReviewApp(
+            REGISTRY,
+            never_yields(),
+            display_names={"IntentStep": "Intent", "RebaseStep": "Rebase", "ReviewStep": "Review"},
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+            assert _pipeline_box_content(box) == "◌ Intent\n◌ Rebase\n◌ Review"
+            app.exit()
+
+    asyncio.run(scenario())
+
+
 def test_review_app_shows_not_yet_implemented_steps_as_pending_throughout_the_run() -> None:
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _one_step_completes())
@@ -861,6 +884,22 @@ def test_review_app_shows_a_findings_box_once_a_step_completes_with_non_empty_fi
             box = app.query_one(FindingsList)
             assert "removes error handling" in _findings_list_content(box)
             assert box.border_title == "Findings -- ReviewStep"
+
+    asyncio.run(scenario())
+
+
+def test_review_app_translates_findings_box_title_via_display_names() -> None:
+    async def scenario() -> None:
+        app = ReviewApp(
+            REGISTRY,
+            _review_step_completes_with_findings(),
+            display_names={"ReviewStep": "Review"},
+        )
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+
+            box = app.query_one(FindingsList)
+            assert box.border_title == "Findings -- Review"
 
     asyncio.run(scenario())
 

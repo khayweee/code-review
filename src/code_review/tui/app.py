@@ -10,12 +10,18 @@ seams (see their own modules): each starts its own worker in `on_mount` only whe
 `branch` is an optional display-only string (the branch under review, already known to
 `cli.py`), read once at startup and handed to `PipelineBox` as its `border_subtitle`; `None`
 shows no subtitle at all.
+
+`display_names` is an optional canonical-name -> friendly-label mapping (e.g.
+`steps.registry.STEP_DISPLAY_NAMES`), applied only where a step name is rendered (Pipeline
+box rows, Findings box title) -- every internal comparison (registry order, `parked_step`,
+`skipped_steps`, activity attribution) still keys off the canonical name from `registry`/
+`StepEvent.step_name`. `None`/`{}` renders every step under its raw canonical name.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 from textual.app import App, ComposeResult
 from textual.timer import Timer
@@ -57,11 +63,15 @@ class ReviewApp(App[None]):
         activity_relay: ActivityRelay | None = None,
         approval_relay: ApprovalRelay | None = None,
         branch: str | None = None,
+        display_names: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
         # Not `_registry` -- shadows `textual.app.App`'s own mounted-widget registry.
         self._step_registry = tuple(registry)
         self._events = events
+        # Canonical step name (`registry`/`StepEvent.step_name`) -> friendly label, e.g.
+        # `steps.registry.STEP_DISPLAY_NAMES`. `{}` renders every row under its raw name.
+        self._display_names = display_names or {}
         # None disables the corresponding worker in `on_mount` below.
         self._input_relay = input_relay
         self._activity_relay = activity_relay
@@ -118,6 +128,7 @@ class ReviewApp(App[None]):
             parked_step=self._parked_step,
             skipped_steps=self._skipped_steps,
             activity_events=_tag_activity_events(self._seen, self._activity_events),
+            display_names=self._display_names,
         )
 
     def _render(self) -> None:
@@ -151,10 +162,11 @@ class ReviewApp(App[None]):
                 box.remove()
         else:
             step_name, output = result
+            display_name = self._display_names.get(step_name, step_name)
             if boxes:
-                boxes[0].update_findings(output, step_name)
+                boxes[0].update_findings(output, display_name)
             else:
-                self.mount(FindingsList(output, step_name))
+                self.mount(FindingsList(output, display_name))
 
     def _render_status(self) -> None:
         """Mount, update in place, or remove the Status box; appears only once

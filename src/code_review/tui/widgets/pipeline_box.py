@@ -110,7 +110,8 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
         spinners.pop(row.name, None)
         dot_style = _STATUS_DOT_STYLES.get(row.status)
         icon: Spinner | Text = (
-            Text(_DOT_ICON, style=dot_style) if dot_style else Text(_STATUS_ICONS[row.status])
+            Text(_DOT_ICON, style=dot_style) if dot_style else Text(
+                _STATUS_ICONS[row.status])
         )
         row_text = Text(row.name)
     else:
@@ -168,7 +169,7 @@ class PipelineBox(_BorderedBox):
         self._spinners: dict[str, Spinner] = {}
         super().__init__(render_rows_live(rows, self._spinners), id=id, classes=classes)
         self._rows = list(rows)
-        self.border_title = "Agentic Code Review Pipeline"
+        self.border_title = "Agentic Code-Review Pipeline"
         # None (no branch passed) leaves no border_subtitle at all -- "no box, not a
         # placeholder", same discipline the Findings/Status boxes already follow.
         if branch is not None:
