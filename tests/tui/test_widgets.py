@@ -17,8 +17,7 @@ import pytest
 from rich.console import Console
 from rich.spinner import Spinner
 from textual.app import App, ComposeResult
-
-# from textual.color import Color
+from textual.color import Color
 from textual.widgets import Input, ListItem, Static
 
 from code_review.pipeline.findings import Finding
@@ -935,11 +934,9 @@ def test_findings_suggestion_has_a_suggestion_border_title() -> None:
 
 def test_findings_suggestion_custom_entry_is_styled_a_muted_gray_distinct_from_entries() -> None:
     """ "Chat about it" (`self._custom`, the `.-custom-entry` class) should read as "type
-    your own", not another agent-generated suggestion -- styled `$text-muted`
-    (`findings_suggestion.tcss`), distinct from the plain-foreground suggestion entries
-    above it in `self._entries`. Checked at the style-rule level (`has_rule`/`.a`, the same
-    empirical approach used for the highlight-color fix above) rather than a hardcoded
-    hex, since `$text-muted` is itself an auto-contrast token."""
+    your own", not another agent-generated suggestion -- styled `$fg-secondary`
+    (`findings_suggestion.tcss`/`tokens.tcss`), distinct from the plain-foreground
+    suggestion entries above it in `self._entries`."""
 
     async def scenario() -> None:
         output = ReviewOutput(
@@ -965,13 +962,11 @@ def test_findings_suggestion_custom_entry_is_styled_a_muted_gray_distinct_from_e
             entries_static, custom_static = suggestion.query(Static)
 
             assert custom_static.has_class("-custom-entry")
-            # `$text-muted` = "auto 60%" -- our rule sets its own `color`/`auto-color`
-            # directly on this node, at 60% alpha, distinct from `_entries`, which has no
-            # `color` rule of its own at all (it inherits the highlighted row's own
-            # `$primary`, at full alpha).
+            # This node sets its own `color` directly, distinct from `_entries`, which has
+            # no `color` rule of its own at all (it inherits the highlighted row's own
+            # foreground, at full alpha).
             assert custom_static.styles.has_rule("color")
-            assert custom_static.styles.color.a == pytest.approx(0.6)
-            assert custom_static.styles.auto_color is True
+            assert custom_static.styles.color == Color.parse("#949494")
             assert not entries_static.styles.has_rule("color")
 
             box._quick_decision("abort")

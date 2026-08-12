@@ -1,1 +1,21 @@
+/* Design tokens: the palette of record for every .tcss file under tui/widgets/ (see
+base.py's DEFAULT_CSS pattern) and, by matching hex value, styles.py's Rich-string color
+constants. Named distinctly from Textual's own reserved variables (background/surface/
+border/text-*) so a value defined here can never be silently shadowed by Textual's theme. */
+
+$bg: #0b0f17;
+$bg-surface: #131a24;
+
+$border-color: #2c3b4a;
+$border-color-muted: #1c2733;
+
+$fg: #e6e9ef;
+$fg-secondary: #949494;
+$fg-muted: #5f6b78;
+
 $highlight: #8fdb65;
+
+$status-completed: #5fafff;
+$status-failed: #bb6400;
+$status-parked: #d7af00;
+$status-skipped: #8a8a8a;

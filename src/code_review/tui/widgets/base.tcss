@@ -1,5 +1,7 @@
 _BorderedBox {
-    border: round $primary;
+    background: $bg-surface;
+    color: $fg;
+    border: round $border-color;
     padding: 0 1;
     height: auto;
 }
