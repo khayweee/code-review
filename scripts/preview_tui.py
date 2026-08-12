@@ -37,8 +37,10 @@ from collections.abc import AsyncIterator
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
+from code_review.steps.intent import Intent
 from code_review.steps.registry import STEP_DISPLAY_NAMES, STEP_REGISTRY
 from code_review.steps.review import ReviewOutput
+from code_review.steps.test_sufficiency import TestArtifact, TestSufficiencyOutput
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
 from code_review.tui.approval_relay import ApprovalRelay
@@ -47,12 +49,24 @@ from code_review.tui.approval_relay import ApprovalRelay
 # whole preview run finishes in a few seconds.
 _STEP_DELAY = 3.6
 
-_NO_FINDINGS = StepOutcome(needs_approval=False, auto_fixable=False, findings=None)
+# No-findings outcome, generic across the steps whose payload is a plain list[Finding]
+# (RebaseStep, PRStep) -- see StepOutcome.payload's closed-union docstring.
+_NO_FINDINGS = StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+
+_INTENT_OUTCOME = StepOutcome(
+    needs_approval=False,
+    auto_fixable=False,
+    payload=Intent(
+        summary="Preview the TUI's styling without a real git repo or `claude` subprocess.",
+        source="explicit",
+        score=1.0,
+    ),
+)
 
 _REVIEW_FINDINGS = StepOutcome(
     needs_approval=True,
     auto_fixable=False,
-    findings=ReviewOutput(
+    payload=ReviewOutput(
         findings=[
             Finding(
                 severity="error",
@@ -85,12 +99,29 @@ _REVIEW_FINDINGS = StepOutcome(
     ),
 )
 
+_TEST_SUFFICIENCY_OUTCOME = StepOutcome(
+    needs_approval=False,
+    auto_fixable=False,
+    payload=TestSufficiencyOutput(
+        findings=[],
+        tested=["ReviewApp renders a completed step's findings box."],
+        testing_summary="Existing TUI tests cover the happy path end to end.",
+        artifacts=[
+            TestArtifact(
+                kind="existing-test",
+                description="Pilot-driven test asserts the findings box renders.",
+                location="tests/tui/test_app.py:42",
+            )
+        ],
+    ),
+)
+
 
 async def _fake_events(
     fail: bool, activity_relay: ActivityRelay, approval_relay: ApprovalRelay
 ) -> AsyncIterator[StepEvent]:
-    """Steps in `STEP_REGISTRY` order. `PRStep` has no class yet (see `registry.py`), so it
-    is left out entirely and renders as a pending placeholder, matching a real run today.
+    """Steps in `STEP_REGISTRY` order, all five with a class today (see `registry.py`), so
+    none render as a pending placeholder.
 
     Each step's `activities` list stands in for the nested sub-step activity issues #64/#65
     report for real (`RebaseStep`'s individual `git fetch`/`git rebase` calls, `ReviewStep`'s
@@ -112,14 +143,21 @@ async def _fake_events(
     """
 
     steps: list[tuple[str, StepOutcome, list[tuple[str, float]]]] = [
-        ("IntentStep", _NO_FINDINGS, []),
+        ("IntentStep", _INTENT_OUTCOME, []),
         (
             "RebaseStep",
             _NO_FINDINGS,
             [("git fetch origin", 0.5), ("git rebase origin/main", 0.5)],
         ),
         ("ReviewStep", _REVIEW_FINDINGS, [("claude review call", 1.0)]),
-        ("TestSufficiencyStep", _NO_FINDINGS, [("claude test-sufficiency call", 0.7)]),
+        (
+            "TestSufficiencyStep",
+            _TEST_SUFFICIENCY_OUTCOME,
+            [("claude test-sufficiency call", 0.7)],
+        ),
+        # No activities -- steps/pr.py reports none for real (no ctx.report_activity call
+        # anywhere in it or scm/github.py), matching IntentStep's "reports none" case above.
+        ("PRStep", _NO_FINDINGS, []),
     ]
 
     for name, outcome, activities in steps:
