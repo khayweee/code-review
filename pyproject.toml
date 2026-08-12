@@ -24,6 +24,7 @@ packages = ["src/code_review"]
 dev = [
     "mypy>=1.11",
     "pytest>=8",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.6",
 ]
 

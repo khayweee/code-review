@@ -12,9 +12,11 @@ Runs a fixed sequence of review steps end to end for the first time.
   with no branching on any prior step's `StepOutcome`; order is a property of the caller's
   list, never of anything a step returns.
 - `Step.run` is `async`, mirroring the `agent/` layer's async contract.
-- `StepOutcome.findings` is typed as bare `object` (pre-dates Milestone 5's `Finding`
-  schema); a step narrows it back via `isinstance` (see `tests/pipeline/test_executor.py`'s
-  `ReviewFindings`/`OrderProbe`).
+- `StepOutcome.findings` was typed as bare `object` (pre-dates Milestone 5's `Finding`
+  schema); a step narrowed it back via `isinstance` (see `tests/pipeline/test_executor.py`'s
+  `ReviewFindings`/`OrderProbe`). A later refactor renamed it to `payload` and closed the
+  type to `list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent` -- see "Findings
+  rename + closed union" below.
 
 ## Milestone 5 (#26)
 
@@ -128,7 +130,25 @@ fixes first, and a human can request as many manual fix rounds as they want at a
   None` -- since the aggregation happens entirely on the `tui/` side before a park resolves;
   see `tui/AGENTS.md`'s "Findings box" section for the full per-finding decision model.
 
-## Open
+## Findings rename + closed union
 
-- #78: suggestion-selection/`EditStep`/yolo-mode.
-- Milestone 9 owns the head-continuity guard's exact comparison rule.
+`StepOutcome.findings: object` was accurate but unclear -- the field holds four genuinely
+different shapes (bare `list[Finding]`, `ReviewOutput`, `TestSufficiencyOutput`, or
+`IntentStep`'s bare `Intent`, which isn't findings at all), and every consumer already
+duck-typed its way back to one of those four via `isinstance`/`getattr`.
+
+- Renamed to `payload` (it isn't always findings -- `IntentStep` uses it to carry `ctx.intent`
+  forward) and typed as the closed union `list[Finding] | ReviewOutput |
+  TestSufficiencyOutput | Intent` instead of bare `object`.
+- `step.py` `TYPE_CHECKING`-imports `Finding`/`ReviewOutput`/`TestSufficiencyOutput` alongside
+  the existing `Intent` import, same narrow exception to `steps/` depends on `pipeline/`.
+- `pipeline/findings.py`'s `describe_auto_fix_findings` still can't `isinstance`-check
+  `ReviewOutput`/`TestSufficiencyOutput` at runtime (they're `TYPE_CHECKING`-only imports
+  here too), so it keeps a `getattr(payload, "findings", None)` duck-typed fallback for that
+  branch even though the parameter's static type is now the closed union -- the closed type
+  documents the contract for callers; the layering rule still forces duck-typing at this one
+  call site.
+- `tui/state.py`'s `latest_findings` already imports `ReviewOutput`/`TestSufficiencyOutput` at
+  runtime (`tui/` depends on `steps/`), so its `isinstance` narrowing there needed no
+  duck-typing workaround, and the closed union let it drop a now-redundant
+  `isinstance(findings[0], Finding)` check on the list branch.

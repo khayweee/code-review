@@ -55,8 +55,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import IO
+from typing import IO, NamedTuple
 
 import pytest
 import typer
@@ -385,6 +386,169 @@ def _code_review_executable() -> str:
     return str(Path(sys.executable).parent / "code-review")
 
 
+class _ReviewRun(NamedTuple):
+    """A finished real-pty `review` run plus the process-group id its whole subprocess tree
+    (`script` -> shell -> `code-review`) shares -- `start_new_session=True` below makes the
+    `script` process its own session/group leader, so every descendant inherits that same
+    pgid for its entire life, surviving even the reparenting to init that happens once
+    `script` itself is reaped (see `_assert_no_leftover_code_review_process`)."""
+
+    result: subprocess.CompletedProcess[str]
+    pgid: int
+
+
+def _drain_in_background(stream: IO[str], chunks: list[str]) -> threading.Thread:
+    """Start (and return, already started) a daemon thread appending `stream`'s lines to
+    `chunks` as they arrive. `PipelineBox`'s own 4-times-a-second repaint (`_TICK_INTERVAL`)
+    writes enough escape-code-heavy output that leaving a real pty child's output pipe
+    undrained across a multi-second wait can fill its kernel buffer and block the child's
+    own write -- wedging its single-threaded event loop, including the very stdin-read task
+    that would otherwise pick up the next keypress. Observed directly while developing
+    `_run_review_with_keypresses`: an earlier version that only read output via
+    `communicate()` at the very end reproduced this deadlock intermittently (a keypress sent
+    during an undrained wait window silently dropped, sometimes, depending on how much had
+    already been rendered) -- draining throughout, in both real-pty helpers below, removes
+    the dependency on wait length entirely."""
+
+    def _drain() -> None:
+        for line in iter(stream.readline, ""):
+            chunks.append(line)
+
+    thread = threading.Thread(target=_drain, args=())
+    thread.start()
+    return thread
+
+
+class _LiveOutput:
+    """Live-tails a real pty child's stdout, built once per real-pty helper below and
+    shared by every wait against that one process's output.
+
+    Keeps only the last `_TAIL_SIZE` characters drained so far, not the whole growing
+    history: re-scanning everything drained-since-the-start on every ~20ms poll tick (this
+    file's first version of this class) is an O(n^2) CPU cost that, at `PipelineBox`'s
+    repaint volume (`_TICK_INTERVAL`, 1000+ drained lines over a few parked seconds), was
+    itself enough to starve the real subprocesses these waits exist to observe once several
+    of these tests ran concurrently under pytest-xdist (`-n auto`) -- reproduced directly,
+    not theorized: a dozen test processes each repeatedly re-joining a
+    thousands-of-lines-and-growing buffer 50 times a second pushed a real `code-review
+    review` subprocess past its own 30-second `process.wait` timeout. `_TAIL_SIZE` only
+    needs to comfortably outlast one full-screen repaint (a few KB, empirically), not the
+    whole run.
+    """
+
+    _TAIL_SIZE = 16384
+
+    def __init__(self, chunks: list[str]) -> None:
+        self._chunks = chunks
+        self._read_upto = 0
+        self._tail = ""
+
+    def _absorb_new(self) -> None:
+        new = self._chunks[self._read_upto :]
+        if new:
+            self._read_upto = len(self._chunks)
+            self._tail = (self._tail + "".join(new))[-self._TAIL_SIZE :]
+
+    def current(self) -> str:
+        """The last `_TAIL_SIZE` characters drained so far, absorbing whatever's newly
+        arrived first."""
+
+        self._absorb_new()
+        return self._tail
+
+    def wait_until(self, predicate: Callable[[str], bool], timeout: float) -> bool:
+        """Poll `self.current()` against `predicate` until it returns `True` or `timeout`
+        elapses, returning whether it ever matched. `timeout` is a real, generous safety
+        margin callers size against the run's own worst-case duration -- an upper bound,
+        not an unconditional wait -- so this returns fast on the normal path (`predicate`
+        is driven by a real subprocess call or a real `git` operation finishing, not a
+        fixed duration) and degrades to `time.sleep(timeout)` when `predicate` never
+        matches (e.g. `_PARK_MARKER` while sending "f", which mounts the chat `Input`
+        without changing the Findings box's own border title -- see
+        `_run_review_with_keypresses`'s docstring)."""
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate(self.current()):
+                return True
+            time.sleep(0.02)
+        return predicate(self.current())
+
+
+_DONE_MARKER = "Press 'e' to exit."  # `state.final_status_message`'s own closing line
+_PARK_MARKER = "Findings --"  # `FindingsList.border_title`'s own fixed prefix
+# `FindingsList._set_footer_hint`'s own live progress readout, e.g. "1/2 decided".
+_DECIDED_RE = re.compile(r"(\d+)/(\d+) decided")
+
+
+def _latest_decided_progress(text: str) -> tuple[int, int] | None:
+    matches = _DECIDED_RE.findall(text)
+    return (int(matches[-1][0]), int(matches[-1][1])) if matches else None
+
+
+def _send_key(process: subprocess.Popen[str], key: str) -> None:
+    assert process.stdin is not None
+    process.stdin.write(key)
+    process.stdin.flush()
+
+
+def _send_key_confirmed(
+    process: subprocess.Popen[str], output: _LiveOutput, key: str, timeout: float
+) -> None:
+    """Write `key` to the parked app's stdin and confirm it actually landed, retrying
+    once (by resending the identical `key`) if not.
+
+    Confirmation reads `FindingsList`'s own live "N/M decided" progress counter
+    (`_latest_decided_progress`) -- the only signal that distinguishes "this specific
+    decision was recorded" from "a park is still showing". `_PARK_MARKER` alone can't:
+    `FindingsList`'s border title re-renders identically on every ~250ms repaint tick
+    regardless of whether anything changed, so waiting for it to merely reappear after a
+    keypress (this file's first version of this helper) returns almost immediately whether
+    or not that keypress actually arrived. "Progress" here is either the decided count
+    changing (including to/from `None`, covering a decision that resolves the whole park
+    -- the box unmounts, then either a new park's own fresh count or nothing appears until
+    `_DONE_MARKER` does) or `_DONE_MARKER` itself showing up.
+
+    Resending is safe here specifically because every keypress this file actually sends is
+    idempotent against "already applied": "s" on an already-open park advances to skip the
+    *next* undecided row (never re-decides the one just skipped), "x" aborts
+    unconditionally, and "e" only matters once `_DONE_MARKER` is showing, so a duplicate
+    lands on a screen with nothing left listening for it.
+
+    This exists because a real pty relayed through the `script` command has been observed,
+    under pytest-xdist (`-n auto`) running many of these tests concurrently, to
+    occasionally drop a byte written to its own stdin -- confirmed directly via Python's
+    `faulthandler`, not theorized: the real `code-review review` process was found
+    completely idle (every thread parked in a blocking read/select, nothing spinning or
+    holding a lock) waiting for a keystroke that plainly never reached its terminal
+    driver."""
+
+    baseline = _latest_decided_progress(output.current())
+
+    def _progressed(text: str) -> bool:
+        return _DONE_MARKER in text or _latest_decided_progress(text) != baseline
+
+    _send_key(process, key)
+    if output.wait_until(_progressed, timeout):
+        return
+    _send_key(process, key)
+    output.wait_until(_progressed, timeout)
+
+
+def _send_e_and_confirm_exit(process: subprocess.Popen[str], timeout: float) -> None:
+    """Send "e" and confirm the process actually starts exiting, resending once if not --
+    the same dropped-keystroke safety net `_send_key_confirmed` documents, specialized for
+    the closing "e", which has no `_PARK_MARKER`/"N/M decided"-style content signal of its
+    own to poll (the app just exits; there's nothing left to render)."""
+
+    _send_key(process, "e")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and process.poll() is None:
+        time.sleep(0.02)
+    if process.poll() is None:
+        _send_key(process, "e")
+
+
 def _run_review_and_press_e_to_exit(
     args: list[str],
     cwd: Path,
@@ -392,19 +556,22 @@ def _run_review_and_press_e_to_exit(
     wait_before_keypress: float = 4.0,
     timeout: float = 30.0,
     env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> _ReviewRun:
     """Like `_run_in_real_pty`, but for a full `review` run that reaches `ReviewApp`'s
     Status box. The app no longer exits itself once its event stream ends (see
-    `tui/app.py`'s module docstring) -- it waits for "e" -- so this waits
-    `wait_before_keypress` seconds for the pipeline to finish, then sends "e" to close it.
-    A generous margin over the run's own real duration (well under two seconds even with
-    all four steps running -- `IntentStep`/`RebaseStep` are pure local `git`, and
-    `ReviewStep`/`TestSufficiencyStep` each spawn one fake `claude` process that drains
-    stdin and prints immediately), not a tight one, since this is a real subprocess and
-    terminal, not a mock. `env` defaults to `None` (inherit this process's own
-    environment); the full-run tests below pass `_env_with_fake_claude`'s result so
-    `ReviewStep`/`TestSufficiencyStep`'s `ClaudeCLI` calls resolve a fake `claude` on
-    `PATH` instead of hanging or failing waiting for a real one."""
+    `tui/app.py`'s module docstring) -- it waits for "e" -- so this waits up to
+    `wait_before_keypress` seconds for `_DONE_MARKER` to appear (see `_LiveOutput.
+    wait_until`), then sends "e" to close it, resending once if the process doesn't
+    actually start exiting (see `_send_e_and_confirm_exit`). `wait_before_keypress`'s
+    default is a generous upper bound over the run's own real duration (well under two
+    seconds even with all four steps running -- `IntentStep`/`RebaseStep` are pure local
+    `git`, and `ReviewStep`/`TestSufficiencyStep` each spawn one fake `claude` process that
+    drains stdin and prints immediately), not a tight one, since this is a real subprocess
+    and terminal, not a mock -- but the actual wait is normally a small fraction of it.
+    `env` defaults to `None` (inherit this process's own environment); the full-run tests
+    below pass `_env_with_fake_claude`'s result so `ReviewStep`/`TestSufficiencyStep`'s
+    `ClaudeCLI` calls resolve a fake `claude` on `PATH` instead of hanging or failing
+    waiting for a real one."""
 
     process = subprocess.Popen(
         _script_argv(args),
@@ -414,11 +581,32 @@ def _run_review_and_press_e_to_exit(
         stderr=subprocess.PIPE,
         text=True,
         env=env,
+        start_new_session=True,
     )
-    time.sleep(wait_before_keypress)
-    stdout, stderr = process.communicate(input="e", timeout=timeout)
-    assert process.returncode is not None
-    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+    pgid = process.pid
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_thread = _drain_in_background(process.stdout, stdout_chunks)
+    stderr_thread = _drain_in_background(process.stderr, stderr_chunks)
+    output = _LiveOutput(stdout_chunks)
+
+    output.wait_until(lambda text: _DONE_MARKER in text, timeout=wait_before_keypress)
+    _send_e_and_confirm_exit(process, timeout=1.0)
+    process.stdin.close()
+
+    process.wait(timeout=timeout)
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+    return _ReviewRun(
+        subprocess.CompletedProcess(
+            process.args, process.returncode, "".join(stdout_chunks), "".join(stderr_chunks)
+        ),
+        pgid,
+    )
 
 
 def _run_review_with_keypresses(
@@ -429,38 +617,27 @@ def _run_review_with_keypresses(
     final_wait: float = 3.0,
     timeout: float = 30.0,
     env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> _ReviewRun:
     """Like `_run_review_and_press_e_to_exit`, generalized to send an ordered sequence of
-    `(delay_seconds, key)` pairs -- issue #80's approval park needs at least one keypress
+    `(max_wait_seconds, key)` pairs -- issue #80's approval park needs at least one keypress
     answered on the parked `FindingsBox` *before* the run reaches its own Status box, unlike
-    every prior full-run test here, which only ever needs the final "e". `key` is written
-    directly to the child's stdin after sleeping `delay_seconds`, and need not be a single
-    character -- e.g. resolving via the inline chat's `Input` writes the typed text plus a
-    trailing `"\r"` (Enter, submitting it) as one `key` string. It must NOT also include the
-    "f" that opens the chat in that same string, though: "f" only mounts and focuses the
-    chat's `Input` asynchronously, so text written in the very same `stdin.write()` call can
-    arrive (and be silently dropped, with nothing yet focused to receive it) before that
-    mount has actually happened -- confirmed empirically against this Textual version, not
-    just reasoned about. "f" and the typed text must be two separate tuples, e.g. `(3.0,
-    "f")` then `(0.5, "looks good\r")`, giving the chat a moment to actually open before
-    anything is typed into it. A single `"s"` or `"x"` needs no such split -- each resolves
-    a park directly (skip/abort, the two global bindings besides chat), with no widget to
-    mount or focus first. The same "generous margin over the run's own real duration, not a
-    tight one" reasoning `_run_review_and_press_e_to_exit` already documents applies to
-    every `delay_seconds` here. `final_wait` is the margin before the closing "e".
-
-    Unlike `_run_review_and_press_e_to_exit` (a single `time.sleep` immediately followed by
-    `communicate()`), this drains `stdout`/`stderr` continuously on background threads for
-    the whole run, not just after the last keypress: `PipelineBox`'s own 4-times-a-second
-    repaint (`_TICK_INTERVAL`) writes enough escape-code-heavy output that leaving the
-    child's pty output pipe undrained across *multiple* waits (several seconds each, one
-    per keypress plus `final_wait`) can fill its kernel buffer and block the child's own
-    write -- wedging its single-threaded event loop, including the very stdin-read task
-    that would otherwise pick up the next keypress. Observed directly while developing this
-    helper: an earlier version that only read output via `communicate()` at the very end
-    reproduced this deadlock intermittently (a keypress sent during an undrained wait
-    windows to be silently dropped, sometimes, depending on how much had already been
-    rendered) -- draining throughout removes the dependency on wait length entirely.
+    every prior full-run test here, which only ever needs the final "e". The first keypress
+    waits up to its own `max_wait_seconds` for `_PARK_MARKER` (see `_LiveOutput.wait_until`)
+    -- a park has to exist before anything can be sent to it -- then every keypress,
+    including that first one, is written and confirmed via `_send_key_confirmed`, each
+    against its own `max_wait_seconds` budget. `key` need not be a single character -- e.g.
+    resolving via the inline chat's `Input` writes the typed text plus a trailing `"\r"`
+    (Enter, submitting it) as one `key` string. It must NOT also include the "f" that opens
+    the chat in that same string, though: "f" only mounts and focuses the chat's `Input`
+    asynchronously, so text written in the very same `stdin.write()` call can arrive (and be
+    silently dropped, with nothing yet focused to receive it) before that mount has actually
+    happened -- confirmed empirically against this Textual version, not just reasoned about.
+    "f" and the typed text must be two separate tuples, e.g. `(3.0, "f")` then `(0.5, "looks
+    good\r")` -- `_send_key_confirmed` has no content signal for "f" specifically (opening
+    the chat doesn't change `FindingsList`'s "N/M decided" counter), so it degrades to
+    sending it, sleeping the full `max_wait_seconds`, then resending once more and sleeping
+    again, before the second tuple's own wait covers the mount. `final_wait` is the same
+    kind of upper bound, now against `_DONE_MARKER`, before the closing "e".
     """
 
     process = subprocess.Popen(
@@ -471,37 +648,38 @@ def _run_review_with_keypresses(
         stderr=subprocess.PIPE,
         text=True,
         env=env,
+        start_new_session=True,
     )
+    pgid = process.pid
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
 
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
+    stdout_thread = _drain_in_background(process.stdout, stdout_chunks)
+    stderr_thread = _drain_in_background(process.stderr, stderr_chunks)
+    output = _LiveOutput(stdout_chunks)
 
-    def _drain(stream: IO[str], chunks: list[str]) -> None:
-        for line in iter(stream.readline, ""):
-            chunks.append(line)
+    first_wait, first_key = keypresses[0]
+    output.wait_until(lambda text: _PARK_MARKER in text, timeout=first_wait)
+    _send_key_confirmed(process, output, first_key, timeout=first_wait)
+    for max_wait, key in keypresses[1:]:
+        _send_key_confirmed(process, output, key, timeout=max_wait)
 
-    stdout_thread = threading.Thread(target=_drain, args=(process.stdout, stdout_chunks))
-    stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr_chunks))
-    stdout_thread.start()
-    stderr_thread.start()
-
-    for delay, key in keypresses:
-        time.sleep(delay)
-        process.stdin.write(key)
-        process.stdin.flush()
-    time.sleep(final_wait)
-    process.stdin.write("e")
+    output.wait_until(lambda text: _DONE_MARKER in text, timeout=final_wait)
+    _send_e_and_confirm_exit(process, timeout=1.0)
     process.stdin.close()
 
     process.wait(timeout=timeout)
     stdout_thread.join(timeout=5)
     stderr_thread.join(timeout=5)
 
-    return subprocess.CompletedProcess(
-        process.args, process.returncode, "".join(stdout_chunks), "".join(stderr_chunks)
+    return _ReviewRun(
+        subprocess.CompletedProcess(
+            process.args, process.returncode, "".join(stdout_chunks), "".join(stderr_chunks)
+        ),
+        pgid,
     )
 
 
@@ -518,20 +696,36 @@ def test_review_rejects_empty_intent_under_a_real_terminal(
     assert "must be non-empty" in _plain(result.stdout)
 
 
-def _assert_no_leftover_code_review_process() -> None:
+def _assert_no_leftover_code_review_process(pgid: int) -> None:
     """`script`'s own child (the shell that execs `code-review`) is a grandchild of this
-    test process, not a direct child -- `communicate()` in the caller above only guarantees
-    `script` itself has been reaped, not that init has finished reaping that orphaned
-    grandchild too. Poll briefly rather than asserting once immediately after
-    `communicate()` returns, so that reaping delay can't turn into a flaky failure."""
+    test process, not a direct child -- `communicate()`/`process.wait()` in the callers
+    above only guarantee `script` itself has been reaped, not that init has finished
+    reaping that orphaned grandchild too. Poll briefly rather than asserting once
+    immediately after, so that reaping delay can't turn into a flaky failure.
+
+    Scoped to `pgid` (not a bare machine-wide `ps` scan) so this stays correct when other
+    tests in this same file run concurrently under pytest-xdist, each with its own
+    `code-review review` subprocess alive at the same time: `start_new_session=True` in
+    both helpers above makes `script` a session/process-group leader, and every descendant
+    it spawns inherits that same pgid for its whole life -- reparenting to init on `script`
+    exiting changes ppid, never pgid, so this still finds an orphaned grandchild the plain
+    parent-child walk above can't."""
 
     for _ in range(20):
-        ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, check=True)
-        if "code-review review" not in ps.stdout:
+        ps = subprocess.run(["ps", "-eo", "pgid,args"], capture_output=True, text=True, check=True)
+        rows = ps.stdout.splitlines()[1:]
+        leftover = [
+            row
+            for row in rows
+            if row.split(maxsplit=1)[:1] == [str(pgid)] and "code-review review" in row
+        ]
+        if not leftover:
             break
         time.sleep(0.1)
     else:
-        raise AssertionError("'code-review review' still present in `ps` output")
+        raise AssertionError(
+            f"'code-review review' still present in process group {pgid}'s own `ps` output"
+        )
 
 
 def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
@@ -549,11 +743,12 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
 
-    result = _run_review_and_press_e_to_exit(
+    run = _run_review_and_press_e_to_exit(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         env=env,
     )
+    result = run.result
     output = _plain(result.stdout)
 
     assert result.returncode == 0
@@ -562,7 +757,7 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
-    _assert_no_leftover_code_review_process()
+    _assert_no_leftover_code_review_process(run.pgid)
 
 
 def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_the_run(
@@ -587,12 +782,13 @@ def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_th
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(BLOCKING_FAKE_CLAUDE, tmp_path)
 
-    result = _run_review_with_keypresses(
+    run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         keypresses=[(3.0, "s"), (2.0, "s")],
         env=env,
     )
+    result = run.result
     output = _plain(result.stdout)
 
     assert result.returncode == 0
@@ -608,7 +804,7 @@ def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_th
     # assertion itself, not something this change introduced.
     assert "drops error handling" in output
 
-    _assert_no_leftover_code_review_process()
+    _assert_no_leftover_code_review_process(run.pgid)
 
 
 def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
@@ -624,19 +820,20 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(BLOCKING_TWO_FINDINGS_FAKE_CLAUDE, tmp_path)
 
-    result = _run_review_with_keypresses(
+    run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         keypresses=[(3.0, "s"), (1.0, "s"), (2.0, "s"), (1.0, "s")],
         env=env,
     )
+    result = run.result
     output = _plain(result.stdout)
 
     assert "Traceback" not in output
     assert result.returncode == 0
     assert "Pipeline ran successfully." in output
 
-    _assert_no_leftover_code_review_process()
+    _assert_no_leftover_code_review_process(run.pgid)
 
 
 # --- The approval park, proven against RebaseStep's real, already-shipped guard (#80) ----
@@ -656,11 +853,12 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
 
     repo, branch, unpushed_sha = repo_with_unpushed_local_default_commits
 
-    result = _run_review_with_keypresses(
+    run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         keypresses=[(3.0, "x")],
     )
+    result = run.result
     output = _plain(result.stdout)
 
     assert result.returncode == 1
@@ -674,7 +872,7 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     # ever started.
     assert "◌ Review" in output
 
-    _assert_no_leftover_code_review_process()
+    _assert_no_leftover_code_review_process(run.pgid)
 
 
 def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continues(
@@ -693,12 +891,13 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
     repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
     env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
 
-    result = _run_review_with_keypresses(
+    run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         keypresses=[(3.0, "s")],
         env=env,
     )
+    result = run.result
     output = _plain(result.stdout)
 
     assert result.returncode == 0
@@ -707,7 +906,7 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
-    _assert_no_leftover_code_review_process()
+    _assert_no_leftover_code_review_process(run.pgid)
 
 
 def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park(
@@ -728,12 +927,13 @@ def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(AUTO_FIX_ROUND_FAKE_CLAUDE, tmp_path)
 
-    result = _run_review_and_press_e_to_exit(
+    run = _run_review_and_press_e_to_exit(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         wait_before_keypress=5.0,  # one extra fake-claude call over the other full-run tests
         env=env,
     )
+    result = run.result
     output = _plain(result.stdout)
 
     assert result.returncode == 0
@@ -742,4 +942,4 @@ def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
-    _assert_no_leftover_code_review_process()
+    _assert_no_leftover_code_review_process(run.pgid)

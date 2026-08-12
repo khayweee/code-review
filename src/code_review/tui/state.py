@@ -197,9 +197,10 @@ def latest_findings(
     """Return the most recently completed step's name paired with its
     `ReviewOutput`/`TestSufficiencyOutput`/bare `list[Finding]`, or `None` if none exists.
 
-    A `"completed"` event counts only when `outcome.findings` is one of those three shapes
-    (other steps' outcomes carry other types) and non-empty. Scans `events` in order and
-    keeps the last match, so most-recent-completion wins rather than accumulating history.
+    A `"completed"` event counts only when `outcome.payload` is one of those three shapes
+    (`IntentStep`'s outcome carries a bare `Intent`, not findings) and non-empty. Scans
+    `events` in order and keeps the last match, so most-recent-completion wins rather than
+    accumulating history.
     """
 
     result: tuple[str, ReviewOutput | TestSufficiencyOutput | list[Finding]] | None = None
@@ -209,11 +210,11 @@ def latest_findings(
         outcome = event.outcome
         if outcome is None:
             continue
-        findings = outcome.findings
-        if isinstance(findings, (ReviewOutput, TestSufficiencyOutput)) and findings.findings:
-            result = (event.step_name, findings)
-        elif isinstance(findings, list) and findings and isinstance(findings[0], Finding):
-            result = (event.step_name, findings)
+        payload = outcome.payload
+        if isinstance(payload, (ReviewOutput, TestSufficiencyOutput)) and payload.findings:
+            result = (event.step_name, payload)
+        elif isinstance(payload, list) and payload:
+            result = (event.step_name, payload)
     return result
 
 

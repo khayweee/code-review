@@ -35,10 +35,12 @@ from pydantic import BaseModel
 from code_review.pipeline.step import ApprovalResponse
 
 if TYPE_CHECKING:
-    # steps/ depends on pipeline/, never the reverse; ReviewOutput lives in steps/review.py,
-    # so a top-level import would invert that. Lazy annotations make TYPE_CHECKING-only
-    # sufficient; the function body only does duck-typed attribute access at runtime.
+    # steps/ depends on pipeline/, never the reverse; ReviewOutput/TestSufficiencyOutput/
+    # Intent live under steps/, so a top-level import would invert that. Lazy annotations
+    # make TYPE_CHECKING-only sufficient.
+    from code_review.steps.intent import Intent
     from code_review.steps.review import ReviewOutput
+    from code_review.steps.test_sufficiency import TestSufficiencyOutput
 
 # The three outcomes action_or_default ever returns. Finding.action itself is typed more
 # loosely (see module docstring).
@@ -146,27 +148,33 @@ def filter_pipeline_owned_delivery_findings(output: ReviewOutput) -> ReviewOutpu
     return output.model_copy(update={"findings": remaining})
 
 
-def describe_auto_fix_findings(findings: object) -> str:
-    """Render every finding in `findings` whose resolved action is "auto-fix" as fix-round
+def describe_auto_fix_findings(
+    payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent,
+) -> str:
+    """Render every finding in `payload` whose resolved action is "auto-fix" as fix-round
     instructions text (`pipeline.step.FixRound.instructions`).
 
-    `findings` is `StepOutcome.findings: object`, duck-typed as either a
-    `ReviewOutput`/`TestSufficiencyOutput`-shaped object with a `.findings` attribute or a
-    bare `list[Finding]`. An unrecognized shape yields no lines rather than raising.
+    `payload` is `StepOutcome.payload`: a bare `list[Finding]`, a
+    `ReviewOutput`/`TestSufficiencyOutput` with a `.findings` list, or an `Intent` (no
+    findings at all -- `IntentStep` never opts into the fix-round loop, so this case yields
+    no lines rather than raising).
+
+    `ReviewOutput`/`TestSufficiencyOutput` are `TYPE_CHECKING`-only imports here (`steps/`
+    depends on `pipeline/`, never the reverse), so the `ReviewOutput`/`TestSufficiencyOutput`
+    branch is duck-typed via `getattr` rather than `isinstance` -- the two accessors are
+    otherwise indistinguishable at this layer.
 
     One line per matching finding, in list order: `"- [severity] description (location)"`,
     omitting `(location)` when `None`. Free-form text with no schema contract -- it becomes
     prompt text, not something other code parses back.
     """
 
-    raw = getattr(findings, "findings", findings)
-    if not isinstance(raw, list):
+    raw = payload if isinstance(payload, list) else getattr(payload, "findings", None)
+    if raw is None:
         return ""
 
     lines = []
     for finding in raw:
-        if not isinstance(finding, Finding):
-            continue
         if action_or_default(finding.action) != "auto-fix":
             continue
         location = f" ({finding.location})" if finding.location else ""

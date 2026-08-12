@@ -111,7 +111,7 @@ def test_rebase_step_completes_with_no_findings_when_already_up_to_date(
     assert isinstance(outcome, StepOutcome)
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
-    assert outcome.findings == []
+    assert outcome.payload == []
     _assert_not_mid_rebase(checkout)
 
 
@@ -135,7 +135,7 @@ def test_rebase_step_rebases_cleanly_onto_new_origin_commits_with_no_conflict(
     assert isinstance(outcome, StepOutcome)
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
-    assert outcome.findings == []
+    assert outcome.payload == []
     _assert_not_mid_rebase(checkout)
 
     # Proves the rebase actually happened: origin's new commit is now an ancestor of the
@@ -169,7 +169,7 @@ def test_rebase_step_aborts_and_reports_a_finding_per_conflicted_file_on_real_co
     assert outcome.needs_approval is True
     assert outcome.auto_fixable is False
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, list)
     assert len(findings) == 1
     finding = findings[0]
@@ -251,7 +251,7 @@ def test_rebase_step_blocks_when_local_default_branch_carries_unpushed_commits_i
     assert outcome.needs_approval is True
     assert outcome.auto_fixable is False
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, list)
     assert len(findings) == 1
     finding = findings[0]
@@ -299,7 +299,7 @@ def test_rebase_step_does_not_block_and_rebases_normally_when_no_local_default_b
     assert agent.run_called is False
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
-    assert outcome.findings == []
+    assert outcome.payload == []
     _assert_not_mid_rebase(checkout)
 
     is_ancestor = _run_git_unchecked(["merge-base", "--is-ancestor", origin_sha, "HEAD"], checkout)
@@ -327,7 +327,7 @@ def test_rebase_step_does_not_block_when_local_default_branch_already_equals_ori
     assert agent.run_called is False
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
-    assert outcome.findings == []
+    assert outcome.payload == []
     _assert_not_mid_rebase(checkout)
 
 
@@ -355,7 +355,7 @@ def test_rebase_step_does_not_block_when_local_default_branch_is_ahead_but_not_i
     assert agent.run_called is False
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
-    assert outcome.findings == []
+    assert outcome.payload == []
     _assert_not_mid_rebase(checkout)
 
 
@@ -384,7 +384,7 @@ def test_rebase_step_default_branch_is_overridable_for_a_non_main_default(
     outcome = asyncio.run(RebaseStep(default_branch="trunk").run(_ctx(checkout, agent)))
 
     assert outcome.needs_approval is False
-    assert outcome.findings == []
+    assert outcome.payload == []
 
 
 # --- Activity reporting (issue #64) -----------------------------------------------------
@@ -464,7 +464,7 @@ def test_rebase_step_reports_fetch_guard_rebase_conflict_read_and_abort_as_activ
     # Sanity check: still the same conflict outcome Scenario 3 pins down -- activity
     # reporting must not change RebaseStep's own conflict-detection behavior.
     assert outcome.needs_approval is True
-    assert len(outcome.findings) == 1  # type: ignore[arg-type]
+    assert len(outcome.payload) == 1  # type: ignore[arg-type]
 
     started_labels = [event.label for event in activity_events if event.status == "started"]
     assert started_labels == [

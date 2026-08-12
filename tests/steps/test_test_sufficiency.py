@@ -172,7 +172,7 @@ def test_test_sufficiency_step_outcome_is_clean_on_info_and_no_op_findings_only(
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
     asyncio.run(agent.close())
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, TestSufficiencyOutput)
     assert len(findings.findings) == 1
 
@@ -193,7 +193,7 @@ def test_test_sufficiency_step_needs_approval_on_an_ask_user_finding(tmp_path: P
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
     asyncio.run(agent.close())
 
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, TestSufficiencyOutput)
     assert len(findings.findings) == 1
 
@@ -264,14 +264,14 @@ def test_test_sufficiency_step_automatic_fix_round_writes_a_test_and_returns_a_f
 
     assert first_outcome.auto_fixable is True
     assert first_outcome.needs_approval is False
-    first_output = first_outcome.findings
+    first_output = first_outcome.payload
     assert isinstance(first_output, TestSufficiencyOutput)
     assert len(first_output.findings) == 1
     assert first_output.testing_summary == "initial pass: no test found for the new greeting line"
 
     assert second_outcome.auto_fixable is False
     assert second_outcome.needs_approval is False
-    second_output = second_outcome.findings
+    second_output = second_outcome.payload
     assert isinstance(second_output, TestSufficiencyOutput)
     # A fresh verdict, not an echo of round 1's finding.
     assert second_output.findings == []
@@ -324,7 +324,7 @@ def test_test_sufficiency_step_never_auto_fixes_a_finding_with_unset_action(
 
     outcome = completed[0].outcome
     assert outcome is not None
-    findings = outcome.findings
+    findings = outcome.payload
     assert isinstance(findings, TestSufficiencyOutput)
     assert len(findings.findings) == 1
     assert findings.findings[0].action is None

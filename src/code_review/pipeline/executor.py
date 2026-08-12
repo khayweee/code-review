@@ -31,7 +31,7 @@ otherwise get bounced through capped re-runs that blindly resubmit the same prom
 
 For an opted-in step, after each round: if `outcome.auto_fixable` and the automatic round
 count is below `_MAX_AUTO_FIX_ROUNDS`, this calls `round_ctx.with_fix_round(...)` with
-`describe_auto_fix_findings(outcome.findings)` to get a new `StepContext` carrying that
+`describe_auto_fix_findings(outcome.payload)` to get a new `StepContext` carrying that
 `FixRound` (the caller's `ctx` is never mutated), and re-runs the step with a fresh
 "running"/"completed" pair, no park. Once the cap is reached, a still-`auto_fixable`
 outcome falls through to the park instead of looping forever -- `needs_approval` and
@@ -144,7 +144,7 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
             auto_fix_cap_exhausted = auto_fix_rounds >= _MAX_AUTO_FIX_ROUNDS
             if step.supports_fix_round and outcome.auto_fixable and not auto_fix_cap_exhausted:
                 auto_fix_rounds += 1
-                round_ctx = round_ctx.with_fix_round(describe_auto_fix_findings(outcome.findings))
+                round_ctx = round_ctx.with_fix_round(describe_auto_fix_findings(outcome.payload))
                 continue
 
             # needs_approval, or (for a fix-round-eligible step) a still-auto_fixable

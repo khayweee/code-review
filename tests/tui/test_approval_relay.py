@@ -13,7 +13,7 @@ import asyncio
 from code_review.pipeline.step import ApprovalResponse, StepOutcome
 from code_review.tui.approval_relay import ApprovalRelay
 
-_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, findings=["a finding"])
+_OUTCOME = StepOutcome(needs_approval=True, auto_fixable=False, payload=["a finding"])
 
 
 def test_request_approval_blocks_until_next_request_resolves_its_future() -> None:

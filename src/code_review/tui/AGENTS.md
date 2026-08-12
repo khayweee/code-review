@@ -15,6 +15,17 @@ relays.
 Python, independent of a running `App`/`Pilot`. Keep it that way: if a change to one of them
 needs anything from Textual, that behavior belongs in `app.py` or `widgets/` instead.
 
+**Testing with `Pilot`**: `Pilot.press`/`.click` each call Textual's `wait_for_idle()` after
+every simulated key/mouse event, which infers "idle" from CPU-time-vs-wall-clock rather than
+any deterministic signal, falling back to a hardcoded 1-second wait when it can't tell.
+`tests/conftest.py` loosens that heuristic's threshold session-wide (see the comment there)
+because ambient CPU noise on some machines/CI runners was pinning nearly every keypress to
+that 1-second fallback — a test with a dozen `.press()`/`.click()` calls was taking 10+
+seconds for no real reason. `_wait_for_screen()` (the same call's first step, run before the
+heuristic) already provides real synchronization via Textual's own `call_later` counting, so
+this is safe to loosen; don't remove it outright without checking whether an equivalent
+`call_later`-based wait exists first.
+
 ## `ReviewApp` (`app.py`)
 
 The `App` subclass. Takes `registry` (step names) and `events` (an
