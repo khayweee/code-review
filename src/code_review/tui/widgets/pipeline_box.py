@@ -113,7 +113,7 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
         )
         row_text = Text(row.name)
     else:
-        icon = spinners.setdefault(row.name, Spinner("moon"))
+        icon = spinners.setdefault(row.name, Spinner("dots"))
         row_text = gradient_text(row.name, phase=time.monotonic())
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
     row_text.append(duration)
