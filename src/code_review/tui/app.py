@@ -6,6 +6,10 @@ building them itself, so tests can drive it with a hand-built fake generator via
 
 `input_relay`, `activity_relay`, and `approval_relay` are optional, independently polled
 seams (see their own modules): each starts its own worker in `on_mount` only when supplied.
+
+`branch` is an optional display-only string (the branch under review, already known to
+`cli.py`), read once at startup and handed to `PipelineBox` as its `border_subtitle`; `None`
+shows no subtitle at all.
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ class ReviewApp(App[None]):
         input_relay: InputRelay | None = None,
         activity_relay: ActivityRelay | None = None,
         approval_relay: ApprovalRelay | None = None,
+        branch: str | None = None,
     ) -> None:
         super().__init__()
         # Not `_registry` -- shadows `textual.app.App`'s own mounted-widget registry.
@@ -61,6 +66,9 @@ class ReviewApp(App[None]):
         self._input_relay = input_relay
         self._activity_relay = activity_relay
         self._approval_relay = approval_relay
+        # Read once at startup, not live-polled -- a run's branch can't change mid-run
+        # under this project's own concurrency model (see docs/GATE-MODEL.md).
+        self._branch = branch
         # Raw events in receipt order, not yet tagged with an owning step; `_rows` tags
         # them via `_tag_activity_events` immediately before every render.
         self._activity_events: list[ActivityEvent] = []
@@ -82,7 +90,7 @@ class ReviewApp(App[None]):
         self.error: BaseException | None = None
 
     def compose(self) -> ComposeResult:
-        yield PipelineBox(self._rows())
+        yield PipelineBox(self._rows(), branch=self._branch)
 
     def on_mount(self) -> None:
         self._tick_timer: Timer = self.set_interval(_TICK_INTERVAL, self._render)

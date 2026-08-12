@@ -154,6 +154,45 @@ def test_review_app_renders_every_registered_step_as_pending_before_any_event() 
     asyncio.run(scenario())
 
 
+def test_review_app_sets_pipeline_box_border_subtitle_to_the_passed_branch() -> None:
+    """`branch` flows straight through to `PipelineBox.border_subtitle` -- the plumbing
+    this ticket adds (issue #113). Right-alignment is a `.tcss` rule, not asserted here."""
+
+    async def never_yields() -> AsyncIterator[StepEvent]:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, never_yields(), branch="feature/my-branch")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+            assert box.border_subtitle == "feature/my-branch"
+            app.exit()
+
+    asyncio.run(scenario())
+
+
+def test_review_app_leaves_pipeline_box_border_subtitle_unset_when_branch_is_omitted() -> None:
+    """No fabricated placeholder when `branch` isn't passed -- matches every other call
+    site (`tests/tui/test_app.py`'s other ~20 constructions, `scripts/preview_tui.py`)
+    that never passed one before this ticket."""
+
+    async def never_yields() -> AsyncIterator[StepEvent]:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, never_yields())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(PipelineBox)
+            assert box.border_subtitle is None
+            app.exit()
+
+    asyncio.run(scenario())
+
+
 def test_review_app_shows_not_yet_implemented_steps_as_pending_throughout_the_run() -> None:
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _one_step_completes())

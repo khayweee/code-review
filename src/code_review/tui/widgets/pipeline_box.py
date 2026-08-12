@@ -11,6 +11,7 @@ from __future__ import annotations
 import colorsys
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 from rich.console import Group
 from rich.spinner import Spinner
@@ -149,10 +150,17 @@ def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> G
 class PipelineBox(_BorderedBox):
     """A bordered box listing every registered step and its current status."""
 
+    DEFAULT_CSS = (
+        Path(__file__).with_name("tokens.tcss").read_text()
+        + "\n"
+        + Path(__file__).with_suffix(".tcss").read_text()
+    )
+
     def __init__(
         self,
         rows: Sequence[StepRow] = (),
         *,
+        branch: str | None = None,
         id: (str | None) = None,  # noqa: A002 -- matches Textual's own Widget.__init__ shape
         classes: str | None = None,
     ) -> None:
@@ -161,6 +169,10 @@ class PipelineBox(_BorderedBox):
         super().__init__(render_rows_live(rows, self._spinners), id=id, classes=classes)
         self._rows = list(rows)
         self.border_title = "Agentic Code Review Pipeline"
+        # None (no branch passed) leaves no border_subtitle at all -- "no box, not a
+        # placeholder", same discipline the Findings/Status boxes already follow.
+        if branch is not None:
+            self.border_subtitle = branch
 
     def on_mount(self) -> None:
         self.set_interval(1 / 60, self._animate_shimmer)
