@@ -110,8 +110,7 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
         spinners.pop(row.name, None)
         dot_style = _STATUS_DOT_STYLES.get(row.status)
         icon: Spinner | Text = (
-            Text(_DOT_ICON, style=dot_style) if dot_style else Text(
-                _STATUS_ICONS[row.status])
+            Text(_DOT_ICON, style=dot_style) if dot_style else Text(_STATUS_ICONS[row.status])
         )
         row_text = Text(row.name)
     else:
