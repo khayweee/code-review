@@ -1,22 +1,11 @@
-"""The canonical, ordered step registry (Milestone 13, issue #40).
+"""The canonical, ordered step registry.
 
-`STEP_REGISTRY` is the single source of truth for step display names, in pipeline order --
-every entry matches what `Step.get_name()` returns for that step's class (the concrete
-class's `__name__` by default; see `pipeline/step.py`), whether or not that class has been
-written yet. Two callers read it for two different reasons:
+`STEP_REGISTRY` is the single source of truth for step display names, in pipeline order,
+whether or not a step's class exists yet. `cli.py` builds the real step list from
+`IMPLEMENTED_STEPS`; `tui/` reads `STEP_REGISTRY` directly to render not-yet-implemented
+steps as pending placeholders.
 
-- `cli.py` builds the real, executable step list from `IMPLEMENTED_STEPS` (an ordered
-  prefix of classes, not a second list of names) so the step-name string lives exactly
-  once, in `STEP_REGISTRY`.
-- `tui/` reads `STEP_REGISTRY` directly to backfill not-yet-implemented steps as pending
-  placeholders (see `tui/state.py`'s `backfill`), so a step that hasn't landed yet still
-  renders in the live pipeline-progress view without any `tui/` code change once its class
-  exists and is added to `IMPLEMENTED_STEPS`.
-
-This module lives in `steps/`, not `pipeline/`, so that `pipeline/` never has to import
-`steps/` -- this repo's fixed dependency direction is "steps depends on pipeline, never the
-reverse" (see root `AGENTS.md`), and a registry of concrete step classes belongs on the
-`steps/` side of that boundary.
+Lives in `steps/`, not `pipeline/`, since `pipeline/` must never import `steps/`.
 """
 
 from __future__ import annotations
@@ -27,9 +16,7 @@ from code_review.steps.rebase import RebaseStep
 from code_review.steps.review import ReviewStep
 from code_review.steps.test_sufficiency import TestSufficiencyStep
 
-# Ordered, canonical display-identity list: every step this pipeline will ever run, present
-# or not-yet-written, in the fixed order `docs/ROADMAP.md`'s milestones define. Adding a
-# step here before its class exists is what lets it render as a pending placeholder.
+# Every step this pipeline will ever run, in fixed order, present or not-yet-written.
 STEP_REGISTRY: tuple[str, ...] = (
     "IntentStep",
     "RebaseStep",
@@ -38,11 +25,8 @@ STEP_REGISTRY: tuple[str, ...] = (
     "PRStep",
 )
 
-# Ordered prefix of `STEP_REGISTRY` that actually has a class today. `cli.py` builds the
-# real step list as `[cls() for cls in IMPLEMENTED_STEPS]`. Each entry's `get_name()` must
-# match the corresponding position in `STEP_REGISTRY` -- see `tests/steps/test_registry.py`.
-# `PRStep` (Milestone 8) has no class yet, so it stays a pending placeholder in
-# `STEP_REGISTRY` above without a corresponding entry here.
+# Ordered prefix of `STEP_REGISTRY` that has a class today; `get_name()` must match the
+# corresponding position in `STEP_REGISTRY`.
 IMPLEMENTED_STEPS: tuple[type[Step], ...] = (
     IntentStep,
     RebaseStep,

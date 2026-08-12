@@ -1,12 +1,10 @@
 """Shared process-group teardown for backend adapters that spawn subprocesses.
 
-https://github.com/khayweee/code-review/issues/6 - a spawned agent process can start its
-own children (test runners, build watchers, git), and terminating only the direct child
-leaves those grandchildren running as orphans. Any adapter that spawns with
-``start_new_session=True`` (making the child's PID double as the whole process group's
-PGID) can hand its ``Process`` to ``terminate_process_group`` to get the same guarantee:
-nothing it started is still running once the call returns, on every exit path - success,
-non-zero exit, a parse/validation failure, or cancellation.
+Terminating only the direct child leaves any grandchildren it spawned (test runners,
+build watchers, git) running as orphans. Any adapter that spawns with
+``start_new_session=True`` (child PID doubles as the process group's PGID) can hand its
+``Process`` to ``terminate_process_group`` to guarantee nothing it started outlives the
+call, on any exit path.
 """
 
 from __future__ import annotations
@@ -18,9 +16,8 @@ import signal
 
 _logger = logging.getLogger(__name__)
 
-# How long to wait after SIGTERM, and after SIGKILL, before giving up. Deliberately
-# module-level constants rather than a public parameter: only tests need to shrink
-# these, via monkeypatch.
+# How long to wait after SIGTERM, and after SIGKILL, before giving up. Tests shrink
+# these via monkeypatch.
 _TERMINATION_GRACE_SECONDS = 5.0
 _KILL_TIMEOUT_SECONDS = 5.0
 _POLL_INTERVAL_SECONDS = 0.02
@@ -29,30 +26,24 @@ _POLL_INTERVAL_SECONDS = 0.02
 async def terminate_process_group(process: asyncio.subprocess.Process) -> None:
     """Guarantee nothing ``process`` started is still running once this returns.
 
-    Requires ``process`` to have been spawned with ``start_new_session=True``, so its
-    PID doubles as its process group's PGID and signalling the group (``os.killpg``)
-    reaches grandchildren it spawned, not just the direct child. Escalates from SIGTERM
-    to SIGKILL if the group is still alive after a grace deadline, then reaps the direct
-    child so it doesn't linger as a zombie. Every wait below is deadline-bounded, so a
-    descendant that refuses to die can never make this coroutine hang forever - it gives
-    up cleanly instead.
+    Requires ``process`` to have been spawned with ``start_new_session=True`` so its PID
+    doubles as its process group's PGID and ``os.killpg`` reaches grandchildren too.
+    Escalates SIGTERM to SIGKILL after a grace deadline, then reaps the direct child.
+    Every wait is deadline-bounded, so a stuck descendant can't hang this coroutine.
     """
 
     pgid = process.pid
     if _signal_group(pgid, signal.SIGTERM) and not await _group_exited(
         pgid, _TERMINATION_GRACE_SECONDS
     ):
-        # Escalate to SIGKILL if the group is still alive after the grace period.
         if _signal_group(pgid, signal.SIGKILL):
             await _group_exited(pgid, _KILL_TIMEOUT_SECONDS)
 
     try:
         await asyncio.wait_for(process.wait(), timeout=_KILL_TIMEOUT_SECONDS)
     except TimeoutError:
-        # Give up cleanly rather than block this coroutine forever, but this is not
-        # supposed to happen after SIGKILL - most likely the direct child is stuck in
-        # uninterruptible sleep (D state), so it may still be alive. Surface that so it
-        # doesn't fail silently.
+        # Should not happen after SIGKILL; likely stuck in uninterruptible sleep (D
+        # state). Log rather than fail silently.
         _logger.warning(
             "process group %d: direct child did not exit within %.1fs of SIGKILL; "
             "it may still be running",

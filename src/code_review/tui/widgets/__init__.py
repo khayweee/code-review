@@ -1,16 +1,6 @@
-"""The TUI's widget tree: the Pipeline box, the Findings box, and the Status box.
-
-- One component per module (React-style); this barrel re-exports the full public (and
-  private-but-imported-by-tests) surface so `from code_review.tui.widgets import X` keeps
-  resolving regardless of which submodule now defines `X`.
-- Dependency direction: `styles`/`base` have no internal deps; `pipeline_box`/
-  `findings_description` depend on `styles`; `findings_suggestion` is standalone;
-  `finding` depends on `findings_description`+`findings_suggestion`;
-  `findings_list_view` depends on `finding` (and, type-only, `findings_list`);
-  `findings_list` depends on `finding`+`findings_list_view`; `status_box` depends on
-  `base`.
-- See `tui/AGENTS.md`'s "Findings box" section for the full design rationale behind the
-  Findings box's widget tree and per-finding decision model.
+"""Barrel module re-exporting this package's public (and test-imported) widgets and
+helpers, so `from code_review.tui.widgets import X` resolves regardless of which
+submodule defines `X`.
 """
 
 from __future__ import annotations

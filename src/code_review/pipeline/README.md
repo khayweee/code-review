@@ -10,7 +10,7 @@ does not contain review policy or GitHub-specific behavior; those belong in
 | Subunit | Purpose | Input | Output |
 | --- | --- | --- | --- |
 | `Step` | Abstract base class subclassed by one unit of pipeline work. Its only abstract operation is asynchronous `run(ctx)`; it also provides a concrete `get_name()`. | `StepContext` | `StepOutcome` |
-| `StepContext` | Immutable per-run data shared by every step. | `cwd`, `agent`, `diff`, and `intent` | Read by steps; it is not itself transformed |
+| `StepContext` | Immutable per-pipeline-run data shared by every step (see `docs/GLOSSARY.md`'s "run" entry). | `cwd`, `agent`, `diff`, and `intent` | Read by steps; it is not itself transformed |
 | `StepOutcome` | A step's report to the executor. | Values chosen by the step | `needs_approval`, `auto_fixable`, and step-specific `findings` |
 | `StepEvent` | One progress unit `run_steps` yields: a step entering `"running"`, or its `"completed"` report. | Produced by the executor, not by steps themselves | `step_name`, `status`, `outcome` (set only when completed), `started_at`/`duration` |
 | `run_steps` | Executes the supplied steps sequentially, yielding a running/completed event pair per step as it goes. | Ordered `list[Step]` and one `StepContext` | `AsyncIterator[StepEvent]`, two events per step in execution order |

@@ -1,14 +1,9 @@
-"""Install-lifecycle state directory (Milestone 12, issues #31-#33).
+"""Install-lifecycle state directory: holds only install-related bookkeeping (e.g. the
+install log written by `scripts/install.sh`), never pipeline run state, config, or
+credentials. `code-review uninstall` removes it entirely.
 
-Distinct from `config.py`'s trusted-vs-descriptive pipeline config split (not built yet --
-see docs/ROADMAP.md milestone 9): this directory holds only this feature's own
-install-related bookkeeping (e.g. an install log written by `scripts/install.sh`), never
-pipeline run state, config, or credentials. `code-review uninstall` removes it entirely,
-so there is nothing left behind once the tool is gone.
-
-Location is `$CODE_REVIEW_STATE_DIR` if set, else `~/.code-review`. The env var exists so
-tests -- and `scripts/install.sh`, which reads the same override -- can point it at an
-isolated temp directory instead of a real machine's home directory.
+Location is `$CODE_REVIEW_STATE_DIR` if set, else `~/.code-review`; the env var lets tests
+and `scripts/install.sh` point it at an isolated temp directory.
 """
 
 from __future__ import annotations

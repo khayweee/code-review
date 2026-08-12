@@ -42,6 +42,13 @@ call in, one result out** (`run`, plus a `close` for teardown). No streaming, no
 conversation state, no multi-turn memory. A step that needs three answers makes three
 calls. Keeping the contract this small is what makes the layer swappable.
 
+**RunOpts**
+: The parameter object for exactly one agent call -- a **run** in the narrow sense (see
+[Words this repo overloads](#words-this-repo-overloads)): prompt, `cwd`, output schema,
+model, and permission settings for a single `Agent.run()` invocation. A step builds a
+fresh `RunOpts` every time it needs an answer, reusing fields like `cwd` off its
+`StepContext` but never the object itself; a step that needs three answers builds three.
+
 **Backend**
 : A concrete implementation of `Agent`. Where `Agent` says *what* you can ask for, a
 backend is the thing that actually does it: takes the prompt, produces the answer, and
@@ -80,8 +87,18 @@ the top of it.
 
 **Step**
 : One unit of pipeline work with a fixed interface: it receives a context describing the
-run, does its job (usually one agent call), and returns an outcome. The five steps are
-intent, rebase, review, test sufficiency, and PR.
+pipeline run, does its job (usually one agent call), and returns an outcome. The five
+steps are intent, rebase, review, test sufficiency, and PR.
+
+**StepContext**
+: The pipeline-run-scoped (see **run** under
+[Words this repo overloads](#words-this-repo-overloads)) dependencies a `Step` needs to do
+its job: the checkout (`cwd`), the `Agent` handle, the diff, the intent, and the
+human-in-the-loop callbacks (`activity_reporter`, `on_approval_needed`,
+`on_input_needed`, `fix_round`). Built once per pipeline run by `cli.py` and threaded
+immutably through every step in that run; a fix round gets a *new* `StepContext` via
+`dataclasses.replace`, never a mutation of the original. Contrast **RunOpts**, which a
+step builds fresh for each individual agent call it makes while using this context.
 
 **Rebase step**
 : Syncs the branch onto the latest default branch before Review runs, so later steps never
@@ -193,6 +210,17 @@ transient error. Same-looking loop, different causes, different correct behaviou
 **review**
 : (1) What the whole tool does. (2) The specific Review step, which covers correctness and
 risk. Prefer "the Review step" when you mean sense 2.
+
+**run**
+: (1) *Pipeline run*: one end-to-end execution of the `review` command -- one
+`StepContext`, one `run_steps` call, every step in the fixed order, and however many
+agent calls those steps make along the way. (2) *A run* in `RunOpts`/`Agent.run`: one
+single call to an agent -- prompt in, schema-validated answer out. `StepContext` is
+scoped to sense 1; `RunOpts` is scoped to sense 2. One pipeline run (sense 1) contains
+zero or more runs in sense 2. Prefer "pipeline run" and "agent call" over the bare word
+"run" whenever the sense isn't obvious from context -- this is the distinction that
+matters most in `pipeline/` and `agent/`, since both `StepContext` and `RunOpts` used to
+describe themselves with the unqualified word "per-run".
 
 **gate**
 : (1) An *approval gate*: the in-pipeline pause for a human. Being built. (2) *The gate*:

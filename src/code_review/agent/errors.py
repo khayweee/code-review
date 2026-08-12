@@ -1,14 +1,7 @@
 """Distinct, actionable failures for one Agent call.
 
-https://github.com/khayweee/code-review/issues/4 - naming which stage broke (the
-process never started, the process exited non-zero, no structured answer was
-present anywhere, or an answer was found but did not fit the schema) lets a step
-author choose retry, fallback, or ask-user without inspecting a generic message.
-
-https://github.com/khayweee/code-review/issues/41 adds a fifth: the subprocess appeared
-blocked waiting on stdin and no ``RunOpts.on_input_needed`` was supplied to relay the
-prompt to a human, so the backend fails closed rather than hanging or fabricating an
-answer.
+Naming which stage broke lets a step author choose retry, fallback, or ask-user
+without inspecting a generic message.
 """
 
 from __future__ import annotations
@@ -56,10 +49,8 @@ class OutputValidationError(AgentError):
 class StdinBlockedError(AgentError):
     """The subprocess appeared blocked waiting on stdin with no relay to answer it.
 
-    Raised only on the non-default path (``tools_allowlist`` set, or ``permission_mode``
-    pinned) once the backend's idle-read timeout elapses with no ``RunOpts.on_input_needed``
-    supplied to relay the detected prompt to a human. Carries the stdout accumulated before
-    the stall so a caller can see what the subprocess was asking for.
+    Carries the stdout accumulated before the stall so a caller can see what the
+    subprocess was asking for.
     """
 
     def __init__(self, stdout_so_far: str) -> None:

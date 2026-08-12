@@ -109,12 +109,16 @@ Commit messages follow Conventional Commits: `<type>(<scope>): <summary>` (e.g.
 
 ## Attribute documentation
 
-When declaring fields on a dataclass, Pydantic model, config object, or other structured
-record, document each field at its declaration with both its purpose and where or how it
-is consumed. Say explicitly when a field is reserved for future work and has no current
-consumer; do not make planned behavior sound implemented. Whenever a field's meaning,
-consumer, validation, or lifecycle changes, update its declaration comment in the same
-change so the documentation continues to describe actual usage.
+Docstrings and comments are tokens spent on every LLM call that reads the file, so keep
+them compact. When declaring a field on a dataclass, Pydantic model, config object, or
+other structured record, add a comment only if its purpose isn't obvious from its name and
+type — one line is almost always enough. The same applies to module/class/function
+docstrings: state what the thing does or its non-obvious contract, not the history of how
+it got that way. Leave out issue numbers, milestone names, rejected alternatives, and
+consumer-tracing ("wired to X", "read by Y in Z") — `git log`/`git blame` and `grep` recover
+that on demand; it does not need to live in the source permanently. Do note, briefly, when
+a field is reserved for future work with no current consumer, so planned behavior isn't
+mistaken for implemented behavior. Update a comment when it goes stale, but don't grow it.
 
 ## Living document policy
 

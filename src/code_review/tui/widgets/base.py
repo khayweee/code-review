@@ -1,8 +1,7 @@
-"""Shared base class for this app's bordered, auto-height boxes.
+"""Shared base class for bordered, auto-height boxes: `PipelineBox` and `StatusBox`.
 
-- `_BorderedBox` factors out the one `DEFAULT_CSS` rule every top-level box shares.
-- Used by `PipelineBox` and `StatusBox` (both `Static` subclasses).
-- `FindingsList` needs a `Vertical`, so it duplicates this rule instead of extending it.
+`FindingsList` needs a `Vertical` instead of a `Static`, so it duplicates this CSS
+rule rather than subclassing this.
 """
 
 from __future__ import annotations
@@ -15,9 +14,8 @@ from textual.widgets import Static
 class _BorderedBox(Static):
     """Shared border/padding rule for `PipelineBox`/`StatusBox`.
 
-    - Textual resolves `DEFAULT_CSS` against a widget's whole class hierarchy, so defining
-      the rule once here, keyed to this base class's own name, reaches every subclass.
-    - Styled from `base.tcss`, loaded next to this module.
+    Textual resolves `DEFAULT_CSS` against a widget's whole class hierarchy, so defining
+    it here reaches every subclass automatically.
     """
 
     DEFAULT_CSS = (

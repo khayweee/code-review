@@ -22,12 +22,8 @@ _FENCED_BLOCK = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
 def extract_json(text: str) -> JsonValue:
     """Extract a JSON response from possibly chatty agent output.
 
-    https://github.com/khayweee/code-review/issues/4 - agents do not answer in a
-    stable shape: the same prompt may return bare JSON, a fenced code block, or an
-    object wrapped in a paragraph of preamble. None of that variance carries
-    meaning, so extraction is tried in a fixed order until one strategy parses:
-    the whole response as JSON, then a fenced JSON block, then the last balanced
-    object in the text.
+    Tries strategies in order until one parses: the whole response as JSON, then a
+    fenced JSON block, then the last balanced object in the text.
     """
 
     strategies: tuple[Callable[[], str | None], ...] = (

@@ -1,12 +1,9 @@
 """The focusable `ListView` hosting one `Finding` per finding.
 
-- `ListView(can_focus=True, can_focus_children=False)`: the `ListView` itself holds
-  keyboard focus, its `Finding` children never individually focused.
-- Every parked-mode key binding beyond up/down/enter (which `ListView` gives for free)
-  lives here, never on `Finding` itself, since `ListView`'s own action methods
-  index/assert against `self._nodes` unfiltered.
-- All bindings delegate to the owning `FindingsList`, which no-ops them while not parked
-  -- this class holds no decision state of its own.
+Holds keyboard focus itself (`can_focus_children=False`); `Finding` rows are never
+individually focused. Every parked-mode binding beyond up/down/enter delegates to the
+owning `FindingsList`, which no-ops them while not parked -- this class holds no
+decision state of its own.
 """
 
 from __future__ import annotations
@@ -25,11 +22,9 @@ if TYPE_CHECKING:
 class _FindingsListView(ListView):
     """Hosts one `Finding` row per finding; owns every parked-mode key binding.
 
-    - left/right cycle the highlighted finding's decision entries.
-    - "s" records "skip" for the highlighted row; "x" jumps straight to abort regardless
-      of cursor position (the one binding that stays global and step-scoped).
-    - "f" jumps straight to the inline chat; digit keys "1".."9" jump straight to that
-      1-based entry.
+    left/right cycle decision entries; "s" skips the highlighted row; "x" aborts the run
+    regardless of cursor position; "f" opens the inline chat; digits "1".."9" jump to
+    that 1-based entry.
     """
 
     BINDINGS = [
@@ -46,9 +41,8 @@ class _FindingsListView(ListView):
     ]
 
     def __init__(self, *items: Finding, owner: FindingsList) -> None:
-        # `ListView` assumes every mounted child is a `ListItem` and indexes into
-        # `self._nodes` unfiltered -- any non-`Finding` child mounted here would silently
-        # corrupt that indexing, not raise anywhere near the mistake.
+        # ListView indexes children unfiltered; a non-Finding child would silently
+        # corrupt that indexing rather than raise.
         assert all(isinstance(item, Finding) for item in items), (
             "_FindingsListView only ever hosts Finding rows."
         )
