@@ -97,8 +97,9 @@ its job: the checkout (`cwd`), the `Agent` handle, the diff, the intent, and the
 human-in-the-loop callbacks (`activity_reporter`, `on_approval_needed`,
 `on_input_needed`, `fix_round`). Built once per pipeline run by `cli.py` and threaded
 immutably through every step in that run; a fix round gets a *new* `StepContext` via
-`dataclasses.replace`, never a mutation of the original. Contrast **RunOpts**, which a
-step builds fresh for each individual agent call it makes while using this context.
+`StepContext.with_fix_round(instructions)`, never a mutation of the original. Contrast
+**RunOpts**, which a step builds fresh for each individual agent call it makes while using
+this context.
 
 **Rebase step**
 : Syncs the branch onto the latest default branch before Review runs, so later steps never
