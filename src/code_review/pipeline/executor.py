@@ -30,9 +30,9 @@ computes a genuine `auto_fixable=True` but doesn't yet build a fix-mode prompt w
 otherwise get bounced through capped re-runs that blindly resubmit the same prompt.
 
 For an opted-in step, after each round: if `outcome.auto_fixable` and the automatic round
-count is below `_MAX_AUTO_FIX_ROUNDS`, this builds a `FixRound` from
-`describe_auto_fix_findings(outcome.findings)`, `dataclasses.replace`s the round's own
-`StepContext` (the caller's `ctx` is never mutated), and re-runs the step with a fresh
+count is below `_MAX_AUTO_FIX_ROUNDS`, this calls `round_ctx.with_fix_round(...)` with
+`describe_auto_fix_findings(outcome.findings)` to get a new `StepContext` carrying that
+`FixRound` (the caller's `ctx` is never mutated), and re-runs the step with a fresh
 "running"/"completed" pair, no park. Once the cap is reached, a still-`auto_fixable`
 outcome falls through to the park instead of looping forever -- `needs_approval` and
 cap-exhausted-`auto_fixable` are the only two park conditions, mutually exclusive by
@@ -46,13 +46,11 @@ this executor -- the one place that calls `step.run(ctx)` uniformly -- binds
 
 from __future__ import annotations
 
-import dataclasses
 import time
 from collections.abc import AsyncIterator
 
 from code_review.pipeline.findings import describe_auto_fix_findings
 from code_review.pipeline.step import (
-    FixRound,
     Step,
     StepContext,
     StepEvent,
@@ -101,8 +99,8 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
     Yields a "running" event before each ``step.run(round_ctx)`` call and a "completed"
     event (``StepOutcome`` plus timing) after, once per round, for every step in order. A
     step can run more than once per slot: the inner ``while True`` loop re-runs it against
-    an evolving ``round_ctx`` (via ``dataclasses.replace``; the caller's ``ctx`` is never
-    mutated) for as long as an auto-fix or human-fix round keeps firing -- see the module
+    an evolving ``round_ctx`` (via ``round_ctx.with_fix_round(...)``; the caller's ``ctx``
+    is never mutated) for as long as an auto-fix or human-fix round keeps firing -- see the module
     docstring's "fix-round loop" section. Each round gets its own event pair.
 
     Binds ``round_ctx.activity_reporter`` as the ambient ``current_activity_reporter`` for
@@ -146,10 +144,7 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
             auto_fix_cap_exhausted = auto_fix_rounds >= _MAX_AUTO_FIX_ROUNDS
             if step.supports_fix_round and outcome.auto_fixable and not auto_fix_cap_exhausted:
                 auto_fix_rounds += 1
-                round_ctx = dataclasses.replace(
-                    round_ctx,
-                    fix_round=FixRound(instructions=describe_auto_fix_findings(outcome.findings)),
-                )
+                round_ctx = round_ctx.with_fix_round(describe_auto_fix_findings(outcome.findings))
                 continue
 
             # needs_approval, or (for a fix-round-eligible step) a still-auto_fixable
@@ -168,10 +163,7 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
                 raise RunAbortedError(step_name)
             if response.decision == "fix":
                 # Human's own fix round: never counted toward _MAX_AUTO_FIX_ROUNDS.
-                round_ctx = dataclasses.replace(
-                    round_ctx,
-                    fix_round=FixRound(instructions=response.instructions or ""),
-                )
+                round_ctx = round_ctx.with_fix_round(response.instructions or "")
                 continue
             # "approve"/"skip" both just move on; the caller (tui/app.py) decides how to
             # render the distinction.

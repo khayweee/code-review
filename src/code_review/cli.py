@@ -28,7 +28,7 @@ from code_review.agent import ClaudeCLI
 from code_review.install_state import state_dir
 from code_review.pipeline import StepContext, StepEvent, run_steps
 from code_review.steps.intent import Intent
-from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_REGISTRY
+from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_DISPLAY_NAMES, STEP_REGISTRY
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
 from code_review.tui.approval_relay import ApprovalRelay
@@ -251,6 +251,7 @@ def review(
         activity_relay=activity_relay,
         approval_relay=approval_relay,
         branch=branch,
+        display_names=STEP_DISPLAY_NAMES,
     )
     tui_app.run()
     asyncio.run(agent.close())

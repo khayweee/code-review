@@ -557,7 +557,7 @@ def test_pipeline_box_has_a_pipeline_border_title() -> None:
         async with app.run_test() as pilot:
             await pilot.pause()
             box = app.query_one(PipelineBox)
-            assert box.border_title == "Agentic Code Review Pipeline"
+            assert box.border_title == "Agentic Code-Review Pipeline"
 
     asyncio.run(scenario())
 

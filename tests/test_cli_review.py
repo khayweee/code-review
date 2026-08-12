@@ -558,7 +558,7 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep"):
+    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
@@ -670,8 +670,9 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     # The finding this guard produces names the unpushed commit -- proof this is really
     # `steps/rebase.py`'s issue #24 guard firing, not some other park.
     assert unpushed_sha[:7] in output
-    # No further step ran: aborting stopped the run before ReviewStep ever started.
-    assert "ReviewStep" not in output or "◌ ReviewStep" in output
+    # No further step ran: aborting stopped the run before ReviewStep (rendered "Review")
+    # ever started.
+    assert "◌ Review" in output
 
     _assert_no_leftover_code_review_process()
 
@@ -702,7 +703,7 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep"):
+    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
@@ -737,7 +738,7 @@ def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep"):
+    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 

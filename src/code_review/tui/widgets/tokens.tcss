@@ -6,14 +6,14 @@ border/text-*) so a value defined here can never be silently shadowed by Textual
 $bg: #0b0f17;
 $bg-surface: #131a24;
 
-$border-color: #2c3b4a;
-$border-color-muted: #1c2733;
+$border-color: #88c1fa;
+$border-color-muted: #1481f5;
 
 $fg: #e6e9ef;
 $fg-secondary: #949494;
 $fg-muted: #5f6b78;
 
-$highlight: #8fdb65;
+$highlight: #d4f5c3;
 
 $status-completed: #5fafff;
 $status-failed: #bb6400;

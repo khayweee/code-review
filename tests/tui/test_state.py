@@ -261,6 +261,48 @@ def test_backfill_without_parked_step_or_skipped_steps_defaults_to_unchanged_com
     assert rows[1] == StepRow(name="RebaseStep", status="completed", duration=1.5)
 
 
+# --- backfill: display_names --------------------------------------------------------------
+
+
+def test_backfill_without_display_names_renders_raw_registry_entries() -> None:
+    rows = backfill(REGISTRY, [], now=100.0)
+
+    assert [row.name for row in rows] == list(REGISTRY)
+
+
+def test_backfill_with_display_names_translates_row_names_only() -> None:
+    """Translation is cosmetic only -- status/duration/park/skip matching (all keyed off
+    the canonical `REGISTRY` names) must be unaffected by relabeling."""
+
+    events = [
+        StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=_PARK_OUTCOME,
+            started_at=2.0,
+            duration=1.5,
+        ),
+    ]
+
+    rows = backfill(
+        REGISTRY,
+        events,
+        now=99.0,
+        parked_step="RebaseStep",
+        display_names={"IntentStep": "Intent", "RebaseStep": "Rebase", "ReviewStep": "Review"},
+    )
+
+    assert [row.name for row in rows] == ["Intent", "Rebase", "Review"]
+    assert rows[1].status == "parked"
+    assert rows[1].duration == 1.5
+
+
+def test_backfill_display_names_falls_back_to_raw_name_when_unmapped() -> None:
+    rows = backfill(REGISTRY, [], now=100.0, display_names={"RebaseStep": "Rebase"})
+
+    assert [row.name for row in rows] == ["IntentStep", "Rebase", "ReviewStep"]
+
+
 # --- latest_findings ---------------------------------------------------------------------
 
 _FINDING = Finding(severity="warning", description="example finding", review_scope="source")

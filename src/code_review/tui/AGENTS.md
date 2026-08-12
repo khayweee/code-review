@@ -58,6 +58,17 @@ without a real agent subprocess.
   `textual.app.App`/`DOMNode` already owns a private `_registry` (its widget registry);
   shadowing it corrupts app teardown with a confusing error far from the assignment. Check
   `dir(App)`/`dir(DOMNode)` before naming a new attribute here.
+- `display_names` (optional, default `None`) is a canonical-name -> friendly-label mapping —
+  `cli.py`/`scripts/preview_tui.py` pass `steps.registry.STEP_DISPLAY_NAMES`, tests pass
+  nothing and see raw canonical names. Stored as `self._display_names` (`{}` if `None`) and
+  only ever used to relabel a rendered string: passed straight through to `state.backfill`'s
+  own `display_names` param for Pipeline-box rows, and applied by hand in
+  `_render_findings` to the `step_name` `state.latest_findings` returns before it reaches
+  `FindingsList`'s `border_title`. Every internal comparison (`_parked_step`,
+  `_skipped_steps`, `_failed_step`, activity attribution) still keys off the canonical name
+  from `StepEvent.step_name` — translating those too would break the very matching
+  `display_names` is designed not to touch (see `registry.py`'s own module docstring for why
+  the two names are kept separate rather than overriding `Step.get_name()`).
 
 ## `state.py`
 
@@ -65,10 +76,14 @@ Pure backfill of `StepEvent`s (plus the app's own park/skip/activity bookkeeping
 render-ready rows. No Textual import.
 
 - `backfill(registry, events, ..., failed_step, parked_step, skipped_steps,
-  activity_events)` → `list[StepRow]`, one per registry entry: pending (no event),
-  running/failed, completed, or parked/skipped (both are caller-supplied overrides of a
-  "completed" event — `run_steps` already yields "completed" before checking
-  `needs_approval`, so park/skip are never a third `StepEvent` status).
+  activity_events, display_names)` → `list[StepRow]`, one per registry entry: pending (no
+  event), running/failed, completed, or parked/skipped (both are caller-supplied overrides
+  of a "completed" event — `run_steps` already yields "completed" before checking
+  `needs_approval`, so park/skip are never a third `StepEvent` status). Every comparison
+  (`registry` order, `failed_step`, `parked_step`, `skipped_steps`, activity attribution)
+  keys off the canonical step name; `display_names` (optional, default `None`) is applied
+  last, only to the `StepRow.name` a row actually renders — keeps this module ignorant of
+  any specific naming scheme (see `app.py`'s own note on why).
 - `backfill_activities` groups tagged `(step_name, ActivityEvent)` pairs into
   `ActivityRow`s nested under `StepRow.activities`, using the same elapsed/final duration
   rule as `StepRow` itself.

@@ -37,7 +37,7 @@ import contextvars
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
 
@@ -148,6 +148,15 @@ class StepContext:
         """Report one nested unit of work: `async with ctx.report_activity("fetch"): ...`."""
 
         return activity_or_nullcontext(self.activity_reporter, label)
+
+    def with_fix_round(self, instructions: str) -> StepContext:
+        """Return a copy of this StepContext for a fix-mode re-run of the same step, with
+        `fix_round` set to `FixRound(instructions)`. Every other field carries over
+        unchanged; this StepContext itself is never mutated (frozen) -- see `executor.py`'s
+        fix-round loop, the sole caller.
+        """
+
+        return replace(self, fix_round=FixRound(instructions=instructions))
 
 
 @dataclass(frozen=True, slots=True)

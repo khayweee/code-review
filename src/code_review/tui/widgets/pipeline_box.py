@@ -168,7 +168,7 @@ class PipelineBox(_BorderedBox):
         self._spinners: dict[str, Spinner] = {}
         super().__init__(render_rows_live(rows, self._spinners), id=id, classes=classes)
         self._rows = list(rows)
-        self.border_title = "Agentic Code Review Pipeline"
+        self.border_title = "Agentic Code-Review Pipeline"
         # None (no branch passed) leaves no border_subtitle at all -- "no box, not a
         # placeholder", same discipline the Findings/Status boxes already follow.
         if branch is not None:

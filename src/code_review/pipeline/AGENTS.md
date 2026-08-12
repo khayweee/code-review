@@ -98,9 +98,10 @@ fixes first, and a human can request as many manual fix rounds as they want at a
 - The approval seam extends from a bare `Decision` string to `ApprovalResponse(decision:
   ApprovalDecision, instructions: str | None)`, where `ApprovalDecision` gains a fourth
   value, `"fix"`, alongside `"approve"`/`"skip"`/`"abort"`.
-- `executor.py`'s per-step body becomes an inner `while True` loop (`dataclasses.replace`-ing
-  an evolving `round_ctx`, never mutating the caller's own `ctx`) nested inside the outer
-  `for step in steps:` loop.
+- `executor.py`'s per-step body becomes an inner `while True` loop, nested inside the outer
+  `for step in steps:` loop, replacing an evolving `round_ctx` each round via
+  `round_ctx.with_fix_round(instructions)` (`pipeline/step.py`, a thin `dataclasses.replace`
+  wrapper) rather than mutating the caller's own `ctx`.
 - Gated entirely on a new `Step.supports_fix_round: ClassVar[bool]` (default `False`) so
   that `outcome.auto_fixable` alone never drives the loop.
 - `pipeline/findings.py`'s `describe_auto_fix_findings` renders the automatic path's

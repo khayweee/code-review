@@ -13,12 +13,15 @@ does not contain review policy or GitHub-specific behavior; those belong in
 | `StepContext` | Immutable per-pipeline-run data shared by every step (see `docs/GLOSSARY.md`'s "run" entry). | `cwd`, `agent`, `diff`, and `intent` | Read by steps; it is not itself transformed |
 | `StepOutcome` | A step's report to the executor. | Values chosen by the step | `needs_approval`, `auto_fixable`, and step-specific `findings` |
 | `StepEvent` | One progress unit `run_steps` yields: a step entering `"running"`, or its `"completed"` report. | Produced by the executor, not by steps themselves | `step_name`, `status`, `outcome` (set only when completed), `started_at`/`duration` |
-| `run_steps` | Executes the supplied steps sequentially, yielding a running/completed event pair per step as it goes. | Ordered `list[Step]` and one `StepContext` | `AsyncIterator[StepEvent]`, two events per step in execution order |
-| `findings.py` | Reserved home for the shared finding schema and fix-loop helpers. | Not implemented yet | Not implemented yet |
+| `run_steps` | Executes the supplied steps sequentially, yielding a running/completed event pair per round, and pausing for a human at an approval park. | Ordered `list[Step]` and one `StepContext` | `AsyncIterator[StepEvent]`, two events per round in execution order |
+| `findings.py` | Shared finding schema (`Finding`), the fail-safe action default, the blocking-findings gate, and fix-loop rendering helpers. | `ReviewOutput`/`TestSufficiencyOutput`-shaped findings | `Finding`, `has_blocking_finding`, `describe_auto_fix_findings`, `describe_finding_decisions` |
 
 `StepOutcome.findings` is currently typed as `object` because each step owns its output
-schema. Callers narrow it to the expected type. The approval and auto-fix flags are
-reported now, but the executor does not act on them yet.
+schema. Callers narrow it to the expected type. `run_steps` acts on `needs_approval` and
+`auto_fixable` today: a step opted into `supports_fix_round` gets bounded automatic fix
+rounds before falling through to a park; `needs_approval` parks outright. See
+`pipeline/step.py`'s `FixRound`/`StepContext.fix_round` and `pipeline/AGENTS.md`'s
+"Milestone 7" entries for the full loop.
 
 `StepEvent` is what a caller actually iterates today, not `StepOutcome` directly -- pulling
 a step's `StepOutcome` out means reading it off that step's `"completed"` event. `step_name`
@@ -43,9 +46,10 @@ a live stream of events, two per step, in execution order
 ```
 
 The intended application supplies the canonical hard-coded step list. `run_steps`
-preserves that order; it does not discover, sort, skip, or reorder steps. Today it runs
-every supplied step unconditionally. Branching for blocking findings, automatic fixes,
-human approval, and head continuity are later executor milestones. A caller that only
+preserves that order; it does not discover, sort, skip, or reorder steps. A step can run
+more than once per slot when a fix round fires, but the outer step order itself never
+changes. Head continuity remains a later executor milestone (`pipeline/AGENTS.md`'s
+"Open" section). A caller that only
 wants the final outcomes (e.g. a non-interactive script) drains the stream itself:
 `outcomes = [e.outcome async for e in run_steps(steps, ctx) if e.status == "completed"]`.
 A caller that wants live progress -- the Milestone 13 TUI (`tui/`, issue #40) -- consumes
@@ -77,34 +81,47 @@ This section is the shortest end-to-end mental model of object creation and cont
 1. `cli.py` builds the shared run objects.
    - `Intent(...)` from `--intent`.
    - `ClaudeCLI()` as the `Agent` implementation.
-   - `InputRelay()` so backend prompts can be relayed to the TUI when needed.
-   - `StepContext(cwd, agent, diff, intent, on_input_needed=relay.request_input)`.
+   - `InputRelay()`, and (for an interactive run) an `ActivityRelay` and `ApprovalRelay` so
+     backend prompts, sub-step activity, and approval parks can all reach the TUI.
+   - `StepContext(cwd, agent, diff, intent, on_input_needed=relay.request_input,
+     activity_reporter=activity_relay, on_approval_needed=approval_relay.request_approval)`.
    - `steps = [cls() for cls in IMPLEMENTED_STEPS]`.
 
 2. `cli.py` starts orchestration by creating `run_steps(steps, ctx)`.
    - This returns an async event stream (`AsyncIterator[StepEvent]`).
    - The TUI consumes this stream live.
 
-3. The executor runs each step in fixed order.
-   - For each step: emit `StepEvent(status="running")`.
-   - Call `await step.run(ctx)`.
-   - Emit `StepEvent(status="completed", outcome=StepOutcome(...))`.
-   - Current behavior: every supplied step runs unconditionally; no branching yet.
+3. The executor runs each step in fixed order, and each step's slot can loop over more
+   than one round.
+   - For each round: emit `StepEvent(status="running")`, call `await step.run(round_ctx)`,
+     emit `StepEvent(status="completed", outcome=StepOutcome(...))`.
+   - If the step opted into `supports_fix_round` and the outcome is `auto_fixable`, the
+     executor builds a `FixRound` and re-runs the same step (bounded by
+     `_MAX_AUTO_FIX_ROUNDS`) before moving to the next step.
+   - Step order across slots is still fixed and unconditional; only the round count within
+     a slot varies.
 
-4. Inside each step, control is step-local.
-   - Agent-dependent step: constructs its own `RunOpts(...)` (including `output_schema`) and
-     calls `await ctx.agent.run(opts)`.
+4. Inside each round, control is step-local.
+   - Agent-dependent step: constructs its own `RunOpts(...)` (including `output_schema`),
+     branching only on whether `round_ctx.fix_round is not None` to pick a fix-mode prompt,
+     and calls `await round_ctx.agent.run(opts)`.
    - Non-agent step: executes local logic directly (for example intent passthrough or git
      orchestration).
 
-5. Each step returns one `StepOutcome`.
+5. Each round returns one `StepOutcome`.
    - `findings`: step-specific output payload.
-   - `needs_approval` and `auto_fixable`: flags reported now for later milestones.
+   - `needs_approval` and `auto_fixable`: consulted by the executor to decide the next round
+     (see step 3) and whether to park.
 
-6. Findings influence step flags, not executor branching (yet).
-   - Example: a step can map a finding action like `ask-user` to
-     `StepOutcome.needs_approval = True`.
-   - Current executor does not pause/park on this flag yet; that logic is a later milestone.
+6. Findings drive real executor branching today.
+   - A step maps a blocking finding (any resolved `ask-user` action) to
+     `StepOutcome.needs_approval = True`, and an `auto-fix`-actioned finding to
+     `auto_fixable = True`.
+   - The executor parks on `needs_approval`, or on a still-`auto_fixable` outcome once the
+     automatic fix-round cap is exhausted, awaiting `ctx.on_approval_needed(step_name,
+     outcome)` for an "approve"/"skip"/"abort"/"fix" decision. See `pipeline/AGENTS.md`'s
+     "Milestone 7" entries for the full loop and `executor.py`'s module docstring for the
+     exact state machine.
 
 7. Permission prompts are backend-level I/O, not finding-level control flow.
    - If a call runs with skip-permissions, no interactive prompt path is used.

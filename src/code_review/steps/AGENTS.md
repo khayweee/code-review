@@ -68,8 +68,7 @@ schema/orchestration split and its fix-mode support.
   `ctx.fix_round is not None`, `build_test_sufficiency_prompt(ctx)` otherwise, kept as a
   separately-defined, same-named local constant rather than an import from `review.py`, per
   issue #58's no-cross-step-sharing decision.
-- Not yet registered in `STEP_REGISTRY`'s `IMPLEMENTED_STEPS` or wired into `cli.py`
-  (issue #60) or the TUI (issue #61).
+- Registered in `STEP_REGISTRY`'s `IMPLEMENTED_STEPS` and wired into `cli.py` (issue #60).
 
 ## pr.py
 

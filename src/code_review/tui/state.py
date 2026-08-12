@@ -1,7 +1,10 @@
 """Pure, Textual-independent backfill of pipeline progress into display rows.
 
 `backfill` turns `pipeline.step.StepEvent`s seen so far into one `StepRow` per registry
-entry; no Textual import, so it's unit-testable against hand-built `StepEvent`s.
+entry; no Textual import, so it's unit-testable against hand-built `StepEvent`s. Every
+comparison inside `backfill` keys off the canonical step name (`Step.get_name()`); its
+optional `display_names` param only relabels the resulting `StepRow.name` for rendering, so
+this module stays agnostic of any particular naming scheme.
 
 `StepEvent.status` only distinguishes `"running"`/`"completed"` -- a step that raises never
 gets a "completed" event, so the caller passes the failing step's name in as `failed_step`.
@@ -21,7 +24,7 @@ into one `ActivityRow` per activity, attached to its owning `StepRow.activities`
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -99,7 +102,7 @@ def backfill_activities(
 class StepRow:
     """One line of the live pipeline-progress view."""
 
-    name: str  # registry display name, e.g. "IntentStep"
+    name: str  # display name, e.g. "Intent" -- see `backfill`'s `display_names` param
     status: Status
     duration: float | None  # None while pending; elapsed-so-far while running/failed
     activities: tuple[ActivityRow, ...] = ()  # nested activity lines, first-seen order
@@ -114,6 +117,7 @@ def backfill(
     parked_step: str | None = None,
     skipped_steps: Collection[str] = (),
     activity_events: Sequence[tuple[str | None, ActivityEvent]] = (),
+    display_names: Mapping[str, str] | None = None,
 ) -> list[StepRow]:
     """Turn `events` seen so far into one `StepRow` per `registry` entry, in order.
 
@@ -122,6 +126,12 @@ def backfill(
     `duration` computed as `now - started_at`. A `"completed"` event is `"completed"`
     unless its name equals `parked_step` (`"parked"`) or is in `skipped_steps`
     (`"skipped"`). Each row's `activities` comes from `backfill_activities`.
+
+    `registry`/`events`/`failed_step`/`parked_step`/`skipped_steps` all key off the same
+    canonical per-step name (`Step.get_name()`, matched via `StepEvent.step_name`) -- that
+    name is what every comparison in this function uses. `display_names` (typically
+    `steps.registry.STEP_DISPLAY_NAMES`) is applied only at the very end, translating each
+    row's rendered `StepRow.name` to a friendlier label; a name with no entry renders as-is.
     """
 
     started_at_by_step: dict[str, float] = {}
@@ -135,11 +145,12 @@ def backfill(
 
     rows = []
     for name in registry:
+        display_name = name if display_names is None else display_names.get(name, name)
         activities = tuple(backfill_activities(name, activity_events, now=now))
         if name == parked_step:
             rows.append(
                 StepRow(
-                    name=name,
+                    name=display_name,
                     status="parked",
                     duration=duration_by_completed_step.get(name),
                     activities=activities,
@@ -148,7 +159,7 @@ def backfill(
         elif name in skipped_steps:
             rows.append(
                 StepRow(
-                    name=name,
+                    name=display_name,
                     status="skipped",
                     duration=duration_by_completed_step.get(name),
                     activities=activities,
@@ -157,7 +168,7 @@ def backfill(
         elif name in duration_by_completed_step:
             rows.append(
                 StepRow(
-                    name=name,
+                    name=display_name,
                     status="completed",
                     duration=duration_by_completed_step[name],
                     activities=activities,
@@ -167,14 +178,16 @@ def backfill(
             status: Status = "failed" if name == failed_step else "running"
             rows.append(
                 StepRow(
-                    name=name,
+                    name=display_name,
                     status=status,
                     duration=now - started_at_by_step[name],
                     activities=activities,
                 )
             )
         else:
-            rows.append(StepRow(name=name, status="pending", duration=None, activities=activities))
+            rows.append(
+                StepRow(name=display_name, status="pending", duration=None, activities=activities)
+            )
     return rows
 
 

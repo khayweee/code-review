@@ -1,6 +1,7 @@
 """Test-sufficiency schema and `TestSufficiencyStep`.
 
-Not yet added to `steps/registry.py`'s `IMPLEMENTED_STEPS` or wired into `cli.py`.
+Registered in `steps/registry.py`'s `IMPLEMENTED_STEPS`, which `cli.py` builds its step
+list from directly.
 
 Holds only the schema (`TestSufficiencyOutput`, `TestArtifact`) and step-orchestration
 code, mirroring `steps/review.py`'s split. Prompt construction lives in
