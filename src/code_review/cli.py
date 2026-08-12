@@ -250,6 +250,7 @@ def review(
         input_relay=relay,
         activity_relay=activity_relay,
         approval_relay=approval_relay,
+        branch=branch,
     )
     tui_app.run()
     asyncio.run(agent.close())

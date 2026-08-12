@@ -1,5 +1,7 @@
 """Shared icon/color constants (plain data only, no widget logic) for the widgets
-package."""
+package. `tokens.tcss` is the palette of record -- every hex value below must match its
+`tokens.tcss` counterpart exactly (Rich style strings can't reference Textual CSS
+variables at runtime, so these stay separate literal constants)."""
 
 from __future__ import annotations
 
@@ -16,10 +18,10 @@ _STATUS_ICONS: dict[Status, str] = {
     "skipped": "⏭",
 }
 
-_ACTIVITY_STYLE = "grey58"
+_ACTIVITY_STYLE = "#949494"  # tokens.tcss's $fg-secondary
 
 # Live pipeline view only: completed/failed rows render this dot, colored by status,
-# instead of the fallback glyph above.
+# instead of the fallback glyph above. Values match tokens.tcss's $status-* tokens.
 _DOT_ICON = "●"
 _STATUS_DOT_STYLES: dict[Status, str] = {
     "completed": "#5fafff",

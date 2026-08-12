@@ -1,13 +1,18 @@
 FindingsList {
-    border: round $primary;
+    background: $bg-surface;
+    color: $fg;
+    border: round $border-color;
     padding: 0 1;
     height: auto;
 }
 
+/* Overrides Textual's own `ListView { background: $surface; }` default, which would
+otherwise leak its builtin gray through in the row area behind each `Finding`. */
 FindingsList > _FindingsListView {
     height: auto;
+    background: $bg-surface;
 }
 
 FindingsList .footer-hint {
-    color: $text-muted;
+    color: $fg-secondary;
 }
