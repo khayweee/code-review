@@ -68,7 +68,6 @@ class StreamViewer(Static):
 
     def handle_stream_event(self, message: StreamEventMessage) -> None:
         """Handle a StreamEventMessage by adding it to the display."""
-        from code_review.agent.streaming import StreamEventType
 
         event = message.event
         self._events.append(event)

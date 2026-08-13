@@ -6,7 +6,6 @@ Consumed by TUI, test observers, or other live-display systems.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any

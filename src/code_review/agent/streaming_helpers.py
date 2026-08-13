@@ -16,9 +16,7 @@ from code_review.pipeline.step import StepContext
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
-async def run_with_streaming(
-    ctx: StepContext, opts: RunOpts[OutputT]
-) -> Result[OutputT]:
+async def run_with_streaming(ctx: StepContext, opts: RunOpts[OutputT]) -> Result[OutputT]:
     """Call agent.run() with streaming wired to the pipeline context.
 
     If ctx.on_stream_event is set, passes it through to opts.on_stream_event.
@@ -40,7 +38,9 @@ async def run_with_streaming(
         tools_allowlist=opts.tools_allowlist,
         permission_mode=opts.permission_mode,
         on_input_needed=opts.on_input_needed,
-        on_stream_event=ctx.on_stream_event if opts.on_stream_event is None else opts.on_stream_event,
+        on_stream_event=ctx.on_stream_event
+        if opts.on_stream_event is None
+        else opts.on_stream_event,
     )
 
     return await ctx.agent.run(opts_with_streaming)
