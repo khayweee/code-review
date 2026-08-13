@@ -803,6 +803,23 @@ def _assert_no_leftover_code_review_process(pgid: int) -> None:
         )
 
 
+# Every test below spawns a real ReviewApp over a real pty and therefore inherits
+# PipelineBox's live spinner/gradient animation for as long as any step is "running"/parked
+# (see pipeline_box.py's `_SHIMMER_TICK_SECONDS`) -- real, sustained CPU and pty-output load
+# for the whole test, not a brief spike. Under plain `-n auto` (`--dist=load`, pytest-xdist's
+# default), pytest-xdist is free to schedule several of these onto different workers at the
+# same time, so their animations compete for the CI runner's own small core count -- this is
+# what was actually pushing `_run_review_with_keypresses`'s exit-wait past even a 60s bound
+# in CI, not any single test being slow on its own (each passes in a couple of seconds in
+# isolation). `xdist_group` (used with `--dist=loadgroup` -- see `.github/workflows/ci.yml`)
+# pins every test carrying this marker to the same worker, so at most one of them ever
+# animates at once; the rest of the suite still spreads across every other worker exactly as
+# before. A plain `-n auto` run (e.g. this file's own local `uv run pytest -n auto` without
+# the extra flag) ignores the marker and schedules these exactly as it did previously.
+_REAL_PTY_FULL_RUN_GROUP = "real_pty_full_run"
+
+
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -849,6 +866,7 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_the_run(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -896,6 +914,7 @@ def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_th
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -928,6 +947,7 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
 # --- The approval park, proven against RebaseStep's real, already-shipped guard (#80) ----
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     repo_with_unpushed_local_default_commits: tuple[Path, str, str], tmp_path: Path
 ) -> None:
@@ -971,6 +991,7 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continues(
     repo_with_unpushed_local_default_commits: tuple[Path, str, str],
     tmp_path: Path,
@@ -1005,6 +1026,7 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
