@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
 
 from code_review.agent import Agent
+from code_review.agent.streaming import StreamEvent
 
 if TYPE_CHECKING:
     # steps/ depends on pipeline/, never the reverse; a top-level import would be circular.
@@ -148,6 +149,10 @@ class StepContext:
     # with ApprovalNotAttachedError rather than hanging or silently approving. cli.py wires
     # this to tui.approval_relay.ApprovalRelay.request_approval.
     on_approval_needed: Callable[[str, StepOutcome], Awaitable[ApprovalResponse]] | None = None
+    # Streaming callback: called with each StreamEvent emitted by agent calls. Enables TUI to
+    # display tool calls/results in real time. None means no streaming (silent mode, backward
+    # compatible). cli.py wires this to tui.streaming.StreamRelay for live display.
+    on_stream_event: Callable[[StreamEvent], Awaitable[None]] | None = None
     # Round-state for a fix-mode re-run of the step currently executing; see FixRound. None
     # means a normal run, not a fix round. executor.run_steps is the sole writer, via
     # dataclasses.replace (ctx itself is never mutated).

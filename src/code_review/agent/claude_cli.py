@@ -1,23 +1,25 @@
-"""Subprocess adapter for non-interactive Claude CLI calls.
+"""Subprocess adapter for non-interactive Claude CLI calls with streaming support.
 
 Runs each Agent call in a fresh ``claude -p`` process: sends the prompt over stdin,
-reads a structured JSON envelope from stdout, and builds CLI args from ``RunOpts``.
+reads NDJSON stream-json format (when streaming is enabled), and builds CLI args from
+``RunOpts``. Emits StreamEvent callbacks for live TUI display.
+
 Spawns the child in its own process group and hands teardown to
 ``process_group.terminate_process_group`` so no descendant survives on any exit path.
 
 Two call paths depending on whether permissions are skipped: the default
-``--dangerously-skip-permissions`` path uses ``process.communicate()`` since that
-subprocess never blocks on stdin. A call that opts out (non-empty ``tools_allowlist``
+``--dangerously-skip-permissions`` path uses ``process.communicate()`` for non-streaming,
+or ``_run_streaming()`` for streaming. A call that opts out (non-empty ``tools_allowlist``
 or a pinned ``permission_mode``) goes through ``_run_with_stdin_relay`` instead, which
-can detect a stdin stall and relay it via ``RunOpts.on_input_needed``. That relay path
-is only exercised against the fake CLI in `tests/agent/fakes/blocks_on_stdin.py` and has
-not been validated against the real `claude` CLI's stdin-blocking behavior.
+can detect a stdin stall and relay it via ``RunOpts.on_input_needed``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
+from typing import cast
 
 from code_review.agent.base import OutputT, Result, RunOpts, Usage
 from code_review.agent.errors import (
@@ -28,6 +30,7 @@ from code_review.agent.errors import (
 )
 from code_review.agent.process_group import terminate_process_group
 from code_review.agent.schema import JsonValue, extract_json, validate_output
+from code_review.agent.streaming import StreamEvent, StreamEventType
 
 # Idle time on stdout before the subprocess is treated as blocked waiting on stdin.
 # Not a public RunOpts field; tests shrink it via monkeypatch.
@@ -35,7 +38,7 @@ _STDIN_IDLE_TIMEOUT_SECONDS = 30.0
 
 
 class ClaudeCLI:
-    """Run each Agent call in a fresh Claude CLI process."""
+    """Run each Agent call in a fresh Claude CLI process with optional streaming."""
 
     async def run(self, opts: RunOpts[OutputT]) -> Result[OutputT]:
         args = _build_args(opts)
@@ -52,13 +55,17 @@ class ClaudeCLI:
             raise ProcessStartError(str(opts.executable), exc) from exc
 
         try:
-            if "--dangerously-skip-permissions" in args:
+            # Use streaming path if callback is attached; otherwise use legacy path
+            if opts.on_stream_event is not None:
+                stdout, stderr = await _run_streaming(process, opts)
+            elif "--dangerously-skip-permissions" in args:
                 stdout, stderr = await process.communicate(opts.prompt.encode("utf-8"))
             else:
                 stdout, stderr = await _run_with_stdin_relay(process, opts)
         finally:
             # Runs on every exit path so no descendant subprocess outlives this call.
             await terminate_process_group(process)
+
         text = stdout.decode("utf-8")
 
         returncode = process.returncode
@@ -74,6 +81,124 @@ class ClaudeCLI:
 
     async def close(self) -> None:
         """The per-call adapter owns no resources between calls."""
+
+
+async def _run_streaming(
+    process: asyncio.subprocess.Process, opts: RunOpts[OutputT]
+) -> tuple[bytes, bytes]:
+    """Read stdout line-by-line in stream-json format, emit StreamEvents to callback.
+
+    Requires --verbose and --output-format stream-json in the args. Processes NDJSON
+    stream and emits observable events as they arrive.
+    """
+
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    assert opts.on_stream_event is not None
+
+    process.stdin.write(opts.prompt.encode("utf-8"))
+    await process.stdin.drain()
+
+    # Pump stderr in background so child can't deadlock on full stderr pipe
+    stderr_task: asyncio.Task[bytes] = asyncio.create_task(process.stderr.read())
+
+    stdout_lines: list[bytes] = []
+    session_id: str | None = None
+
+    try:
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+
+            stdout_lines.append(line)
+
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                # Malformed JSON line; skip but keep reading
+                continue
+
+            # Extract session_id from first message
+            if session_id is None and obj.get("session_id"):
+                session_id = obj["session_id"]
+
+            # Parse and emit observable events
+            event = _parse_stream_line(obj, session_id)
+            if event:
+                await opts.on_stream_event(event)
+
+    finally:
+        stderr = await stderr_task
+
+    await process.wait()
+
+    return b"".join(stdout_lines), stderr
+
+
+def _parse_stream_line(obj: dict, session_id: str | None) -> StreamEvent | None:
+    """Convert a stream-json line into an observable StreamEvent, or None if not interesting."""
+
+    msg_type = obj.get("type")
+
+    if msg_type == "assistant":
+        # Look for tool_use and text blocks in the message
+        message = obj.get("message")
+        if isinstance(message, dict):
+            for block in message.get("content", []):
+                if not isinstance(block, dict):
+                    continue
+
+                if block.get("type") == "tool_use":
+                    return StreamEvent(
+                        type=StreamEventType.TOOL_USE,
+                        payload={
+                            "tool_name": block.get("name"),
+                            "tool_id": block.get("id"),
+                            "input": block.get("input", {}),
+                        },
+                        timestamp=time.time(),
+                        session_id=session_id,
+                    )
+                elif block.get("type") == "text":
+                    text_content = block.get("text", "")
+                    if text_content:  # Only emit non-empty text
+                        return StreamEvent(
+                            type=StreamEventType.ASSISTANT_TEXT,
+                            payload={"content": text_content},
+                            timestamp=time.time(),
+                            session_id=session_id,
+                        )
+                elif block.get("type") == "thinking":
+                    thinking_content = block.get("thinking", "")
+                    if thinking_content:
+                        return StreamEvent(
+                            type=StreamEventType.THINKING,
+                            payload={"content": thinking_content[:500]},  # Truncate for display
+                            timestamp=time.time(),
+                            session_id=session_id,
+                        )
+
+    elif msg_type == "user":
+        # Tool result being fed back to agent
+        message = obj.get("message")
+        if isinstance(message, dict):
+            content = message.get("content", [])
+            if content and isinstance(content[0], dict):
+                if content[0].get("type") == "tool_result":
+                    return StreamEvent(
+                        type=StreamEventType.TOOL_RESULT,
+                        payload={
+                            "tool_id": obj.get("parent_tool_use_id"),
+                            "output": content[0].get("content", ""),
+                            "is_error": content[0].get("is_error", False),
+                        },
+                        timestamp=time.time(),
+                        session_id=session_id,
+                    )
+
+    return None
 
 
 async def _run_with_stdin_relay(
@@ -135,19 +260,40 @@ async def _run_with_stdin_relay(
 
 
 def _build_args(opts: RunOpts[OutputT]) -> list[str]:
-    """Translate ``RunOpts`` into the ``claude -p`` argv for this call."""
+    """Translate ``RunOpts`` into the ``claude -p`` argv for this call.
+
+    If on_stream_event is attached, uses --verbose --output-format stream-json for
+    streaming; otherwise uses --output-format json for legacy single-result mode.
+    """
 
     schema_json = json.dumps(opts.output_schema.model_json_schema(), separators=(",", ":"))
-    args = [
-        str(opts.executable),
-        "-p",
-        "--output-format",
-        "json",
-        "--json-schema",
-        schema_json,
-        "--model",
-        opts.model,
-    ]
+
+    # Use streaming mode if streaming callback is attached
+    if opts.on_stream_event is not None:
+        args = [
+            str(opts.executable),
+            "-p",
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            "--json-schema",
+            schema_json,
+            "--model",
+            opts.model,
+        ]
+    else:
+        # Legacy non-streaming mode
+        args = [
+            str(opts.executable),
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            schema_json,
+            "--model",
+            opts.model,
+        ]
+
     if opts.system_prompt is not None:
         args += ["--system-prompt", opts.system_prompt]
     if opts.append_system_prompt is not None:

@@ -9,6 +9,8 @@ from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from code_review.agent.streaming import StreamEvent
+
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
@@ -21,6 +23,10 @@ class RunOpts(Generic[OutputT]):
     `permission_mode` is set -- either opts out of the default
     `--dangerously-skip-permissions` fast path and routes the call through the
     stdin-relay path instead (see `claude_cli.py`).
+
+    `on_stream_event` enables live streaming of tool calls and results for TUI display.
+    When set, uses Claude CLI's --verbose --output-format stream-json; when None,
+    uses legacy --output-format json (silent mode, backward compatible).
     """
 
     prompt: str  # sent over stdin, not argv, to avoid per-argument size limits
@@ -39,6 +45,9 @@ class RunOpts(Generic[OutputT]):
     # must return the answer to write back. None means fail closed with
     # StdinBlockedError rather than hang or fabricate an answer.
     on_input_needed: Callable[[str], Awaitable[str]] | None = None
+    # Called with each StreamEvent as the agent executes; enables TUI/observer live display.
+    # None means no streaming callbacks (silent mode, backward compatible).
+    on_stream_event: Callable[[StreamEvent], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
