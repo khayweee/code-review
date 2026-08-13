@@ -19,14 +19,11 @@ from code_review.pipeline.step import activity_or_nullcontext, current_activity_
 
 
 def _git_activity_label(args: list[str]) -> str:
-    """Derive a short activity label from `args`: subcommand plus main argument, e.g.
-    `["fetch", "origin", "main"]` -> `"git fetch origin"`. Empty `args` degrades to `"git"`
-    rather than raising.
+    """Render the full command as an activity label, e.g. `["fetch", "origin", "main"]`
+    -> `"git fetch origin main"`. Empty `args` degrades to `"git"` rather than raising.
     """
 
-    subcommand = args[0] if args else ""
-    main_arg = args[1] if len(args) > 1 else ""
-    return f"git {subcommand} {main_arg}".rstrip()
+    return f"git {' '.join(args)}".rstrip()
 
 
 async def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:

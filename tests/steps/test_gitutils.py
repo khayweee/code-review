@@ -277,7 +277,7 @@ def test_run_git_reports_a_started_and_finished_activity_when_a_reporter_is_boun
     assert started.parent_id is None
 
 
-def test_run_git_derives_the_label_from_subcommand_and_main_argument(
+def test_run_git_derives_the_label_from_the_full_command(
     origin_and_checkout: tuple[Path, Path],
 ) -> None:
     _origin, checkout = origin_and_checkout
@@ -291,7 +291,7 @@ def test_run_git_derives_the_label_from_subcommand_and_main_argument(
             current_activity_reporter.reset(token)
         return (await relay.next_event()).label
 
-    assert asyncio.run(scenario()) == "git fetch origin"
+    assert asyncio.run(scenario()) == "git fetch origin main"
 
 
 def test_run_git_reports_an_activity_even_when_the_call_fails(

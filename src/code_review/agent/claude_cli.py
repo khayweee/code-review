@@ -54,10 +54,16 @@ class ClaudeCLI:
         except OSError as exc:
             raise ProcessStartError(str(opts.executable), exc) from exc
 
+        streaming_response: JsonValue | None = None
         try:
-            # Use streaming path if callback is attached; otherwise use legacy path
+            # Streaming takes priority over the stdin-relay path: a call that both attaches
+            # on_stream_event and opts out of --dangerously-skip-permissions (non-empty
+            # tools_allowlist or a pinned permission_mode) still goes through
+            # _run_streaming, which can't detect/relay a stdin stall the way
+            # _run_with_stdin_relay does. Acceptable for now -- ReviewStep, the only
+            # streaming caller, never sets either.
             if opts.on_stream_event is not None:
-                stdout, stderr = await _run_streaming(process, opts)
+                stdout, stderr, streaming_response = await _run_streaming(process, opts)
             elif "--dangerously-skip-permissions" in args:
                 stdout, stderr = await process.communicate(opts.prompt.encode("utf-8"))
             else:
@@ -75,7 +81,14 @@ class ClaudeCLI:
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
             raise ProcessExitError(returncode, stderr_text)
 
-        response = extract_json(text)
+        # The streaming path already captured the parsed "result"-type line while reading
+        # -- reusing that object here (rather than re-deriving it from the concatenated
+        # NDJSON text via extract_json/_last_balanced_object) avoids brace-matching over
+        # raw text that may itself contain "{"/"}" inside a tool's output.
+        if opts.on_stream_event is not None:
+            response = _require_streaming_response(streaming_response, text)
+        else:
+            response = extract_json(text)
         output = validate_output(_structured_output(response, text), opts.output_schema)
         return Result(output=output, text=text, usage=_usage_from(response))
 
@@ -83,13 +96,25 @@ class ClaudeCLI:
         """The per-call adapter owns no resources between calls."""
 
 
+def _require_streaming_response(response: JsonValue | None, text: str) -> JsonValue:
+    """The streaming path's captured `"result"`-type line, or raise if the stream never
+    produced one (e.g. the process was killed mid-stream)."""
+
+    if response is None:
+        raise NoStructuredOutputError(text)
+    return response
+
+
 async def _run_streaming(
     process: asyncio.subprocess.Process, opts: RunOpts[OutputT]
-) -> tuple[bytes, bytes]:
+) -> tuple[bytes, bytes, JsonValue | None]:
     """Read stdout line-by-line in stream-json format, emit StreamEvents to callback.
 
     Requires --verbose and --output-format stream-json in the args. Processes NDJSON
-    stream and emits observable events as they arrive.
+    stream and emits observable events as they arrive. Returns the final `"result"`-type
+    line's parsed object (or None if the stream never produced one) alongside the raw
+    stdout/stderr bytes -- the caller uses that object directly as the response envelope
+    rather than re-deriving it from the concatenated NDJSON text.
     """
 
     assert process.stdin is not None
@@ -99,12 +124,18 @@ async def _run_streaming(
 
     process.stdin.write(opts.prompt.encode("utf-8"))
     await process.stdin.drain()
+    # Streaming never opts into the relay path's on_input_needed handoff (see the
+    # docstring on the streaming-priority branch in run()), so nothing needs stdin left
+    # open past the initial prompt -- closing it lets the child see EOF, matching
+    # communicate()'s behavior on the non-streaming path.
+    process.stdin.close()
 
     # Pump stderr in background so child can't deadlock on full stderr pipe
     stderr_task: asyncio.Task[bytes] = asyncio.create_task(process.stderr.read())
 
     stdout_lines: list[bytes] = []
     session_id: str | None = None
+    result_response: JsonValue | None = None
 
     try:
         while True:
@@ -124,6 +155,9 @@ async def _run_streaming(
             if session_id is None and obj.get("session_id"):
                 session_id = obj["session_id"]
 
+            if obj.get("type") == "result":
+                result_response = cast(JsonValue, obj)
+
             # Parse and emit observable events
             event = _parse_stream_line(obj, session_id)
             if event:
@@ -134,10 +168,10 @@ async def _run_streaming(
 
     await process.wait()
 
-    return b"".join(stdout_lines), stderr
+    return b"".join(stdout_lines), stderr, result_response
 
 
-def _parse_stream_line(obj: dict, session_id: str | None) -> StreamEvent | None:
+def _parse_stream_line(obj: dict[str, object], session_id: str | None) -> StreamEvent | None:
     """Convert a stream-json line into an observable StreamEvent, or None if not interesting."""
 
     msg_type = obj.get("type")
@@ -181,7 +215,10 @@ def _parse_stream_line(obj: dict, session_id: str | None) -> StreamEvent | None:
                         )
 
     elif msg_type == "user":
-        # Tool result being fed back to agent
+        # Tool result being fed back to agent. Correlates via the block's own
+        # "tool_use_id" -- the top-level "parent_tool_use_id" is unrelated (it names the
+        # tool call, if any, that a *subagent* is nested under, not the tool this result
+        # answers).
         message = obj.get("message")
         if isinstance(message, dict):
             content = message.get("content", [])
@@ -190,7 +227,7 @@ def _parse_stream_line(obj: dict, session_id: str | None) -> StreamEvent | None:
                     return StreamEvent(
                         type=StreamEventType.TOOL_RESULT,
                         payload={
-                            "tool_id": obj.get("parent_tool_use_id"),
+                            "tool_id": content[0].get("tool_use_id"),
                             "output": content[0].get("content", ""),
                             "is_error": content[0].get("is_error", False),
                         },
@@ -267,32 +304,13 @@ def _build_args(opts: RunOpts[OutputT]) -> list[str]:
     """
 
     schema_json = json.dumps(opts.output_schema.model_json_schema(), separators=(",", ":"))
+    streaming = opts.on_stream_event is not None
 
-    # Use streaming mode if streaming callback is attached
-    if opts.on_stream_event is not None:
-        args = [
-            str(opts.executable),
-            "-p",
-            "--verbose",
-            "--output-format",
-            "stream-json",
-            "--json-schema",
-            schema_json,
-            "--model",
-            opts.model,
-        ]
-    else:
-        # Legacy non-streaming mode
-        args = [
-            str(opts.executable),
-            "-p",
-            "--output-format",
-            "json",
-            "--json-schema",
-            schema_json,
-            "--model",
-            opts.model,
-        ]
+    args = [str(opts.executable), "-p"]
+    if streaming:
+        args.append("--verbose")
+    args += ["--output-format", "stream-json" if streaming else "json"]
+    args += ["--json-schema", schema_json, "--model", opts.model]
 
     if opts.system_prompt is not None:
         args += ["--system-prompt", opts.system_prompt]

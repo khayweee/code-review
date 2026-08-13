@@ -93,6 +93,7 @@ CLEAN_FAKE_CLI = _FAKES / "review_output_clean.py"
 BLOCKING_FAKE_CLI = _FAKES / "review_output_blocking.py"
 PROMPT_PROBE_FAKE_CLI = _FAKES / "review_prompt_probe.py"
 AUTO_FIX_ROUND_FAKE_CLI = _FAKES / "review_output_auto_fix_round.py"
+STREAMS_A_TOOL_CALL_FAKE_CLI = _FAKES / "review_streams_a_tool_call.py"
 # Reused directly from `tests/agent/` rather than copied into `pipeline/fakes/` -- it is a
 # generic "start, then exit non-zero" double with no `ReviewOutput`-specific behavior, and
 # `tests/agent/test_claude_cli.py`'s own `test_nonzero_exit_raises_process_exit_error_with_
@@ -447,3 +448,46 @@ def test_review_step_still_finishes_its_activity_span_when_the_agent_call_raises
     assert finished.status == "finished"
     assert finished.activity_id == started.activity_id
     assert finished.timestamp >= started.timestamp
+
+
+def test_review_step_streams_each_tool_call_as_a_nested_activity(tmp_path: Path) -> None:
+    """`_tool_stream_relay` (`steps/review.py`) turns each `TOOL_USE`/`TOOL_RESULT` pair
+    from a real streaming `ClaudeCLI` call into its own nested activity span, opened on
+    `TOOL_USE` and closed on its matching `TOOL_RESULT` -- proven against
+    `STREAMS_A_TOOL_CALL_FAKE_CLI`'s real stream-json transcript (one tool call), not a
+    stand-in `Agent`. `run_steps` yields exactly one round here (a clean answer, no
+    park), so this fixture's 4 activity events -- Agent started, Tool started, Tool
+    finished, Agent finished -- are the whole stream."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    relay = ActivityRelay()
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+    )
+    step: Step = ReviewStep(executable=STREAMS_A_TOOL_CALL_FAKE_CLI)
+
+    async def scenario() -> list[ActivityEvent]:
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 4))
+        async for _event in run_steps([step], ctx):
+            pass
+        return await drain_task
+
+    agent_started, tool_started, tool_finished, agent_finished = asyncio.run(scenario())
+    asyncio.run(agent.close())
+
+    assert agent_started.status == "started"
+    assert agent_started.label == "Agent: reviewing diff via claude"
+    assert agent_started.parent_id is None
+
+    assert tool_started.status == "started"
+    assert tool_started.label == "Tool: Read(/fake/path.txt)"
+    # Nested inside the agent-call span -- the whole point of `_tool_stream_relay`.
+    assert tool_started.parent_id == agent_started.activity_id
+
+    assert tool_finished.status == "finished"
+    assert tool_finished.activity_id == tool_started.activity_id
+    assert tool_finished.label == tool_started.label
+
+    assert agent_finished.status == "finished"
+    assert agent_finished.activity_id == agent_started.activity_id

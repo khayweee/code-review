@@ -20,20 +20,23 @@ identical between rounds.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel
 
 from code_review.agent import RunOpts
+from code_review.agent.streaming import StreamEvent, StreamEventType
 from code_review.pipeline.findings import (
     Finding,
     action_or_default,
     filter_pipeline_owned_delivery_findings,
     has_blocking_finding,
 )
-from code_review.pipeline.step import Step, StepContext, StepOutcome
+from code_review.pipeline.step import ActivityReporter, Step, StepContext, StepOutcome
 from code_review.prompt.review import build_review_fix_prompt, build_review_prompt
 
 # --- ReviewOutput ----------------------------------------------------------------------
@@ -57,6 +60,56 @@ class ReviewOutput(BaseModel):
     # Delivery scope the agent judges its risk assessment to be about. Reserved: no code
     # reads this field yet.
     risk_scope: Literal["source-or-external", "pipeline-owned-delivery"] | None = None
+
+
+def _tool_activity_label(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """Render one tool call as an activity label, e.g. `Tool: Read(/path/to/file)`. Falls
+    back to a bare `Tool: <name>` when none of the common single-argument shapes apply.
+    """
+
+    primary = (
+        tool_input.get("file_path")
+        or tool_input.get("command")
+        or tool_input.get("pattern")
+        or tool_input.get("path")
+    )
+    return f"Tool: {tool_name}({primary})" if primary else f"Tool: {tool_name}"
+
+
+def _tool_stream_relay(
+    reporter: ActivityReporter | None,
+) -> Callable[[StreamEvent], Awaitable[None]]:
+    """Build an `on_stream_event` callback that reports each `TOOL_USE`/`TOOL_RESULT` pair
+    as its own nested `reporter.activity(...)` span, keyed by the tool call's own id.
+
+    A `StreamEvent` carries a point-in-time moment, not a single `async with` block, so
+    each tool's span is opened on `TOOL_USE` and closed later on its matching
+    `TOOL_RESULT` via an `AsyncExitStack` kept alive in `open_tools` between the two calls.
+    """
+
+    open_tools: dict[str, AsyncExitStack] = {}
+
+    async def relay(event: StreamEvent) -> None:
+        if reporter is None:
+            return
+        if event.type is StreamEventType.TOOL_USE:
+            tool_id = event.payload.get("tool_id")
+            if tool_id is None:
+                return
+            stack = AsyncExitStack()
+            tool_input = event.payload.get("input") or {}
+            label = _tool_activity_label(event.payload["tool_name"], tool_input)
+            await stack.enter_async_context(reporter.activity(label))
+            open_tools[tool_id] = stack
+        elif event.type is StreamEventType.TOOL_RESULT:
+            result_tool_id = event.payload.get("tool_id")
+            closing_stack = (
+                open_tools.pop(result_tool_id, None) if result_tool_id is not None else None
+            )
+            if closing_stack is not None:
+                await closing_stack.aclose()
+
+    return relay
 
 
 # --- ReviewStep --------------------------------------------------------------------------
@@ -90,12 +143,22 @@ class ReviewStep(Step):
         # Static label ("via claude"), not self.executable -- that field is a test seam,
         # this names the production backend. Reports "finished" even if the call raises.
         async with ctx.report_activity("Agent: reviewing diff via claude"):
+            # None with no reporter attached (rather than a relay that's a no-op at
+            # runtime) so the call stays on claude_cli.py's legacy --output-format json
+            # path when there's nothing to stream tool calls to -- e.g. every test that
+            # runs ReviewStep against a fake CLI without a StepContext.activity_reporter.
+            on_stream_event = (
+                _tool_stream_relay(ctx.activity_reporter)
+                if ctx.activity_reporter is not None
+                else None
+            )
             result = await ctx.agent.run(
                 RunOpts(
                     prompt=prompt,
                     cwd=ctx.cwd,
                     output_schema=ReviewOutput,
                     executable=self.executable,
+                    on_stream_event=on_stream_event,
                 )
             )
 

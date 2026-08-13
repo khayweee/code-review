@@ -1,160 +1,124 @@
 # Streaming Agent Observability
 
-This document describes the streaming infrastructure that enables live observation of LLM execution within the pipeline and TUI.
+Live observation of an LLM call's individual tool calls, surfaced through the same
+activity-pane mechanism the rest of the pipeline already uses — no separate display or
+event stream.
 
 ## Architecture
 
 ### 1. StreamEvent & StreamEventType
 
-Located in `src/code_review/agent/streaming.py`.
+`src/code_review/agent/streaming.py` — backend-agnostic, no dependency on `pipeline/` or
+`tui/`.
 
-- **StreamEventType**: Enum of observable moments:
-  - `TOOL_USE`: Agent called a tool (tool_name, tool_id, input)
-  - `TOOL_RESULT`: Tool returned a result (tool_id, output, is_error)
-  - `ASSISTANT_TEXT`: Final assistant text response (content)
-  - `THINKING`: Extended thinking blocks (content)
-  - `ERROR`: Tool execution error (tool_id, message)
+- **StreamEventType**: `TOOL_USE`, `TOOL_RESULT`, `ASSISTANT_TEXT`, `THINKING`, `ERROR`.
+- **StreamEvent**: frozen dataclass — `type`, `payload: dict` (type-specific), `timestamp`,
+  `session_id: str | None`.
 
-- **StreamEvent**: Immutable dataclass carrying:
-  - `type: StreamEventType`
-  - `payload: dict` – type-specific data
-  - `timestamp: float` – when event occurred
-  - `session_id: str | None` – backend session ID
-
-### 2. Streaming in RunOpts
+### 2. RunOpts.on_stream_event
 
 `src/code_review/agent/base.py`:
 
 ```python
 @dataclass
 class RunOpts(Generic[OutputT]):
-    # ... existing fields ...
+    ...
     on_stream_event: Callable[[StreamEvent], Awaitable[None]] | None = None
 ```
 
-- When `None`: silent mode (backward compatible, legacy behavior)
-- When set: agent call uses `--verbose --output-format stream-json` and invokes the callback for each event
+`None` (the default) keeps `ClaudeCLI` on the legacy `--output-format json` path. Setting
+it switches to `--verbose --output-format stream-json` and invokes the callback for each
+parsed line.
 
-### 3. ClaudeCLI Streaming Implementation
+### 3. ClaudeCLI streaming path
 
 `src/code_review/agent/claude_cli.py`:
 
-- `_build_args()`: Switches to `stream-json` mode when `opts.on_stream_event` is set
-- `_run_streaming()`: Reads NDJSON line-by-line, calls `_parse_stream_line()` for each
-- `_parse_stream_line()`: Converts raw stream-json into typed `StreamEvent` instances
-- Emits events as soon as they're available (no buffering)
+- `_build_args` switches to `stream-json`/`--verbose` when `opts.on_stream_event` is set.
+- `_run_streaming` reads NDJSON line-by-line, calling `_parse_stream_line` for each line
+  and emitting events as they arrive — no buffering. It also captures the one
+  `"result"`-type line's parsed object directly, so the final structured
+  output/usage are read from that object rather than re-derived from the concatenated
+  NDJSON text (a naive brace-match over the raw text would misfire on `{`/`}` characters
+  inside a tool's own output, e.g. a `Read` of a JSON file).
+- `_parse_stream_line` converts one stream-json line into a `StreamEvent`, or `None` for
+  lines with nothing observable. A `tool_result` correlates to its call via the block's
+  own `tool_use_id`, not the enclosing message's `parent_tool_use_id` (that field names a
+  *subagent's* enclosing tool call, if any — unrelated).
 
-### 4. Pipeline Integration
+Known limitation: the streaming path takes priority over the stdin-relay path in `run()`,
+so streaming and permission-gated calls (`tools_allowlist`/a pinned `permission_mode`)
+aren't supported together. Not a current gap in practice — `ReviewStep`, the only caller
+that streams, never sets either.
 
-`src/code_review/pipeline/step.py`:
+### 4. Wiring into a step: ReviewStep
 
-```python
-@dataclass(frozen=True, slots=True)
-class StepContext:
-    # ... existing fields ...
-    on_stream_event: Callable[[StreamEvent], Awaitable[None]] | None = None
-```
+There is no `StepContext.on_stream_event` field and no separate stream display — a step
+that wants to stream builds a relay closure over its own `ctx.activity_reporter` and
+passes it straight to `RunOpts`. `src/code_review/steps/review.py`:
 
-`src/code_review/agent/streaming_helpers.py`:
+- `_tool_activity_label(tool_name, tool_input)` renders one tool call as e.g.
+  `Tool: Read(/path/to/file)`.
+- `_tool_stream_relay(reporter)` returns an `on_stream_event` callback that opens a nested
+  `reporter.activity(label)` span on `TOOL_USE` and closes it on the matching
+  `TOOL_RESULT`, keyed by `tool_id` (a `StreamEvent` is a point-in-time callback, not an
+  `async with` block, so the span's `AsyncExitStack` is held open in a dict between the
+  two calls).
+- `ReviewStep.run` builds this relay only when `ctx.activity_reporter is not None`
+  (passing `None` otherwise, not a no-op relay, so tests/calls with no reporter stay on
+  the legacy JSON path) and passes it to `RunOpts` from inside the existing
+  `ctx.report_activity("Agent: reviewing diff via claude")` span, so each tool's activity
+  nests under it automatically via `ActivityRelay`'s contextvar-based parent tracking —
+  see `src/code_review/tui/activity.py`'s module docstring.
 
-```python
-async def run_with_streaming(ctx: StepContext, opts: RunOpts[OutputT]) -> Result[OutputT]:
-    """Wire streaming from StepContext into agent.run()."""
-    opts_with_streaming = RunOpts(..., on_stream_event=ctx.on_stream_event)
-    return await ctx.agent.run(opts_with_streaming)
-```
+No TUI-layer change was needed: `tui/state.py`'s `backfill_activities` already renders
+every activity reported under a step as its own row regardless of nesting depth, so tool
+rows just appear alongside the outer "Agent: reviewing..." row.
 
-**Usage in steps:**
-
-```python
-# Instead of:
-result = await ctx.agent.run(RunOpts(...))
-
-# Use:
-from code_review.agent.streaming_helpers import run_with_streaming
-result = await run_with_streaming(ctx, RunOpts(...))
-```
-
-### 5. TUI Display
-
-`src/code_review/tui/streaming.py`:
-
-- **StreamRelay**: Adapts `Callable[[StreamEvent], Awaitable[None]]` to post messages to a Textual app
-- **StreamViewer**: Textual widget that displays last 20 events with icons
-- **StreamEventMessage**: Textual message carrying a StreamEvent
-
-**Integration in app:**
-
-```python
-relay = StreamRelay()
-relay.attach(app)
-
-step_context = StepContext(
-    ...,
-    on_stream_event=relay,
-)
-```
-
-## Data Flow
+## Data flow
 
 ```
 Claude CLI (stream-json)
   ↓ (NDJSON lines)
-_run_streaming()
+_run_streaming
   ↓ (raw JSON)
-_parse_stream_line()
+_parse_stream_line
   ↓ (StreamEvent)
-on_stream_event callback
-  ↓ (awaits)
-StreamRelay
-  ↓ (posts message)
-Textual App.post_message()
-  ↓ (queued)
-StreamEventMessage handler
-  ↓ (updates)
-StreamViewer widget
+_tool_stream_relay (steps/review.py)
+  ↓ (nested activity() span)
+ActivityRelay
+  ↓ (ActivityEvent)
+tui/state.py's backfill_activities
   ↓ (renders)
-Live TUI display
+Activity pane
 ```
-
-## Example: Adding Streaming to a Step
-
-1. Import the helper:
-   ```python
-   from code_review.agent.streaming_helpers import run_with_streaming
-   ```
-
-2. Replace `ctx.agent.run(opts)` with:
-   ```python
-   result = await run_with_streaming(ctx, opts)
-   ```
-
-3. The streaming callback flows automatically from the pipeline context (if wired).
 
 ## Testing
 
-`tests/agent/test_streaming.py`:
-
-- `test_streaming_events_emitted_on_tool_use`: Verifies events are captured
-- `test_streaming_backward_compatible_without_callback`: Ensures silent mode still works
-- `test_stream_event_has_required_fields`: Validates event structure
+- `tests/agent/test_streaming.py` — `_parse_stream_line` against real stream-json line
+  shapes, and `ClaudeCLI.run`/`_run_streaming` end to end against a fake CLI that emits a
+  full NDJSON transcript (`tests/agent/fakes/streaming_tool_call.py`).
+- `tests/steps/test_review.py` — `ReviewStep` produces the expected nested `ActivityEvent`s
+  for a real streamed tool call (`tests/pipeline/fakes/review_streams_a_tool_call.py`).
 
 Run:
 ```bash
-uv run pytest tests/agent/test_streaming.py -v
+uv run pytest tests/agent/test_streaming.py tests/steps/test_review.py -v
 ```
 
-## Future: Multi-Provider Support
+## Adding streaming to another step
 
-To add streaming for a different LLM provider (e.g., Bedrock, Vertex AI):
+Only worth doing for a step that itself calls `ctx.agent.run` with tool use enabled.
+Build a relay closure over `ctx.activity_reporter` the same way `_tool_stream_relay` does,
+and pass it as `RunOpts.on_stream_event` from inside that step's own
+`ctx.report_activity(...)` span so nesting falls out automatically. No new `StepContext`
+field, no new TUI widget.
 
-1. Implement a new adapter (e.g., `src/code_review/agent/bedrock_adapter.py`)
-2. Parse provider's streaming format into same `StreamEvent` types
-3. Call `opts.on_stream_event(event)` as events arrive
-4. No changes needed to TUI, pipeline, or steps
+## Future: multi-provider support
 
-## Known Limitations
+To add streaming for a different LLM provider (e.g. Bedrock, Vertex AI):
 
-- Streaming requires `--verbose` in Claude CLI; overhead is minimal
-- TUI displays last 20 events; older events are rotated out
-- `stream-json` mode incompatible with `--permission-mode manual` (stdin relay). Workaround: use auto or skip permissions for streaming runs
+1. Implement a new `Agent` adapter.
+2. Parse that provider's streaming format into the same `StreamEvent` types.
+3. Call `opts.on_stream_event(event)` as events arrive.
+4. No changes needed anywhere else — pipeline, steps, and TUI are all backend-agnostic.
