@@ -7,6 +7,11 @@ thread so a slow diff doesn't delay the TUI's first paint) and runs the implemen
 through `run_steps`. The branch ref is verified synchronously before the TUI starts, so a
 bad BRANCH fails fast with no TUI flash.
 
+`review` also persists a per-run plain-text transcript via `run_log.RunLogWriter`: `_log_
+step_events` tees `StepEvent`s to it as `ReviewApp` consumes them, `ActivityRelay`'s
+`on_event` hook feeds it `ActivityEvent`s the same way, and the final status line is written
+once the TUI exits. Write-only -- nothing in this module or `run_log.py` reads it back.
+
 `update`/`uninstall` shell out to `uv tool upgrade`/`uv tool uninstall`; `uv` owns all
 dependency/env/binary management, nothing is reimplemented here.
 """
@@ -27,12 +32,14 @@ from code_review import __version__
 from code_review.agent import ClaudeCLI
 from code_review.install_state import state_dir
 from code_review.pipeline import StepContext, StepEvent, run_steps
+from code_review.run_log import RunLogWriter, run_log_path
 from code_review.steps.intent import Intent
 from code_review.steps.registry import IMPLEMENTED_STEPS, STEP_DISPLAY_NAMES, STEP_REGISTRY
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
 from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
+from code_review.tui.state import final_status_message
 
 app = typer.Typer(help="Agentic code-review/gating pipeline.")
 
@@ -220,6 +227,17 @@ async def _run_pipeline(
         yield event
 
 
+async def _log_step_events(
+    events: AsyncIterator[StepEvent], writer: RunLogWriter
+) -> AsyncIterator[StepEvent]:
+    """Tee `events` through `writer.write_step_event` as they pass, so the persisted run log
+    (`run_log.py`) never falls behind what `ReviewApp` is rendering -- a pure pass-through
+    from `ReviewApp`'s point of view."""
+    async for event in events:
+        writer.write_step_event(event)
+        yield event
+
+
 @app.command()
 def review(
     branch: str = typer.Argument(
@@ -241,12 +259,16 @@ def review(
 
     agent = ClaudeCLI()
     relay = InputRelay()
-    activity_relay = ActivityRelay()
+    writer = RunLogWriter(run_log_path(branch))
+    activity_relay = ActivityRelay(on_event=writer.write_activity_event)
     approval_relay = ApprovalRelay()
 
     tui_app = ReviewApp(
         STEP_REGISTRY,
-        _run_pipeline(branch, parsed_intent, agent, relay, activity_relay, approval_relay),
+        _log_step_events(
+            _run_pipeline(branch, parsed_intent, agent, relay, activity_relay, approval_relay),
+            writer,
+        ),
         input_relay=relay,
         activity_relay=activity_relay,
         approval_relay=approval_relay,
@@ -255,6 +277,10 @@ def review(
     )
     tui_app.run()
     asyncio.run(agent.close())
+
+    writer.write_line(final_status_message(tui_app.error))
+    writer.close()
+    typer.echo(f"Run log written to {writer.path}")
 
     if tui_app.error is not None:
         # One generic path for any pipeline failure, including RunAbortedError (a human

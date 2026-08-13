@@ -93,6 +93,9 @@ CLEAN_FAKE_CLI = _FAKES / "review_output_clean.py"
 BLOCKING_FAKE_CLI = _FAKES / "review_output_blocking.py"
 PROMPT_PROBE_FAKE_CLI = _FAKES / "review_prompt_probe.py"
 AUTO_FIX_ROUND_FAKE_CLI = _FAKES / "review_output_auto_fix_round.py"
+STREAMS_A_TOOL_CALL_FAKE_CLI = _FAKES / "review_streams_a_tool_call.py"
+STREAMS_AN_ERRORED_TOOL_CALL_FAKE_CLI = _FAKES / "review_streams_an_errored_tool_call.py"
+STREAMS_ASSISTANT_TEXT_FAKE_CLI = _FAKES / "review_streams_assistant_text.py"
 # Reused directly from `tests/agent/` rather than copied into `pipeline/fakes/` -- it is a
 # generic "start, then exit non-zero" double with no `ReviewOutput`-specific behavior, and
 # `tests/agent/test_claude_cli.py`'s own `test_nonzero_exit_raises_process_exit_error_with_
@@ -447,3 +450,147 @@ def test_review_step_still_finishes_its_activity_span_when_the_agent_call_raises
     assert finished.status == "finished"
     assert finished.activity_id == started.activity_id
     assert finished.timestamp >= started.timestamp
+
+
+def test_review_step_streams_each_tool_call_as_a_nested_activity(tmp_path: Path) -> None:
+    """`tool_stream_relay` (`steps/tool_activity.py`) turns each `TOOL_USE` from a real
+    streaming `ClaudeCLI` call into its own one-shot nested `reporter.log(...)` activity
+    (started immediately followed by finished, per `ActivityRelay.log`'s contract) --
+    proven against `STREAMS_A_TOOL_CALL_FAKE_CLI`'s real stream-json transcript (one tool
+    call, non-error result), not a stand-in `Agent`. `run_steps` yields exactly one round
+    here (a clean answer, no park), so this fixture's 4 activity events -- Agent started,
+    Tool started, Tool finished, Agent finished -- are the whole stream. The matching
+    non-error `TOOL_RESULT` produces no event of its own -- see the sibling
+    `test_review_step_logs_an_errored_tool_result_as_its_own_activity` below for the
+    error case, which does."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    relay = ActivityRelay()
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+    )
+    step: Step = ReviewStep(executable=STREAMS_A_TOOL_CALL_FAKE_CLI)
+
+    async def scenario() -> list[ActivityEvent]:
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 4))
+        async for _event in run_steps([step], ctx):
+            pass
+        return await drain_task
+
+    agent_started, tool_started, tool_finished, agent_finished = asyncio.run(scenario())
+    asyncio.run(agent.close())
+
+    assert agent_started.status == "started"
+    assert agent_started.label == "Agent: reviewing diff via claude"
+    assert agent_started.parent_id is None
+
+    assert tool_started.status == "started"
+    assert tool_started.label == "Tool: Read(/fake/path.txt)"
+    # Nested inside the agent-call span -- the whole point of `tool_stream_relay`.
+    assert tool_started.parent_id == agent_started.activity_id
+
+    assert tool_finished.status == "finished"
+    assert tool_finished.activity_id == tool_started.activity_id
+    assert tool_finished.label == tool_started.label
+
+    assert agent_finished.status == "finished"
+    assert agent_finished.activity_id == agent_started.activity_id
+
+
+def test_review_step_logs_an_errored_tool_result_as_its_own_activity(tmp_path: Path) -> None:
+    """`tool_stream_relay` logs a second, distinct activity for an errored `TOOL_RESULT`
+    (`payload["is_error"]` truthy) beyond the call itself -- proven against
+    `STREAMS_AN_ERRORED_TOOL_CALL_FAKE_CLI`'s real stream-json transcript (one tool call,
+    one error result). `run_steps` yields exactly one round here, so this fixture's 6
+    activity events -- Agent started, Tool-call started/finished, Tool-error
+    started/finished, Agent finished -- are the whole stream."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    relay = ActivityRelay()
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+    )
+    step: Step = ReviewStep(executable=STREAMS_AN_ERRORED_TOOL_CALL_FAKE_CLI)
+
+    async def scenario() -> list[ActivityEvent]:
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 6))
+        async for _event in run_steps([step], ctx):
+            pass
+        return await drain_task
+
+    (
+        agent_started,
+        call_started,
+        call_finished,
+        error_started,
+        error_finished,
+        agent_finished,
+    ) = asyncio.run(scenario())
+    asyncio.run(agent.close())
+
+    assert agent_started.label == "Agent: reviewing diff via claude"
+
+    assert call_started.status == "started"
+    assert call_started.label == "Tool: Read(/fake/missing.txt)"
+    assert call_started.parent_id == agent_started.activity_id
+    assert call_finished.activity_id == call_started.activity_id
+
+    assert error_started.status == "started"
+    assert error_started.label == "Tool error: file not found"
+    assert error_started.parent_id == agent_started.activity_id
+    # A distinct activity from the tool-call one, not a reuse of its id.
+    assert error_started.activity_id != call_started.activity_id
+    assert error_finished.activity_id == error_started.activity_id
+
+    assert agent_finished.activity_id == agent_started.activity_id
+
+
+def test_review_step_logs_streamed_assistant_text_as_its_own_activity(tmp_path: Path) -> None:
+    """`tool_stream_relay` (`steps/tool_activity.py`) also logs `ASSISTANT_TEXT` events --
+    the model's own streamed narration, not just its tool calls -- as a one-shot `Agent:
+    ...` activity, via `assistant_text_label`. Proven against
+    `STREAMS_ASSISTANT_TEXT_FAKE_CLI`'s real stream-json transcript (one text block, one
+    tool call, non-error result). `run_steps` yields exactly one round here, so this
+    fixture's 6 activity events -- Agent started, text started/finished, tool
+    started/finished, Agent finished -- are the whole stream."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    relay = ActivityRelay()
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+    )
+    step: Step = ReviewStep(executable=STREAMS_ASSISTANT_TEXT_FAKE_CLI)
+
+    async def scenario() -> list[ActivityEvent]:
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 6))
+        async for _event in run_steps([step], ctx):
+            pass
+        return await drain_task
+
+    (
+        agent_started,
+        text_started,
+        text_finished,
+        tool_started,
+        tool_finished,
+        agent_finished,
+    ) = asyncio.run(scenario())
+    asyncio.run(agent.close())
+
+    assert agent_started.label == "Agent: reviewing diff via claude"
+
+    assert text_started.status == "started"
+    assert text_started.label == "Agent: Checking the auth module for a missing nil check"
+    assert text_started.parent_id == agent_started.activity_id
+    assert text_finished.activity_id == text_started.activity_id
+
+    assert tool_started.status == "started"
+    assert tool_started.label == "Tool: Read(/fake/path.txt)"
+    # A distinct activity from the text one, not a reuse of its id.
+    assert tool_started.activity_id != text_started.activity_id
+    assert tool_finished.activity_id == tool_started.activity_id
+
+    assert agent_finished.activity_id == agent_started.activity_id

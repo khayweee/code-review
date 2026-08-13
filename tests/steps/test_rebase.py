@@ -468,10 +468,10 @@ def test_rebase_step_reports_fetch_guard_rebase_conflict_read_and_abort_as_activ
 
     started_labels = [event.label for event in activity_events if event.status == "started"]
     assert started_labels == [
-        "git fetch origin",
-        "git rev-parse --verify",  # the guard's no-op local-`main` check
+        "git fetch origin main",
+        "git rev-parse --verify --quiet refs/heads/main",  # the guard's no-op local-`main` check
         "git rebase origin/main",
-        "git diff --name-only",  # conflicted_files, read before the abort
+        "git diff --name-only --diff-filter=U",  # conflicted_files, read before the abort
         "git rebase --abort",
     ]
 
@@ -518,16 +518,22 @@ def test_rebase_step_reports_the_unpushed_local_default_guards_own_calls_when_it
 
     assert outcome.needs_approval is True  # guard fired, same as Scenario 5
 
+    # `merge-base --is-ancestor`/`log --oneline`/`diff --name-only` carry dynamic SHAs and
+    # commit ranges computed at test-run time, so these are prefix comparisons rather than
+    # exact matches; the rest of the command is fully static and asserted verbatim.
     started_labels = [event.label for event in activity_events if event.status == "started"]
-    assert started_labels == [
-        "git fetch origin",
-        "git rev-parse --verify",  # local `main`'s tip
-        "git rev-parse --verify",  # origin/main's tip
-        "git merge-base --is-ancestor",  # condition 1
-        "git merge-base --is-ancestor",  # condition 2
-        "git log --oneline",
-        "git diff --name-only",
+    expected_prefixes = [
+        "git fetch origin main",
+        "git rev-parse --verify --quiet refs/heads/main",  # local `main`'s tip
+        "git rev-parse --verify --quiet refs/remotes/origin/main",  # origin/main's tip
+        "git merge-base --is-ancestor ",  # condition 1
+        "git merge-base --is-ancestor ",  # condition 2
+        "git log --oneline ",
+        "git diff --name-only ",
     ]
+    assert len(started_labels) == len(expected_prefixes)
+    for label, prefix in zip(started_labels, expected_prefixes, strict=True):
+        assert label.startswith(prefix), (label, prefix)
     assert all(event.parent_id is None for event in activity_events)
 
 

@@ -123,7 +123,13 @@ first and hands one side to `StepContext`, the other to `ReviewApp`.
   progress (`StepContext.report_activity`, e.g. `gitutils.run_git`, `ReviewStep`'s agent
   call). Nesting/`parent_id` is automatic via a `contextvars.ContextVar`. `ActivityRelay`
   itself never knows which step an activity belongs to — see `_tag_activity_events` in
-  `app.py` for that correlation.
+  `app.py` for that correlation. `activity()` yields an `ActivityHandle` (`pipeline.step`)
+  the block's own body can call `.fail(detail)` on; the matching "finished" `ActivityEvent`
+  carries that as `error`, and `state.py`'s `backfill_activities` renders it `"failed"`
+  (`ActivityRow.detail` set to the error text) instead of `"completed"`. `ActivityRelay`
+  also takes an optional `on_event` callback, invoked synchronously alongside every queued
+  event — `run_log.py`'s `RunLogWriter` is the one consumer today, persisting the same
+  stream to a per-run log file (`cli.py` wires it in).
 - `ApprovalRelay.request_approval(step_name, outcome) -> ApprovalResponse` / `next_request()`:
   a parked step's approve/skip/fix/abort decision, called from
   `pipeline.executor.run_steps` itself (not from a step — see `pipeline/AGENTS.md`'s "The

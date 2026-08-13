@@ -22,6 +22,7 @@ from code_review.pipeline.step import current_activity_reporter
 from code_review.scm.github import (
     GhCommandError,
     PullRequest,
+    _run_gh,
     create_pull_request,
     find_pull_request_for_branch,
     parse_repo_slug,
@@ -320,3 +321,33 @@ def test_run_gh_reports_a_started_and_finished_activity_when_a_reporter_is_bound
     assert started.label == "gh pr view"
     assert finished.status == "finished"
     assert finished.activity_id == started.activity_id
+
+
+def test_run_gh_reports_the_finished_activity_as_failed_on_a_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors `test_gitutils.py`'s equivalent `run_git` proof: a nonzero-exit `gh` call
+    (an ordinary, non-exceptional outcome for `_run_gh`, per its own docstring) still gets a
+    matching started/finished pair, with the "finished" event's `error`
+    (`ActivityHandle.fail(...)`) set to the raw, mechanical exit-code fact -- independent of
+    whatever meaning a caller one layer up (e.g. `find_pull_request_for_branch`) gives a
+    nonzero exit."""
+
+    monkeypatch.setenv("FAKE_GH_FAIL", "boom")
+    relay = ActivityRelay()
+
+    async def scenario() -> list[ActivityEvent]:
+        token = current_activity_reporter.set(relay)
+        try:
+            result = await _run_gh(["pr", "view"], tmp_path, gh_executable=FAKE_GH)
+        finally:
+            current_activity_reporter.reset(token)
+        assert result.returncode != 0
+        return [await relay.next_event(), await relay.next_event()]
+
+    started, finished = asyncio.run(scenario())
+
+    assert started.status == "started"
+    assert finished.status == "finished"
+    assert finished.activity_id == started.activity_id
+    assert finished.error == "exit 1"

@@ -24,5 +24,11 @@ jobs:
       # Execute the test suite, parallelized across available cores -- tests are
       # independently isolated (own tmp_path/git repos/subprocesses), so this is safe and
       # cuts wall time substantially on the mix of real-subprocess and Textual-driven tests
-      # here (see AGENTS.md's "Local verification sequence").
-      - run: uv run pytest -n auto
+      # here (see AGENTS.md's "Local verification sequence"). --dist=loadgroup keeps plain
+      # load-balanced scheduling for everything else but pins every test carrying
+      # tests/test_cli_review.py's `_REAL_PTY_FULL_RUN_GROUP` xdist_group marker to one
+      # worker, so at most one real, animated `code-review review` pty subprocess runs at a
+      # time -- see that marker's own comment for why several running concurrently was
+      # enough contention on this runner's core count to push a real-pty test's exit-wait
+      # past even a 60s bound.
+      - run: uv run pytest -n auto --dist=loadgroup

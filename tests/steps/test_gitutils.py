@@ -277,7 +277,7 @@ def test_run_git_reports_a_started_and_finished_activity_when_a_reporter_is_boun
     assert started.parent_id is None
 
 
-def test_run_git_derives_the_label_from_subcommand_and_main_argument(
+def test_run_git_derives_the_label_from_the_full_command(
     origin_and_checkout: tuple[Path, Path],
 ) -> None:
     _origin, checkout = origin_and_checkout
@@ -291,7 +291,7 @@ def test_run_git_derives_the_label_from_subcommand_and_main_argument(
             current_activity_reporter.reset(token)
         return (await relay.next_event()).label
 
-    assert asyncio.run(scenario()) == "git fetch origin"
+    assert asyncio.run(scenario()) == "git fetch origin main"
 
 
 def test_run_git_reports_an_activity_even_when_the_call_fails(
@@ -299,7 +299,9 @@ def test_run_git_reports_an_activity_even_when_the_call_fails(
 ) -> None:
     """A nonzero-exit `git` call (an ordinary, non-exceptional outcome for `run_git`, per
     its own docstring) still gets a matching started/finished pair -- reporting is tied to
-    the subprocess call's lifetime, not to whether it succeeded."""
+    the subprocess call's lifetime, not to whether it succeeded. The "finished" event also
+    carries `error` (`ActivityHandle.fail(...)`), the pass/fail signal `run_git` adds on top
+    without itself raising."""
 
     _origin, checkout = origin_and_checkout
     relay = ActivityRelay()
@@ -318,3 +320,4 @@ def test_run_git_reports_an_activity_even_when_the_call_fails(
     assert started.status == "started"
     assert finished.status == "finished"
     assert finished.activity_id == started.activity_id
+    assert finished.error == "exit 1"

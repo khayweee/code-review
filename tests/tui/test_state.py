@@ -11,6 +11,7 @@ import pytest
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.intent import Intent
+from code_review.steps.pr import PullRequestOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.activity import ActivityEvent
@@ -303,6 +304,115 @@ def test_backfill_display_names_falls_back_to_raw_name_when_unmapped() -> None:
     assert [row.name for row in rows] == ["IntentStep", "Rebase", "ReviewStep"]
 
 
+# --- StepRow.detail (PullRequestOutcome) --------------------------------------------------
+
+
+def test_backfill_sets_detail_to_an_opened_pr_link_for_a_completed_pull_request_outcome() -> None:
+    events = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=StepOutcome(
+                needs_approval=False,
+                auto_fixable=False,
+                payload=PullRequestOutcome(
+                    url="https://github.com/khayweee/code-review/pull/42",
+                    number=42,
+                    created=True,
+                ),
+            ),
+            started_at=10.0,
+            duration=1.2,
+        )
+    ]
+
+    rows = backfill(REGISTRY, events, now=999.0)
+
+    assert rows[2] == StepRow(
+        name="ReviewStep",
+        status="completed",
+        duration=1.2,
+        detail="→ opened https://github.com/khayweee/code-review/pull/42",
+    )
+
+
+def test_backfill_sets_detail_to_an_updated_pr_link_when_the_pr_already_existed() -> None:
+    events = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=StepOutcome(
+                needs_approval=False,
+                auto_fixable=False,
+                payload=PullRequestOutcome(
+                    url="https://github.com/khayweee/code-review/pull/9", number=9, created=False
+                ),
+            ),
+            started_at=10.0,
+            duration=1.2,
+        )
+    ]
+
+    rows = backfill(REGISTRY, events, now=999.0)
+
+    assert rows[2].detail == "→ updated https://github.com/khayweee/code-review/pull/9"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [Finding(severity="warning", description="example finding", review_scope="source")],
+        ReviewOutput(findings=[], risk_level="low", risk_rationale="fine"),
+        TestSufficiencyOutput(findings=[], tested=[], testing_summary="fine", artifacts=[]),
+        Intent(summary="add retries", source="explicit", score=1.0),
+    ],
+)
+def test_backfill_leaves_detail_none_for_every_non_pull_request_payload(
+    payload: object,
+) -> None:
+    events = [
+        StepEvent(
+            step_name="ReviewStep",
+            status="completed",
+            outcome=StepOutcome(needs_approval=False, auto_fixable=False, payload=payload),  # type: ignore[arg-type]
+            started_at=10.0,
+            duration=1.2,
+        )
+    ]
+
+    rows = backfill(REGISTRY, events, now=999.0)
+
+    assert rows[2].detail is None
+
+
+def test_backfill_leaves_detail_none_for_a_parked_step_even_with_a_pull_request_outcome() -> None:
+    """`backfill` only sets `detail` for the plain `"completed"` case -- the parked/skipped
+    overrides don't thread it through, since neither status is reachable for `PRStep` today
+    (`needs_approval` is always `False`) and the spec only requires the completed case."""
+
+    events = [
+        StepEvent(
+            step_name="RebaseStep",
+            status="completed",
+            outcome=StepOutcome(
+                needs_approval=False,
+                auto_fixable=False,
+                payload=PullRequestOutcome(
+                    url="https://github.com/khayweee/code-review/pull/7", number=7, created=True
+                ),
+            ),
+            started_at=10.0,
+            duration=1.2,
+        )
+    ]
+
+    rows = backfill(REGISTRY, events, now=999.0, parked_step="RebaseStep")
+
+    assert rows[1].status == "parked"
+    assert rows[1].detail is None
+
+
 # --- latest_findings ---------------------------------------------------------------------
 
 _FINDING = Finding(severity="warning", description="example finding", review_scope="source")
@@ -548,6 +658,23 @@ def test_backfill_activities_reports_final_duration_not_elapsed_once_finished() 
     assert rows[0].label == "fetch"
     assert rows[0].status == "completed"
     assert rows[0].duration == pytest.approx(0.4)
+
+
+def test_backfill_activities_reports_failed_with_the_error_as_detail_when_finished_errored() -> (
+    None
+):
+    events: list[tuple[str | None, ActivityEvent]] = [
+        ("RebaseStep", ActivityEvent(1, None, "git fetch origin", "started", 5.0)),
+        ("RebaseStep", ActivityEvent(1, None, "git fetch origin", "finished", 5.4, "exit 1")),
+    ]
+
+    rows = backfill_activities("RebaseStep", events, now=999.0)
+
+    assert len(rows) == 1
+    assert rows[0].label == "git fetch origin"
+    assert rows[0].status == "failed"
+    assert rows[0].duration == pytest.approx(0.4)
+    assert rows[0].detail == "exit 1"
 
 
 def test_backfill_activities_preserves_first_seen_order_across_multiple_activities() -> None:

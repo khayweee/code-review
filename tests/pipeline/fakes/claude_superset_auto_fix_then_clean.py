@@ -33,33 +33,33 @@ marker = Path("fake-claude-call-count")
 call_index = int(marker.read_text()) if marker.exists() else 0
 marker.write_text(str(call_index + 1))
 
+# `_env_with_fake_claude` copies this script's *text* into a standalone file named
+# "claude" with no sibling modules alongside it, so this can't import a shared helper --
+# each fake inlines its own stream-json "result" line (see `cli.py`'s always-on
+# `ActivityRelay`, which forces `ClaudeCLI` into `--output-format stream-json` here).
 if call_index == 0:
-    response = {
-        "structured_output": {
-            "findings": [
-                {
-                    "severity": "warning",
-                    "description": "extract a helper function",
-                    "action": "auto-fix",
-                    "review_scope": "source",
-                }
-            ],
-            "risk_level": "medium",
-            "risk_rationale": "initial pass: one auto-fixable style finding",
-            "tested": [],
-            "testing_summary": "not assessed yet",
-            "artifacts": [],
-        }
+    structured_output = {
+        "findings": [
+            {
+                "severity": "warning",
+                "description": "extract a helper function",
+                "action": "auto-fix",
+                "review_scope": "source",
+            }
+        ],
+        "risk_level": "medium",
+        "risk_rationale": "initial pass: one auto-fixable style finding",
+        "tested": [],
+        "testing_summary": "not assessed yet",
+        "artifacts": [],
     }
 else:
-    response = {
-        "structured_output": {
-            "findings": [],
-            "risk_level": "low",
-            "risk_rationale": "clean",
-            "tested": [],
-            "testing_summary": "clean",
-            "artifacts": [],
-        }
+    structured_output = {
+        "findings": [],
+        "risk_level": "low",
+        "risk_rationale": "clean",
+        "tested": [],
+        "testing_summary": "clean",
+        "artifacts": [],
     }
-print(json.dumps(response))
+print(json.dumps({"type": "result", "structured_output": structured_output}))

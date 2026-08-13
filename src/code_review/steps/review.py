@@ -35,6 +35,7 @@ from code_review.pipeline.findings import (
 )
 from code_review.pipeline.step import Step, StepContext, StepOutcome
 from code_review.prompt.review import build_review_fix_prompt, build_review_prompt
+from code_review.steps.tool_activity import tool_stream_relay
 
 # --- ReviewOutput ----------------------------------------------------------------------
 
@@ -90,12 +91,22 @@ class ReviewStep(Step):
         # Static label ("via claude"), not self.executable -- that field is a test seam,
         # this names the production backend. Reports "finished" even if the call raises.
         async with ctx.report_activity("Agent: reviewing diff via claude"):
+            # None with no reporter attached (rather than a relay that's a no-op at
+            # runtime) so the call stays on claude_cli.py's legacy --output-format json
+            # path when there's nothing to stream tool calls to -- e.g. every test that
+            # runs ReviewStep against a fake CLI without a StepContext.activity_reporter.
+            on_stream_event = (
+                tool_stream_relay(ctx.activity_reporter)
+                if ctx.activity_reporter is not None
+                else None
+            )
             result = await ctx.agent.run(
                 RunOpts(
                     prompt=prompt,
                     cwd=ctx.cwd,
                     output_schema=ReviewOutput,
                     executable=self.executable,
+                    on_stream_event=on_stream_event,
                 )
             )
 

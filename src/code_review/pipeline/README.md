@@ -127,3 +127,79 @@ This section is the shortest end-to-end mental model of object creation and cont
    - If a call runs with skip-permissions, no interactive prompt path is used.
    - If a call opts into permission handling and the backend needs input, `on_input_needed`
      relays the prompt through `InputRelay` to the TUI, and the step waits for the answer.
+
+## Reporting sub-step activity
+
+A step's own row in the TUI is one `StepEvent`. Anything finer-grained -- a `git` call, an
+agent-call span, one streamed tool call -- is a separate, second event stream: an
+"activity," reported through `ActivityReporter` (the structural `Protocol` this package
+defines) and rendered as nested lines under the owning step's row. `pipeline/`/`steps/`
+never import `tui/` directly; `tui.activity.ActivityRelay` satisfies `ActivityReporter`
+purely structurally, wired in by `cli.py`.
+
+There are two independent choices, never more: **shape** (does this have a duration worth
+timing, or is it one already-finished moment?) and **access** (do you have a `StepContext`
+in hand, or only a reporter read implicitly from a shared slot -- see "No `ctx`" below).
+That gives four named entry points, all funnelling through the same two null-safe
+primitives in `step.py`:
+
+| | Block (has a start and an end) | One-shot (a point in time) |
+| --- | --- | --- |
+| **Have `ctx`** | `async with ctx.report_activity(label): ...` | `await ctx.log(label)` |
+| **No `ctx`** | `async with report_activity(reporter, label): ...` | `await log_activity(reporter, label)` |
+
+`ctx.report_activity`/`ctx.log` are thin `self.activity_reporter`-bound wrappers around the
+module-level `report_activity`/`log_activity` -- same implementation, just bound to `ctx`
+instead of taking the reporter as an argument. Both free functions are null-safe: pass a
+`None` reporter and they're a no-op, so a caller never has to branch on whether one is
+attached.
+
+How to choose:
+
+1. **Shape, first.** A block naturally pairs a "started" and a "finished" event and reports
+   a duration -- use it for anything with real elapsed time (a subprocess call, an
+   agent-call span). A one-shot has no duration to track -- use it for something that has
+   already happened by the time you find out about it (e.g. one `TOOL_USE` callback from a
+   streamed agent run).
+2. **Access, second -- default to `ctx`.** Inside `Step.run(ctx)`, or any function that
+   already receives `ctx`, always use `ctx.report_activity`/`ctx.log`. Only reach for the
+   free functions (`report_activity(current_activity_reporter.get(), label)` /
+   `log_activity(...)`) in shared plumbing with no `StepContext` parameter at all.
+   `current_activity_reporter` is a `contextvars.ContextVar` that `executor.run_steps` sets
+   right before calling `step.run(ctx)` and clears right after -- so any code running during
+   that window can call `.get()` and read the current step's reporter, even several function
+   calls deep, without `ctx` or the reporter ever being passed to it as an argument. Today's
+   two users are `steps/gitutils.py`'s `run_git` and `scm/github.py`'s `_run_gh`, both called
+   from deep inside step logic, where adding `ctx` as a parameter to every helper along the
+   way just to reach them would be unnecessary plumbing. This is a documented, narrow
+   exception, not a second style to pick freely -- a further case like it is a signal
+   `StepContext` itself should grow instead (see `pipeline/AGENTS.md`'s Milestone 14 entry).
+
+Never construct `ActivityEvent` or reach for an `ActivityRelay` instance directly outside
+`tui/activity.py` -- always go through one of the four entry points above.
+
+```python
+# Block, ctx-bound -- the common case inside a step.
+async with ctx.report_activity("Agent: reviewing diff via claude"):
+    result = await ctx.agent.run(opts)
+
+# One-shot, ctx-bound -- a single already-finished event.
+await ctx.log("Tool: Read(/path/to/file)")
+
+# Block, ambient -- shared plumbing with no StepContext to read from.
+async with report_activity(current_activity_reporter.get(), label) as activity:
+    process = await asyncio.create_subprocess_exec("git", *args, ...)
+    if process.returncode != 0:
+        activity.fail(f"exit {process.returncode}")
+```
+
+**Pass/fail signal**: `activity()`/`report_activity(...)` yield an `ActivityHandle`
+(`error: str | None = None`, `.fail(detail)`), so a block can mark its own "finished" event
+as failed without raising -- `run_git`/`_run_gh` do this on a nonzero subprocess exit, since
+neither ever raises on an ordinary command failure (see their own docstrings). `.fail(...)`
+is always safe to call: the no-reporter `nullcontext` branch yields a real (just
+unread-by-anything) `ActivityHandle` too, so no call site has to branch on whether a
+reporter is attached first. The TUI renders a failed activity's own line with the `"failed"`
+status icon plus that error text as its `detail` (`tui/state.py`'s `backfill_activities`,
+`tui/widgets/pipeline_box.py`'s `format_activity_row`) -- see `pipeline/AGENTS.md`'s
+Milestone 14 entry for `ActivityRow`'s own history.

@@ -32,12 +32,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.step import StepEvent, StepOutcome
 from code_review.steps.intent import Intent
+from code_review.steps.pr import PullRequestOutcome
 from code_review.steps.registry import STEP_DISPLAY_NAMES, STEP_REGISTRY
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestArtifact, TestSufficiencyOutput
@@ -116,6 +117,65 @@ _TEST_SUFFICIENCY_OUTCOME = StepOutcome(
     ),
 )
 
+# `created=True` -- no existing PR for "fix/nil-check" here (mirrors PRStep.run's
+# find_pull_request_for_branch returning None, taking the create_pull_request branch), so
+# the Pipeline box's "Pull Request" row renders "→ opened <url>" (see tui/state.py's
+# _detail_for_completed_payload).
+_PR_OUTCOME = StepOutcome(
+    needs_approval=False,
+    auto_fixable=False,
+    payload=PullRequestOutcome(
+        url="https://github.com/example-org/code-review/pull/42",
+        number=42,
+        created=True,
+    ),
+)
+
+
+async def _simulate_git_activity(activity_relay: ActivityRelay) -> None:
+    """`RebaseStep`'s real individual `git fetch`/`git rebase` calls, each its own
+    `activity()` span reported ambiently by `steps/gitutils.py`'s `run_git` -- reported here
+    the same way, through `activity_relay.activity(label)`.
+    """
+
+    async with activity_relay.activity("git fetch origin"):
+        await asyncio.sleep(0.5)
+    async with activity_relay.activity("git rebase origin/main"):
+        await asyncio.sleep(0.5)
+
+
+async def _simulate_agent_call(
+    activity_relay: ActivityRelay, label: str, tool_calls: list[str]
+) -> None:
+    """`ReviewStep`/`TestSufficiencyStep`'s real shape: one coarse `ctx.report_activity(label)`
+    span for the whole agent call, containing zero or more one-shot `ctx.log(...)` events --
+    `steps/tool_activity.py`'s `tool_stream_relay` reporting each streamed `TOOL_USE` this way
+    for a real `ClaudeCLI` call -- reported here identically via `activity_relay.log(...)` so
+    the activity pane renders exactly as it would live tool-call streaming.
+    """
+
+    async with activity_relay.activity(label):
+        await asyncio.sleep(0.3)
+        for tool_call in tool_calls:
+            await activity_relay.log(tool_call)
+            await asyncio.sleep(0.4)
+
+
+async def _simulate_pr_activity(activity_relay: ActivityRelay) -> None:
+    """`PRStep`'s real shape, in call order: `_build_body`'s `git diff --name-status` call
+    (`steps/gitutils.py`'s `run_git`, ambient span), `find_pull_request_for_branch`'s `gh pr
+    view` call, and (no existing PR found here, so the create branch runs)
+    `create_pull_request`'s `gh pr create` call -- each its own ambient span via
+    `scm/github.py`'s `_run_gh`/`gitutils.py`'s `run_git`, reported here the same way.
+    """
+
+    async with activity_relay.activity("git diff --name-status origin/main...fix/nil-check"):
+        await asyncio.sleep(0.3)
+    async with activity_relay.activity("gh pr view"):
+        await asyncio.sleep(0.4)
+    async with activity_relay.activity("gh pr create"):
+        await asyncio.sleep(0.5)
+
 
 async def _fake_events(
     fail: bool, activity_relay: ActivityRelay, approval_relay: ApprovalRelay
@@ -123,12 +183,18 @@ async def _fake_events(
     """Steps in `STEP_REGISTRY` order, all five with a class today (see `registry.py`), so
     none render as a pending placeholder.
 
-    Each step's `activities` list stands in for the nested sub-step activity issues #64/#65
-    report for real (`RebaseStep`'s individual `git fetch`/`git rebase` calls, `ReviewStep`'s
-    one coarse agent-call span) -- reported here the same way, through
-    `activity_relay.activity(label)`, so `ReviewApp`'s activity worker (`app.py`'s
-    `_consume_activities`) and `state.py`'s `backfill_activities` render them exactly as
-    they would a real run's. `IntentStep` reports none, matching reality (no subprocess).
+    Each step's `simulate_activity` callable stands in for the nested sub-step activity
+    issues #64/#65 report for real (`RebaseStep`'s individual `git fetch`/`git rebase` spans
+    via `_simulate_git_activity`; `ReviewStep`/`TestSufficiencyStep`'s one coarse agent-call
+    span plus nested one-shot tool-call events via `_simulate_agent_call`; `PRStep`'s `git
+    diff`/`gh pr view`/`gh pr create` spans via `_simulate_pr_activity`) -- reported here
+    the same way, through `activity_relay.activity(label)`/`activity_relay.log(label)`, so
+    `ReviewApp`'s activity worker (`app.py`'s `_consume_activities`) and `state.py`'s
+    `backfill_activities` render them exactly as they would a real run's. `IntentStep`
+    reports none, matching reality (no subprocess). `PRStep`'s outcome also carries a real
+    `PullRequestOutcome` payload (`_PR_OUTCOME`), so the Pipeline box's "Pull Request" row
+    renders its "→ opened <url>" detail text too (`tui/state.py`'s
+    `_detail_for_completed_payload`).
 
     ReviewStep's outcome carries `needs_approval=True`, so once its "completed" event is
     yielded this awaits `approval_relay.request_approval(...)` -- exactly the call
@@ -142,34 +208,41 @@ async def _fake_events(
     to the next step, the same "presentational only" distinction the real executor draws.
     """
 
-    steps: list[tuple[str, StepOutcome, list[tuple[str, float]]]] = [
-        ("IntentStep", _INTENT_OUTCOME, []),
+    steps: list[tuple[str, StepOutcome, Callable[[ActivityRelay], Awaitable[None]] | None]] = [
+        ("IntentStep", _INTENT_OUTCOME, None),
+        ("RebaseStep", _NO_FINDINGS, _simulate_git_activity),
         (
-            "RebaseStep",
-            _NO_FINDINGS,
-            [("git fetch origin", 0.5), ("git rebase origin/main", 0.5)],
+            "ReviewStep",
+            _REVIEW_FINDINGS,
+            lambda relay: _simulate_agent_call(
+                relay,
+                "Agent: reviewing diff via claude",
+                [
+                    "Tool: Read(src/code_review/cli.py)",
+                    "Tool: Bash(git diff --stat)",
+                ],
+            ),
         ),
-        ("ReviewStep", _REVIEW_FINDINGS, [("claude review call", 1.0)]),
         (
             "TestSufficiencyStep",
             _TEST_SUFFICIENCY_OUTCOME,
-            [("claude test-sufficiency call", 0.7)],
+            lambda relay: _simulate_agent_call(
+                relay,
+                "Agent: assessing test sufficiency via claude",
+                ["Tool: Read(tests/tui/test_app.py)"],
+            ),
         ),
-        # No activities -- steps/pr.py reports none for real (no ctx.report_activity call
-        # anywhere in it or scm/github.py), matching IntentStep's "reports none" case above.
-        ("PRStep", _NO_FINDINGS, []),
+        ("PRStep", _PR_OUTCOME, _simulate_pr_activity),
     ]
 
-    for name, outcome, activities in steps:
+    for name, outcome, simulate_activity in steps:
         started = time.monotonic()
         yield StepEvent(
             step_name=name, status="running", outcome=None, started_at=started, duration=None
         )
 
-        if activities:
-            for label, delay in activities:
-                async with activity_relay.activity(label):
-                    await asyncio.sleep(delay)
+        if simulate_activity is not None:
+            await simulate_activity(activity_relay)
         else:
             await asyncio.sleep(_STEP_DELAY)
 

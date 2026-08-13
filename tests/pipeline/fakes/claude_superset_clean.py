@@ -22,14 +22,22 @@ import sys
 
 sys.stdin.read()  # drain the prompt; this fixture's answer doesn't depend on its contents
 
-response = {
-    "structured_output": {
-        "findings": [],
-        "risk_level": "low",
-        "risk_rationale": "clean",
-        "tested": [],
-        "testing_summary": "clean",
-        "artifacts": [],
-    }
-}
-print(json.dumps(response))
+# `_env_with_fake_claude` copies this script's *text* into a standalone file named
+# "claude" with no sibling modules alongside it, so this can't import a shared helper --
+# each fake inlines its own stream-json "result" line (see `cli.py`'s always-on
+# `ActivityRelay`, which forces `ClaudeCLI` into `--output-format stream-json` here).
+print(
+    json.dumps(
+        {
+            "type": "result",
+            "structured_output": {
+                "findings": [],
+                "risk_level": "low",
+                "risk_rationale": "clean",
+                "tested": [],
+                "testing_summary": "clean",
+                "artifacts": [],
+            },
+        }
+    )
+)

@@ -6,7 +6,9 @@ Real-git-repo convention throughout (no mocked `git` subprocess), matching
 to an actual GitHub host (see that file's own docstring and `tests/scm/test_github.py`,
 which already covers `scm/github.py`'s own request-shaping/error-handling in isolation).
 This file is about `PRStep.run`'s own orchestration: the skip check, body assembly from
-`ctx.intent`/`ctx.step_outcomes`, and the create-vs-update branch.
+`ctx.intent`/`ctx.step_outcomes`, the create-vs-update branch, and the resulting
+`PullRequestOutcome` (`url`/`number`/`created`) each branch reports back in `StepOutcome.
+payload`.
 
 `PRStep`'s "What Changed" diff needs a genuinely fetched `origin/<default_branch>` ref (see
 `steps/pr.py`'s module docstring), so every scenario past the skip check builds on
@@ -35,7 +37,7 @@ from code_review.agent import RunOpts
 from code_review.agent.base import OutputT, Result
 from code_review.pipeline.step import StepContext, StepOutcome
 from code_review.steps.intent import Intent
-from code_review.steps.pr import PRStep
+from code_review.steps.pr import PRStep, PullRequestOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestArtifact, TestSufficiencyOutput
 from tests.steps.conftest import commit_file
@@ -159,7 +161,11 @@ def test_pr_step_creates_a_new_pr_when_none_exists_for_the_branch(
     outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
 
     assert agent.run_called is False
-    assert outcome == StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+    assert outcome.needs_approval is False
+    assert outcome.auto_fixable is False
+    assert outcome.payload == PullRequestOutcome(
+        url="https://github.com/khayweee/code-review/pull/1", number=1, created=True
+    )
 
     calls = _read_gh_log(log_file)
     subcommands = [tuple(c["args"][:2]) for c in calls]
@@ -201,7 +207,11 @@ def test_pr_step_updates_the_existing_pr_when_one_already_exists_for_the_branch(
     outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
 
     assert agent.run_called is False
-    assert outcome == StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+    assert outcome.needs_approval is False
+    assert outcome.auto_fixable is False
+    assert outcome.payload == PullRequestOutcome(
+        url="https://github.com/khayweee/code-review/pull/9", number=9, created=False
+    )
 
     calls = _read_gh_log(log_file)
     subcommands = [tuple(c["args"][:2]) for c in calls]
@@ -331,7 +341,9 @@ def test_pr_step_omits_risk_and_testing_sections_when_step_outcomes_is_empty(
 
     outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
 
-    assert outcome == StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+    assert outcome.needs_approval is False
+    assert outcome.auto_fixable is False
+    assert isinstance(outcome.payload, PullRequestOutcome)
     create_call = next(
         c for c in _read_gh_log(log_file) if tuple(c["args"][:2]) == ("pr", "create")
     )

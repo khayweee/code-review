@@ -16,21 +16,29 @@ import sys
 
 sys.stdin.read()  # drain the prompt; this fixture's answer doesn't depend on its contents
 
-response = {
-    "structured_output": {
-        "findings": [
-            {
-                "severity": "error",
-                "description": "drops error handling required by the caller's contract",
-                "action": "ask-user",
-                "review_scope": "source",
-            }
-        ],
-        "risk_level": "high",
-        "risk_rationale": "drops error handling on a path the caller depends on",
-        "tested": [],
-        "testing_summary": "not assessed -- blocked on the finding above",
-        "artifacts": [],
-    }
-}
-print(json.dumps(response))
+# `_env_with_fake_claude` copies this script's *text* into a standalone file named
+# "claude" with no sibling modules alongside it, so this can't import a shared helper --
+# each fake inlines its own stream-json "result" line (see `cli.py`'s always-on
+# `ActivityRelay`, which forces `ClaudeCLI` into `--output-format stream-json` here).
+print(
+    json.dumps(
+        {
+            "type": "result",
+            "structured_output": {
+                "findings": [
+                    {
+                        "severity": "error",
+                        "description": "drops error handling required by the caller's contract",
+                        "action": "ask-user",
+                        "review_scope": "source",
+                    }
+                ],
+                "risk_level": "high",
+                "risk_rationale": "drops error handling on a path the caller depends on",
+                "tested": [],
+                "testing_summary": "not assessed -- blocked on the finding above",
+                "artifacts": [],
+            },
+        }
+    )
+)

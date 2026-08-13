@@ -1,4 +1,5 @@
-"""The Pipeline box: one line per registry step, live status icon, elapsed/final duration.
+"""The Pipeline box: one line per registry step, live status icon, elapsed/final duration,
+plus each row's own optional `StepRow.detail` text (e.g. `PRStep`'s opened/updated PR link).
 
 Renders plain `StepRow`/`ActivityRow` data (see `state.py`); the formatting helpers are
 pure and Textual-free, while `PipelineBox` itself is the live, animated widget.
@@ -42,7 +43,8 @@ def format_row(row: StepRow) -> str:
 
     icon = _STATUS_ICONS[row.status]
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
-    return f"{icon} {row.name}{duration}"
+    detail = "" if row.detail is None else f"  {row.detail}"
+    return f"{icon} {row.name}{duration}{detail}"
 
 
 def format_activity_row(activity: ActivityRow, *, is_last: bool) -> str:
@@ -55,7 +57,8 @@ def format_activity_row(activity: ActivityRow, *, is_last: bool) -> str:
     connector = "└ " if is_last else "├ "
     icon = _STATUS_ICONS[activity.status]
     duration = "" if activity.duration is None else f"  {format_duration(activity.duration)}"
-    return f"  {connector} {icon} {activity.label}{duration}"
+    detail = "" if activity.detail is None else f"  {activity.detail}"
+    return f"  {connector} {icon} {activity.label}{duration}{detail}"
 
 
 def render_rows(rows: Sequence[StepRow]) -> str:
@@ -75,6 +78,18 @@ def render_rows(rows: Sequence[StepRow]) -> str:
 
 _SHIMMER_BASE_LIGHTNESS = 0.45
 _SHIMMER_PEAK_LIGHTNESS = 0.90
+# Matches rich.spinner.Spinner("dots").interval (80ms) -- the spinner icon itself can't
+# show a new frame any faster than that, so ticking `_animate_shimmer` past it (the
+# previous 1/60s, ~5x faster) only spent extra CPU/output re-rendering and re-writing an
+# unchanged spinner glyph, at real, measured cost: a still-"running"/parked step's steady
+# ANSI output over a real pty (~130KB/s at 60Hz) was enough to push a real end-to-end
+# `code-review review` subprocess -- and, on a loaded CI runner, its siblings -- past their
+# own real-pty tests' exit-wait timeouts (see tests/test_cli_review.py's
+# `_run_review_with_keypresses` docstring). The color shimmer (`gradient_text`) is
+# continuous, not frame-quantized, so sampling it at 12.5Hz instead of 60Hz still reads as
+# smooth motion to the eye; it just no longer redraws faster than anything on screen can
+# actually change.
+_SHIMMER_TICK_SECONDS = 0.08
 
 
 def gradient_text(label: str, phase: float) -> Text:
@@ -118,6 +133,8 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
         row_text = gradient_text(row.name, phase=time.monotonic())
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
     row_text.append(duration)
+    if row.detail is not None:
+        row_text.append(f"  {row.detail}")
     return icon, row_text
 
 
@@ -175,7 +192,7 @@ class PipelineBox(_BorderedBox):
             self.border_subtitle = branch
 
     def on_mount(self) -> None:
-        self.set_interval(1 / 60, self._animate_shimmer)
+        self.set_interval(_SHIMMER_TICK_SECONDS, self._animate_shimmer)
 
     def _animate_shimmer(self) -> None:
         """Re-render every tick so `gradient_text` recomputes the shimmer; `self.refresh()`
