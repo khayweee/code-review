@@ -1,4 +1,5 @@
-"""The Pipeline box: one line per registry step, live status icon, elapsed/final duration.
+"""The Pipeline box: one line per registry step, live status icon, elapsed/final duration,
+plus each row's own optional `StepRow.detail` text (e.g. `PRStep`'s opened/updated PR link).
 
 Renders plain `StepRow`/`ActivityRow` data (see `state.py`); the formatting helpers are
 pure and Textual-free, while `PipelineBox` itself is the live, animated widget.
@@ -42,7 +43,8 @@ def format_row(row: StepRow) -> str:
 
     icon = _STATUS_ICONS[row.status]
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
-    return f"{icon} {row.name}{duration}"
+    detail = "" if row.detail is None else f"  {row.detail}"
+    return f"{icon} {row.name}{duration}{detail}"
 
 
 def format_activity_row(activity: ActivityRow, *, is_last: bool) -> str:
@@ -55,7 +57,8 @@ def format_activity_row(activity: ActivityRow, *, is_last: bool) -> str:
     connector = "└ " if is_last else "├ "
     icon = _STATUS_ICONS[activity.status]
     duration = "" if activity.duration is None else f"  {format_duration(activity.duration)}"
-    return f"  {connector} {icon} {activity.label}{duration}"
+    detail = "" if activity.detail is None else f"  {activity.detail}"
+    return f"  {connector} {icon} {activity.label}{duration}{detail}"
 
 
 def render_rows(rows: Sequence[StepRow]) -> str:
@@ -118,6 +121,8 @@ def _render_row(row: StepRow, spinners: dict[str, Spinner]) -> tuple[Spinner | T
         row_text = gradient_text(row.name, phase=time.monotonic())
     duration = "" if row.duration is None else f"  {format_duration(row.duration)}"
     row_text.append(duration)
+    if row.detail is not None:
+        row_text.append(f"  {row.detail}")
     return icon, row_text
 
 

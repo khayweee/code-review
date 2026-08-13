@@ -89,6 +89,24 @@ async def _build_body(ctx: StepContext, default_branch: str, branch: str) -> str
 
 
 @dataclass(frozen=True, slots=True)
+class PullRequestOutcome:
+    """`PRStep`'s `StepOutcome.payload` shape once it actually opens/updates a PR --
+    mirrors `steps/intent.py`'s `Intent` precedent for a non-`Finding` payload in that same
+    closed union (see `pipeline/step.py`'s `StepOutcome.payload` docstring).
+
+    `url`/`number` come straight from `scm.github.PullRequest`, the real PR `gh` just
+    reported back. `created` distinguishes "opened a new PR" (`True`) from "updated an
+    existing one" (`False`) -- `PRStep.run`'s own create-vs-update branch, carried forward
+    so a renderer (e.g. the TUI's Pipeline box) can say "opened"/"updated" without
+    re-deriving it.
+    """
+
+    url: str
+    number: int
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PRStep(Step):
     """Finds or creates/updates the PR for the branch under review (`ctx.cwd`'s current
     HEAD), with a deterministic title/body -- see module docstring. No agent call.
@@ -124,7 +142,7 @@ class PRStep(Step):
             branch, repo_slug, ctx.cwd, gh_executable=self.gh_executable
         )
         if existing is None:
-            await create_pull_request(
+            pull_request = await create_pull_request(
                 repo_slug=repo_slug,
                 head=branch,
                 base=self.default_branch,
@@ -133,8 +151,9 @@ class PRStep(Step):
                 cwd=ctx.cwd,
                 gh_executable=self.gh_executable,
             )
+            created = True
         else:
-            await update_pull_request(
+            pull_request = await update_pull_request(
                 existing.number,
                 repo_slug=repo_slug,
                 title=title,
@@ -142,5 +161,12 @@ class PRStep(Step):
                 cwd=ctx.cwd,
                 gh_executable=self.gh_executable,
             )
+            created = False
 
-        return StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
+        return StepOutcome(
+            needs_approval=False,
+            auto_fixable=False,
+            payload=PullRequestOutcome(
+                url=pull_request.url, number=pull_request.number, created=created
+            ),
+        )

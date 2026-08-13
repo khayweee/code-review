@@ -132,6 +132,23 @@ def test_format_row_includes_duration_once_running_or_completed() -> None:
     assert format_row(completed) == "✔ IntentStep  3.4s"
 
 
+def test_format_row_appends_detail_after_the_duration_when_set() -> None:
+    row = StepRow(
+        name="Pull Request",
+        status="completed",
+        duration=1.2,
+        detail="→ opened https://github.com/owner/repo/pull/42",
+    )
+
+    assert format_row(row) == "✔ Pull Request  1.2s  → opened https://github.com/owner/repo/pull/42"
+
+
+def test_format_row_omits_detail_cleanly_when_unset() -> None:
+    row = StepRow(name="Pull Request", status="completed", duration=1.2)
+
+    assert format_row(row) == "✔ Pull Request  1.2s"
+
+
 def test_render_rows_renders_one_line_per_row_in_order() -> None:
     rows = [
         StepRow(name="IntentStep", status="completed", duration=0.1),
@@ -156,6 +173,18 @@ def test_format_activity_row_omits_duration_when_none() -> None:
     activity = ActivityRow(label="fetch", status="running", duration=None)
 
     assert format_activity_row(activity, is_last=True) == "  └  ◔ fetch"
+
+
+def test_format_activity_row_appends_detail_after_the_duration_when_set() -> None:
+    failed = ActivityRow(label="git fetch origin", status="failed", duration=1.2, detail="exit 1")
+
+    assert format_activity_row(failed, is_last=True) == "  └  ✘ git fetch origin  1.2s  exit 1"
+
+
+def test_format_activity_row_omits_detail_cleanly_when_unset() -> None:
+    completed = ActivityRow(label="rebase", status="completed", duration=3.4)
+
+    assert format_activity_row(completed, is_last=True) == "  └  ✔ rebase  3.4s"
 
 
 def test_render_rows_nests_each_rows_activities_beneath_it() -> None:
@@ -326,6 +355,30 @@ def test_render_row_keeps_the_duration_suffix_plain_even_while_running() -> None
     # gradiented, the duration suffix stays plain.
     name_length = len("RebaseStep")
     assert all(span.end <= name_length for span in running_text.spans)
+
+
+def test_render_row_appends_detail_after_the_duration_when_set() -> None:
+    spinners: dict[str, Spinner] = {}
+
+    _, text = _render_row(
+        StepRow(
+            name="Pull Request",
+            status="completed",
+            duration=1.2,
+            detail="→ opened https://github.com/owner/repo/pull/42",
+        ),
+        spinners,
+    )
+
+    assert text.plain == "Pull Request  1.2s  → opened https://github.com/owner/repo/pull/42"
+
+
+def test_render_row_omits_detail_cleanly_when_unset() -> None:
+    spinners: dict[str, Spinner] = {}
+
+    _, text = _render_row(StepRow(name="Pull Request", status="completed", duration=1.2), spinners)
+
+    assert text.plain == "Pull Request  1.2s"
 
 
 # --- PipelineBox, mounted and driven through Pilot --------------------------------------

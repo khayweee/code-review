@@ -6,7 +6,8 @@ callers translate raw subprocess results into pipeline types themselves.
 `process.communicate()`) so it doesn't freeze the asyncio event loop during a call. It also
 reports itself through the ambient `ActivityReporter` (read via
 `current_activity_reporter.get()`, bound per-step by `executor.run_steps`), so each git call
-renders as its own timed line in the TUI.
+renders as its own timed line in the TUI, marked failed (`activity.fail(...)`) on a nonzero
+exit -- a log-visible signal only, `run_git` itself still never raises on one.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from code_review.pipeline.step import activity_or_nullcontext, current_activity_reporter
+from code_review.pipeline.step import current_activity_reporter, report_activity
 
 
 def _git_activity_label(args: list[str]) -> str:
@@ -33,7 +34,7 @@ async def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str
     """
 
     label = _git_activity_label(args)
-    async with activity_or_nullcontext(current_activity_reporter.get(), label):
+    async with report_activity(current_activity_reporter.get(), label) as activity:
         process = await asyncio.create_subprocess_exec(
             "git",
             *args,
@@ -44,6 +45,8 @@ async def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str
         stdout_bytes, stderr_bytes = await process.communicate()
         # `communicate()` always waits for the process to exit before returning.
         assert process.returncode is not None
+        if process.returncode != 0:
+            activity.fail(f"exit {process.returncode}")
         return subprocess.CompletedProcess(
             args=["git", *args],
             returncode=process.returncode,

@@ -30,6 +30,7 @@ from code_review.prompt.test_sufficiency import (
     build_test_sufficiency_fix_prompt,
     build_test_sufficiency_prompt,
 )
+from code_review.steps.tool_activity import tool_stream_relay
 
 # --- TestArtifact ------------------------------------------------------------------------
 
@@ -90,6 +91,10 @@ class TestSufficiencyStep(Step):
     Single agent call per round -- no retry, no session persistence. The fix/approval loop
     lives in `pipeline/executor.py`; this class only reacts to `ctx.fix_round` by choosing
     which prompt-assembly function to call.
+
+    The agent call is wrapped in one coarse `ctx.report_activity(...)` span, and each tool
+    call it streams reported via `tool_stream_relay` (`steps/tool_activity.py`) -- mirrors
+    `ReviewStep.run`'s identical shape, sharing that relay rather than a copy.
     """
 
     # Subprocess test seam for RunOpts.executable; tests point this at a fake CLI script.
@@ -105,14 +110,29 @@ class TestSufficiencyStep(Step):
             else build_test_sufficiency_prompt(ctx)
         )
 
-        result = await ctx.agent.run(
-            RunOpts(
-                prompt=prompt,
-                cwd=ctx.cwd,
-                output_schema=TestSufficiencyOutput,
-                executable=self.executable,
+        # Static label ("via claude"), not self.executable -- that field is a test seam,
+        # this names the production backend. Reports "finished" even if the call raises.
+        # Mirrors ReviewStep.run's identical outer span.
+        async with ctx.report_activity("Agent: assessing test sufficiency via claude"):
+            # None with no reporter attached (rather than a relay that's a no-op at
+            # runtime) so the call stays on claude_cli.py's legacy --output-format json
+            # path when there's nothing to stream tool calls to -- e.g. every test that
+            # runs TestSufficiencyStep against a fake CLI without a
+            # StepContext.activity_reporter. Mirrors ReviewStep.run's identical gating.
+            on_stream_event = (
+                tool_stream_relay(ctx.activity_reporter)
+                if ctx.activity_reporter is not None
+                else None
             )
-        )
+            result = await ctx.agent.run(
+                RunOpts(
+                    prompt=prompt,
+                    cwd=ctx.cwd,
+                    output_schema=TestSufficiencyOutput,
+                    executable=self.executable,
+                    on_stream_event=on_stream_event,
+                )
+            )
 
         output = result.output
 

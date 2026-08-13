@@ -299,7 +299,9 @@ def test_run_git_reports_an_activity_even_when_the_call_fails(
 ) -> None:
     """A nonzero-exit `git` call (an ordinary, non-exceptional outcome for `run_git`, per
     its own docstring) still gets a matching started/finished pair -- reporting is tied to
-    the subprocess call's lifetime, not to whether it succeeded."""
+    the subprocess call's lifetime, not to whether it succeeded. The "finished" event also
+    carries `error` (`ActivityHandle.fail(...)`), the pass/fail signal `run_git` adds on top
+    without itself raising."""
 
     _origin, checkout = origin_and_checkout
     relay = ActivityRelay()
@@ -318,3 +320,4 @@ def test_run_git_reports_an_activity_even_when_the_call_fails(
     assert started.status == "started"
     assert finished.status == "finished"
     assert finished.activity_id == started.activity_id
+    assert finished.error == "exit 1"

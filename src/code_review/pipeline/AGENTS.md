@@ -61,7 +61,9 @@ including from code that has no direct access to the step's own context.
   `tui/` directly.
 - `StepContext.activity_reporter` carries an optional instance; `StepContext.
   report_activity(label)` is the single-line call site (`async with ctx.report_activity(
-  "..."): ...`) that delegates to `activity_or_nullcontext`.
+  "..."): ...`) that delegates to the module-level `report_activity` (renamed from this
+  milestone's original `activity_or_nullcontext`; a later milestone added `log_activity`,
+  its one-shot sibling).
 - `tui.activity.ActivityRelay` satisfies the Protocol purely structurally.
 - Ambient reporting (#64): `steps/gitutils.py`'s `run_git` has no `StepContext` to read
   `activity_reporter` off of. `step.py`'s module-level `current_activity_reporter`
@@ -72,6 +74,25 @@ including from code that has no direct access to the step's own context.
   This is the only case so far where `pipeline/` exposes ambient (non-`ctx`-threaded) state
   across the `steps/` boundary — a second such seam is a sign `StepContext` itself should
   grow instead.
+- A later increment (pass/fail signal on activities) changed `activity()`'s return type
+  from `AbstractAsyncContextManager[None]` to `AbstractAsyncContextManager[ActivityHandle]`
+  — a small `@dataclass(slots=True)` (`error: str | None = None`, `.fail(detail)`) the
+  block's own body can call to mark its "finished" event as failed, e.g. `run_git`/
+  `scm/github.py`'s `_run_gh` calling `activity.fail(f"exit {process.returncode}")` on a
+  nonzero subprocess exit — a log-visible signal only; neither ever raises on an ordinary
+  command failure. `report_activity`'s no-reporter branch changed from `nullcontext()` to
+  `nullcontext(ActivityHandle())` so `.fail(...)` never needs a null check at the call site.
+  `tui.activity.ActivityEvent` gained a matching `error: str | None = None`, set only on a
+  "finished" event whose block called `.fail(...)`; `ActivityRelay.__init__` also gained an
+  `on_event` callback, invoked synchronously wherever an event would be queued — the seam
+  `run_log.py`'s `RunLogWriter` (see its own module docstring) hooks to persist the same
+  stream to disk. See `pipeline/README.md`'s "Reporting sub-step activity" section for the
+  full usage contract.
+- `steps/tool_activity.py`'s `tool_stream_relay` (shared between `ReviewStep`/
+  `TestSufficiencyStep`) is the other consumer of the one-shot `log`/`log_activity` path
+  above, translating a streamed agent call's `StreamEvent`s into activity log lines --
+  tool calls, errored tool results, and (a later increment) the model's own streamed
+  narration text. See that module's own docstring for the full mapping.
 
 ## Milestone 7, ticket 1: the approval park (#80)
 
@@ -198,3 +219,11 @@ duck-typed its way back to one of those four via `isinstance`/`getattr`.
   runtime (`tui/` depends on `steps/`), so its `isinstance` narrowing there needed no
   duck-typing workaround, and the closed union let it drop a now-redundant
   `isinstance(findings[0], Finding)` check on the list branch.
+- Issue #119's follow-up (surfacing the PR link) added a fifth member, `steps/pr.py`'s
+  `PullRequestOutcome` (`url: str`, `number: int`, `created: bool`) -- `PRStep`'s own
+  payload once it actually opens/updates a PR, same non-`Finding` precedent as `Intent`.
+  `step.py` `TYPE_CHECKING`-imports it from `code_review.steps.pr` alongside the other four,
+  same narrow exception. It carries no findings at all, so `describe_auto_fix_findings`'s
+  `getattr(payload, "findings", None)` fallback yields `None` for it (same as `Intent`), and
+  `tui/state.py`'s `latest_findings` isinstance-narrowing simply never matches it -- neither
+  needed a code change for the new member.

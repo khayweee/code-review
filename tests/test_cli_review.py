@@ -198,6 +198,20 @@ def _env_with_fake_claude(fake_cli: Path, tmp_path: Path) -> dict[str, str]:
     "claude" (`RunOpts.executable`'s production default -- see module docstring) to
     `fake_cli`, prepended ahead of the real `PATH` so it wins over any real `claude` CLI
     that might happen to be installed on the machine running this test.
+
+    Also sets `LINES`/`COLUMNS`, generously past this pipeline's own real row count --
+    Textual's `LinuxDriver._get_terminal_size` (`shutil.get_terminal_size`) checks these
+    env vars before it ever queries the `script`-allocated pty's own (often small, e.g.
+    24x80 when there is no real controlling terminal) `ioctl` window size, so without them
+    a run with enough steps/nested activity rows to exceed that ioctl size never gets to
+    compose -- let alone write to this captured byte stream -- its own closing Status box
+    ("Pipeline ran successfully."). Raw ANSI bytes have no size limit of their own; only
+    Textual's internal layout does.
+
+    Also sets `CODE_REVIEW_STATE_DIR` to a directory under `tmp_path` -- `review` now writes
+    a per-run log file under `install_state.state_dir()/runs` (`run_log.py`), so without this
+    override a real end-to-end run here would write into the real developer/CI-user's actual
+    `~/.code-review/runs` instead of an isolated one.
     """
 
     bin_dir = tmp_path / "fake_claude_bin"
@@ -208,6 +222,9 @@ def _env_with_fake_claude(fake_cli: Path, tmp_path: Path) -> dict[str, str]:
 
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["LINES"] = "200"
+    env["COLUMNS"] = "100"
+    env["CODE_REVIEW_STATE_DIR"] = str(tmp_path / "state")
     return env
 
 
@@ -745,7 +762,11 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     Status message shown, and (checked via `ps` right after `script` returns) no leftover
     `code-review`/textual process. This is acceptance criterion 1 (all four steps from
     issue #60 run, in order -- `PRStep` joined later, issue #119) and criterion 4 (demoable
-    end to end) from issue #60."""
+    end to end) from issue #60.
+
+    Also covers `run_log.py`'s wiring end to end: `review` writes a per-run log file under
+    `CODE_REVIEW_STATE_DIR/runs` (isolated to `tmp_path` by `_env_with_fake_claude`) and
+    echoes its path -- see `tests/test_run_log.py` for `run_log.py`'s own unit tests."""
 
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
@@ -763,6 +784,14 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
+
+    assert "Run log written to" in output
+    run_logs = list((tmp_path / "state" / "runs").glob("*.log"))
+    assert len(run_logs) == 1
+    log_text = run_logs[0].read_text()
+    assert "Pipeline ran successfully." in log_text
+    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep", "PRStep"):
+        assert step_name in log_text
 
     _assert_no_leftover_code_review_process(run.pgid)
 
@@ -847,7 +876,7 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
 
 
 def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
-    repo_with_unpushed_local_default_commits: tuple[Path, str, str],
+    repo_with_unpushed_local_default_commits: tuple[Path, str, str], tmp_path: Path
 ) -> None:
     """This is the ticket's own headline acceptance criterion: a branch whose history
     includes unpushed local-default commits parks at `RebaseStep` and presents the inline
@@ -860,10 +889,17 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
 
     repo, branch, unpushed_sha = repo_with_unpushed_local_default_commits
 
+    # No fake claude needed here (see docstring), but `review` still writes a per-run log
+    # file (`run_log.py`) before the park, so this still needs an isolated
+    # CODE_REVIEW_STATE_DIR -- see `_env_with_fake_claude`'s own docstring.
+    env = dict(os.environ)
+    env["CODE_REVIEW_STATE_DIR"] = str(tmp_path / "state")
+
     run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
         keypresses=[(3.0, "x")],
+        env=env,
     )
     result = run.result
     output = _plain(result.stdout)

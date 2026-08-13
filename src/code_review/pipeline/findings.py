@@ -36,9 +36,10 @@ from code_review.pipeline.step import ApprovalResponse
 
 if TYPE_CHECKING:
     # steps/ depends on pipeline/, never the reverse; ReviewOutput/TestSufficiencyOutput/
-    # Intent live under steps/, so a top-level import would invert that. Lazy annotations
-    # make TYPE_CHECKING-only sufficient.
+    # Intent/PullRequestOutcome live under steps/, so a top-level import would invert that.
+    # Lazy annotations make TYPE_CHECKING-only sufficient.
     from code_review.steps.intent import Intent
+    from code_review.steps.pr import PullRequestOutcome
     from code_review.steps.review import ReviewOutput
     from code_review.steps.test_sufficiency import TestSufficiencyOutput
 
@@ -149,15 +150,15 @@ def filter_pipeline_owned_delivery_findings(output: ReviewOutput) -> ReviewOutpu
 
 
 def describe_auto_fix_findings(
-    payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent,
+    payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent | PullRequestOutcome,
 ) -> str:
     """Render every finding in `payload` whose resolved action is "auto-fix" as fix-round
     instructions text (`pipeline.step.FixRound.instructions`).
 
     `payload` is `StepOutcome.payload`: a bare `list[Finding]`, a
-    `ReviewOutput`/`TestSufficiencyOutput` with a `.findings` list, or an `Intent` (no
-    findings at all -- `IntentStep` never opts into the fix-round loop, so this case yields
-    no lines rather than raising).
+    `ReviewOutput`/`TestSufficiencyOutput` with a `.findings` list, or an `Intent`/
+    `PullRequestOutcome` (no findings at all -- neither `IntentStep` nor `PRStep` opts into
+    the fix-round loop, so this case yields no lines rather than raising).
 
     `ReviewOutput`/`TestSufficiencyOutput` are `TYPE_CHECKING`-only imports here (`steps/`
     depends on `pipeline/`, never the reverse), so the `ReviewOutput`/`TestSufficiencyOutput`

@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from code_review.pipeline.step import activity_or_nullcontext, current_activity_reporter
+from code_review.pipeline.step import current_activity_reporter, report_activity
 from code_review.steps.gitutils import run_git
 
 _SSH_REMOTE = re.compile(r"^git@[^:]+:(?P<slug>.+?)(?:\.git)?/?$")
@@ -75,7 +75,7 @@ async def _run_gh(
     """
 
     label = _gh_activity_label(args)
-    async with activity_or_nullcontext(current_activity_reporter.get(), label):
+    async with report_activity(current_activity_reporter.get(), label) as activity:
         process = await asyncio.create_subprocess_exec(
             str(gh_executable),
             *args,
@@ -88,6 +88,8 @@ async def _run_gh(
         stdout_bytes, stderr_bytes = await process.communicate(stdin_bytes)
         # `communicate()` always waits for the process to exit before returning.
         assert process.returncode is not None
+        if process.returncode != 0:
+            activity.fail(f"exit {process.returncode}")
         return subprocess.CompletedProcess(
             args=[str(gh_executable), *args],
             returncode=process.returncode,

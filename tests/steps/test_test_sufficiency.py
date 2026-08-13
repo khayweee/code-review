@@ -36,6 +36,7 @@ from code_review.pipeline import (
 )
 from code_review.steps.intent import Intent
 from code_review.steps.test_sufficiency import TestSufficiencyOutput, TestSufficiencyStep
+from code_review.tui.activity import ActivityEvent, ActivityRelay
 
 # --- TestSufficiencyOutput schema shape ---------------------------------------------------
 
@@ -98,6 +99,7 @@ CLEAN_FAKE_CLI = _FAKES / "test_sufficiency_output_clean.py"
 BLOCKING_FAKE_CLI = _FAKES / "test_sufficiency_output_blocking.py"
 AUTO_FIX_ROUND_FAKE_CLI = _FAKES / "test_sufficiency_output_auto_fix_round.py"
 UNSET_ACTION_FAKE_CLI = _FAKES / "test_sufficiency_output_unset_action.py"
+STREAMS_A_TOOL_CALL_FAKE_CLI = _FAKES / "test_sufficiency_streams_a_tool_call.py"
 
 _EXPLICIT_INTENT = Intent(summary="use a queue, not polling", source="explicit", score=1.0)
 
@@ -335,3 +337,57 @@ def test_test_sufficiency_step_never_auto_fixes_a_finding_with_unset_action(
     # fix-round branch (which would never call `on_approval_needed` at all).
     assert len(approved) == 1
     assert approved[0] is outcome
+
+
+# --- Activity reporting (shared tool_stream_relay) -----------------------------------------
+
+
+async def _drain_activity_events(relay: ActivityRelay, count: int) -> list[ActivityEvent]:
+    """Collect exactly `count` events off `relay`. A standalone copy of `tests/steps/
+    test_review.py`'s helper of the same name -- deliberately not imported from that module
+    (see this module's docstring)."""
+
+    return [await relay.next_event() for _ in range(count)]
+
+
+def test_test_sufficiency_step_streams_each_tool_call_as_a_nested_activity(
+    tmp_path: Path,
+) -> None:
+    """`TestSufficiencyStep` gains the same tool-call visibility `ReviewStep` already has
+    via the shared `tool_stream_relay` (`steps/tool_activity.py`), not a copy -- proven
+    against `STREAMS_A_TOOL_CALL_FAKE_CLI`'s real stream-json transcript (one tool call,
+    non-error result), mirroring `tests/steps/test_review.py`'s equivalent proof exactly.
+    `run_steps` yields exactly one round here (a clean answer, no park), so this fixture's
+    4 activity events -- Agent started, Tool started, Tool finished, Agent finished -- are
+    the whole stream."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    relay = ActivityRelay()
+    ctx = StepContext(
+        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+    )
+    step: Step = TestSufficiencyStep(executable=STREAMS_A_TOOL_CALL_FAKE_CLI)
+
+    async def scenario() -> list[ActivityEvent]:
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 4))
+        async for _event in run_steps([step], ctx):
+            pass
+        return await drain_task
+
+    agent_started, tool_started, tool_finished, agent_finished = asyncio.run(scenario())
+    asyncio.run(agent.close())
+
+    assert agent_started.status == "started"
+    assert agent_started.label == "Agent: assessing test sufficiency via claude"
+    assert agent_started.parent_id is None
+
+    assert tool_started.status == "started"
+    assert tool_started.label == "Tool: Read(/fake/path.txt)"
+    assert tool_started.parent_id == agent_started.activity_id
+
+    assert tool_finished.status == "finished"
+    assert tool_finished.activity_id == tool_started.activity_id
+
+    assert agent_finished.status == "finished"
+    assert agent_finished.activity_id == agent_started.activity_id

@@ -11,25 +11,32 @@ outcome" invariant).
 `ActivityReporter` is a structural `Protocol` so `pipeline/`/`steps/` never import `tui/`
 directly; satisfied structurally by `tui.activity.ActivityRelay`. `StepContext.
 activity_reporter` carries an optional instance; `StepContext.report_activity(label)` is
-the single-line call site (`async with ctx.report_activity("fetch"): ...`), a second event
-stream independent of `StepEvent`.
+the single-line call site (`async with ctx.report_activity("fetch") as activity: ...`) for a
+block of work, a second event stream independent of `StepEvent`. The yielded
+`ActivityHandle` lets the block's own body report failure (`activity.fail("exit 1")`) --
+e.g. `run_git`/`_run_gh` marking a nonzero subprocess exit -- without raising, since neither
+ever raises on an ordinary command failure. `StepContext.log(message)` is the one-shot
+sibling for a single point-in-time event (e.g. one LLM tool call) that has no natural block
+to open/close -- `async with ctx.report_activity(label): pass` would work but `await
+ctx.log(label)` says what's actually happening.
 
 Ambient reporting: `steps/gitutils.py`'s `run_git` has no `StepContext` to read
 `activity_reporter` off of, so `current_activity_reporter` (a module-level
 `contextvars.ContextVar`) carries whichever reporter is in scope for the currently running
 step, read via `.get()`. `executor.run_steps` is the sole writer, `.set()`/`.reset()`-ing it
 immediately around each `step.run(ctx)` call so the value never leaks across steps or
-sibling tasks. `activity_or_nullcontext` factors out the shared nullcontext-when-absent
-branch.
+sibling tasks. `report_activity`/`log_activity` are the two null-safe primitives every
+activity report funnels through, whether the caller is `ctx`-bound or ambient (see their
+own docstrings).
 
 `StepOutcome.needs_approval` pauses the run for a human decision; `auto_fixable` lets a step
 that opts in via `Step.supports_fix_round = True` get bounded automatic re-runs before
 falling through to a park. A park's "fix" response lets a human re-run with their own
 instructions, uncapped -- see `executor.py`'s module docstring for the full loop.
 `StepOutcome.payload` is the closed union of every shape a step actually reports:
-`list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent`. A generic consumer (the
-executor's fix-round path, the TUI's findings display) narrows it with `isinstance` over
-that same closed set instead of duck-typing an `object`.
+`list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent | PullRequestOutcome`. A
+generic consumer (the executor's fix-round path, the TUI's findings display) narrows it
+with `isinstance` over that same closed set instead of duck-typing an `object`.
 
 `StepEvent` is `executor.run_steps`'s progress unit: one per "running" and one per
 "completed" per step/round. `started_at`/`duration` use `time.monotonic()`, not wall-clock
@@ -55,19 +62,44 @@ if TYPE_CHECKING:
     # docstring), so Finding must stay TYPE_CHECKING-only here too or the cycle inverts.
     from code_review.pipeline.findings import Finding
     from code_review.steps.intent import Intent
+    from code_review.steps.pr import PullRequestOutcome
     from code_review.steps.review import ReviewOutput
     from code_review.steps.test_sufficiency import TestSufficiencyOutput
 
 
-class ActivityReporter(Protocol):
-    """Structural, one-method contract for reporting nested sub-step activity.
-
-    Satisfied structurally by `tui.activity.ActivityRelay`; nothing here imports `tui/`.
-    A step never calls this directly, only via `StepContext.report_activity`.
+@dataclass(slots=True)
+class ActivityHandle:
+    """Mutable handle yielded by an open `activity()` block, letting the block's own body
+    report that the work it wraps failed (e.g. `run_git` marking a nonzero git exit).
+    `error` stays `None` for the common/successful case.
     """
 
-    def activity(self, label: str) -> AbstractAsyncContextManager[None]:
-        """Report one nested unit of work named `label`, open for the context manager's body."""
+    error: str | None = None
+
+    def fail(self, detail: str) -> None:
+        self.error = detail
+
+
+class ActivityReporter(Protocol):
+    """Structural, two-method contract for reporting nested sub-step activity.
+
+    Satisfied structurally by `tui.activity.ActivityRelay`; nothing here imports `tui/`.
+    A step never calls this directly, only via `StepContext.report_activity`/
+    `StepContext.log`.
+    """
+
+    def activity(self, label: str) -> AbstractAsyncContextManager[ActivityHandle]:
+        """Report one nested unit of work named `label`, open for the context manager's
+        body. The yielded `ActivityHandle` lets the body report failure via `.fail(detail)`.
+        """
+        ...
+
+    async def log(self, label: str) -> None:
+        """Report one already-finished, near-zero-duration activity named `label` -- a
+        moment in time (e.g. one LLM tool call) rather than a block of work. Semantically
+        equivalent to `async with self.activity(label): pass`, but without requiring a
+        caller that only has a point-in-time callback (not a block) to fabricate one.
+        """
         ...
 
 
@@ -79,14 +111,31 @@ current_activity_reporter: contextvars.ContextVar[ActivityReporter | None] = con
 )
 
 
-def activity_or_nullcontext(
+def report_activity(
     reporter: ActivityReporter | None, label: str
-) -> AbstractAsyncContextManager[None]:
-    """`reporter.activity(label)` if `reporter` is set, else a no-op nullcontext."""
+) -> AbstractAsyncContextManager[ActivityHandle]:
+    """`reporter.activity(label)` if `reporter` is set, else a no-op nullcontext yielding a
+    fresh, unread `ActivityHandle` -- the null-safe primitive every block-shaped activity
+    report funnels through, whether the caller has a `StepContext` (`StepContext.
+    report_activity` is a thin `self`-bound wrapper around this) or only the ambient
+    `current_activity_reporter` (`steps/gitutils.py`, `scm/github.py`). Returning a real
+    handle even in the no-reporter case means `activity.fail(...)` is always safely callable
+    with no branching at call sites. See `log_activity` for the one-shot sibling.
+    """
 
     if reporter is None:
-        return nullcontext()
+        return nullcontext(ActivityHandle())
     return reporter.activity(label)
+
+
+async def log_activity(reporter: ActivityReporter | None, label: str) -> None:
+    """`reporter.log(label)` if `reporter` is set, else a no-op -- the null-safe, one-shot
+    sibling of `report_activity`, for a point-in-time event with no block to wrap.
+    `StepContext.log` is a thin `self`-bound wrapper around this.
+    """
+
+    if reporter is not None:
+        await reporter.log(label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,10 +212,19 @@ class StepContext:
     # touch. See pipeline/AGENTS.md for the full rationale.
     step_outcomes: Mapping[str, StepOutcome] = field(default_factory=dict)
 
-    def report_activity(self, label: str) -> AbstractAsyncContextManager[None]:
-        """Report one nested unit of work: `async with ctx.report_activity("fetch"): ...`."""
+    def report_activity(self, label: str) -> AbstractAsyncContextManager[ActivityHandle]:
+        """Report one nested unit of work: `async with ctx.report_activity("fetch"): ...`.
+        Thin `self.activity_reporter`-bound wrapper around the module-level `report_activity`.
+        """
 
-        return activity_or_nullcontext(self.activity_reporter, label)
+        return report_activity(self.activity_reporter, label)
+
+    async def log(self, message: str) -> None:
+        """Report one point-in-time event: `await ctx.log("wrote 3 lines")`. Thin
+        `self.activity_reporter`-bound wrapper around the module-level `log_activity`.
+        """
+
+        await log_activity(self.activity_reporter, message)
 
     def with_fix_round(self, instructions: str) -> StepContext:
         """Return a copy of this StepContext for a fix-mode re-run of the same step, with
@@ -186,7 +244,7 @@ class StepOutcome:
     auto_fixable: bool
     # The closed set of shapes a step actually reports -- see module docstring. A step
     # narrows this back to whichever member it produced, typically via isinstance.
-    payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent
+    payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent | PullRequestOutcome
 
 
 class Step(ABC):
