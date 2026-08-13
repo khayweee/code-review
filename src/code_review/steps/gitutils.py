@@ -17,13 +17,26 @@ from pathlib import Path
 
 from code_review.pipeline.step import activity_or_nullcontext, current_activity_reporter
 
+# Long enough for every static subcommand/flag prefix this module's own calls use, short
+# enough that a trailing full SHA/ref never wraps a single Pipeline-box row -- see
+# `_git_activity_label`.
+_MAX_LABEL_LENGTH = 60
+
 
 def _git_activity_label(args: list[str]) -> str:
     """Render the full command as an activity label, e.g. `["fetch", "origin", "main"]`
     -> `"git fetch origin main"`. Empty `args` degrades to `"git"` rather than raising.
+
+    Capped at `_MAX_LABEL_LENGTH`: an `args` value that embeds a full 40-char SHA (e.g.
+    `is_ancestor`'s `merge-base --is-ancestor <sha> <sha>`) can otherwise produce a line
+    that overflows the Pipeline box's width, forcing Textual to wrap and re-layout it on
+    every tick of `PipelineBox`'s 60fps shimmer loop -- measured to add several real
+    seconds of event-loop starvation per `RebaseStep` run, enough to blow past
+    `tests/test_cli_review.py`'s keypress-confirm budget.
     """
 
-    return f"git {' '.join(args)}".rstrip()
+    label = f"git {' '.join(args)}".rstrip()
+    return label[:_MAX_LABEL_LENGTH]
 
 
 async def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
