@@ -9,10 +9,9 @@ keypress. Every call after the first -- `ReviewStep`'s own automatic fix round, 
 `PATH` (see `tests/test_cli_review.py`'s `_env_with_fake_claude` docstring: `cli.py` builds
 both steps via `cls()` with no executable override) -- answers clean.
 
-Shaped as the same `ReviewOutput`/`TestSufficiencyOutput` superset
-`claude_superset_clean.py`/`claude_superset_blocking.py` already use (see either script's
-own docstring for why one payload covers both schemas via pydantic's default
-`extra="ignore"`).
+Shaped as the same `ReviewOutput`/`TestSufficiencyOutput` superset `claude_superset_clean.py`
+already uses (see that script's own docstring for why one payload covers both schemas via
+pydantic's default `extra="ignore"`).
 
 Call count is tracked via an on-disk marker file, not an in-process counter -- each
 invocation is a fresh subprocess (`RunOpts.executable` shells out per call), so nothing
