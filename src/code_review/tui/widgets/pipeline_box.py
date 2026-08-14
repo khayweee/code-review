@@ -18,6 +18,7 @@ from rich.console import Group
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
+from textual.timer import Timer
 
 from code_review.tui.state import ActivityRow, StepRow
 from code_review.tui.widgets.base import _BorderedBox
@@ -192,7 +193,28 @@ class PipelineBox(_BorderedBox):
             self.border_subtitle = branch
 
     def on_mount(self) -> None:
-        self.set_interval(_SHIMMER_TICK_SECONDS, self._animate_shimmer)
+        self._shimmer_timer: Timer = self.set_interval(
+            _SHIMMER_TICK_SECONDS, self._animate_shimmer
+        )
+
+    def stop_shimmer(self) -> None:
+        """Stop the shimmer timer -- `ReviewApp` calls this once the run is done.
+
+        This timer is this widget's own, independent of `ReviewApp`'s tick timer (which
+        `_consume_events` does stop on completion): left running, it keeps calling
+        `self.update(..., layout=False)` on every `_SHIMMER_TICK_SECONDS` tick forever,
+        including after the run finishes. Confirmed directly (a real pty run against a
+        two-approval-park scenario, `tests/test_cli_review.py`'s `test_review_skipping_
+        both_findings_of_a_two_finding_park_completes_the_run`): a still-running shimmer
+        timer, re-issuing its own `layout=False` update on every tick indefinitely, starves
+        Textual's compositor of ever landing the one real `layout=True` update (`ReviewApp.
+        _render`'s own final `update_rows`/Status-box-mount pass) that shows the run is
+        actually done -- the screen stays frozen on the last frame from before completion,
+        looping the same bytes to the terminal forever, even though `ReviewApp._done` and
+        every widget's own state are already fully correct. Stopping this timer here is
+        what lets that final frame actually reach the screen."""
+
+        self._shimmer_timer.stop()
 
     def _animate_shimmer(self) -> None:
         """Re-render every tick so `gradient_text` recomputes the shimmer; `self.refresh()`

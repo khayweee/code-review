@@ -195,6 +195,9 @@ class ReviewApp(App[None]):
         finally:
             self._done = True
             self._tick_timer.stop()
+            # See PipelineBox.stop_shimmer's own docstring: left running, its independent
+            # timer starves this final _render() from ever actually reaching the screen.
+            self.query_one(PipelineBox).stop_shimmer()
             self._render()
 
     async def _relay_input(self) -> None:

@@ -572,8 +572,26 @@ def _send_key_confirmed(
     `faulthandler`, not theorized: the real `code-review review` process was found
     completely idle (every thread parked in a blocking read/select, nothing spinning or
     holding a lock) waiting for a keystroke that plainly never reached its terminal
-    driver."""
+    driver.
 
+    If `output.current()` shows no counter at all right now (`baseline is None`) -- the
+    gap between one park fully resolving and the next one opening, or before the very
+    first park exists yet -- this waits for a real counter to actually render before
+    treating it as the baseline, rather than using `None` itself. Skipping that wait was a
+    real, confirmed bug (not a theoretical one): the very next thing that renders once a
+    park resolves is often the *next* park's own fresh "0/N decided" counter, appearing on
+    its own regardless of whether this key was ever received -- `_progressed`'s `!=
+    baseline` check treats `None -> "0/N"` exactly like "my key decided a row", since
+    both are simply "the reading changed". A key sent into that gap was, on a real wedged
+    run, silently credited as delivered by that unrelated park-open event alone -- caught
+    directly via a live dump of the running app's own state: `TestSufficiencyStep`'s park
+    had decided its first row but never even received the keypress meant for its second,
+    permanently parked with no keypress left in the sequence to answer it. Waiting for a
+    real counter first, before capturing the baseline this key's own delivery is judged
+    against, removes that ambiguity."""
+
+    if _latest_decided_progress(output.current()) is None:
+        output.wait_until(lambda text: _latest_decided_progress(text) is not None, timeout)
     baseline = _latest_decided_progress(output.current())
 
     def _progressed(text: str) -> bool:
@@ -880,7 +898,21 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     step, so `ReviewStep`'s park has a real multi-row `FindingsList` -- the case #98's
     per-finding decision model exists for. Both rows must be answered with "s" before
     `ReviewStep`'s park actually resolves (issue #98's own new behavior), and the same
-    again for `TestSufficiencyStep`'s park right after."""
+    again for `TestSufficiencyStep`'s park right after.
+
+    This is the one test in this file whose 3rd keypress lands in the gap between one
+    park fully resolving and the next one opening -- exactly the case
+    `_send_key_confirmed`'s own docstring now covers (a real, confirmed bug: that gap's
+    `baseline is None` used to look identical to "my keypress was received", so a
+    keypress sent into it was sometimes silently credited to the *next* park merely
+    opening, not to anything it actually did -- leaving `TestSufficiencyStep`'s second row
+    permanently undecided with no keypress left in the sequence to answer it). Every
+    `max_wait_seconds` budget below is still generous (matching every other keypress in
+    this file, none below 3.0) and `final_wait` is passed well above
+    `_run_review_with_keypresses`'s own 3.0s default: this is the only caller that needs
+    two full approval round-trips *and* `PRStep` to all finish inside that one window
+    before "e" is ever sent, and `stdin` closes for good right after -- no keypress sent
+    after that point can ever reach the app, even once it finishes moments later."""
 
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(BLOCKING_TWO_FINDINGS_FAKE_CLAUDE, tmp_path)
@@ -888,7 +920,8 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
-        keypresses=[(3.0, "s"), (1.0, "s"), (2.0, "s"), (1.0, "s")],
+        keypresses=[(4.0, "s"), (4.0, "s"), (4.0, "s"), (4.0, "s")],
+        final_wait=10.0,
         env=env,
     )
     result = run.result
