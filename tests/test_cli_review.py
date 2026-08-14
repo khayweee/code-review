@@ -55,6 +55,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -440,6 +441,30 @@ def _drain_in_background(stream: IO[str], chunks: list[str]) -> threading.Thread
     return thread
 
 
+def _kill_process_group(pgid: int) -> None:
+    """Best-effort `SIGKILL` of the whole process group `start_new_session=True` gave the
+    `script` process below (`_ReviewRun.pgid`), used only on a failure path -- a wait
+    timing out, or any other exception raised before the process has been confirmed exited.
+
+    Without this, a failed wait leaves the real `code-review review` subprocess running
+    indefinitely: nothing else in either real-pty full-run helper ever sends it "e", and
+    `PipelineBox`'s live spinner/gradient sweep (`_render_row`) keeps it animating its
+    still-"running"/parked step at `ReviewApp`'s own `_TICK_INTERVAL` forever. Confirmed
+    directly, not theorized: one such leaked process from an earlier timed-out run was
+    still consuming ~38% CPU and writing a measured ~130KB/s of ANSI output minutes later,
+    with no test still watching it -- degrading (and in one observed case, tipping over the
+    30s/60s exit-wait bound of) every real-pty test that happened to run afterward, on the
+    same machine, for the rest of that `pytest` session. `ProcessLookupError` means it's
+    already gone by the time this runs; nothing else here is worth raising over a
+    best-effort cleanup on top of an already-failing test.
+    """
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 class _LiveOutput:
     """Live-tails a real pty child's stdout, built once per real-pty helper below and
     shared by every wait against that one process's output.
@@ -616,13 +641,19 @@ def _run_review_and_press_e_to_exit(
     stderr_thread = _drain_in_background(process.stderr, stderr_chunks)
     output = _LiveOutput(stdout_chunks)
 
-    output.wait_until(lambda text: _DONE_MARKER in text, timeout=wait_before_keypress)
-    _send_e_and_confirm_exit(process, timeout=1.0)
-    process.stdin.close()
-
-    process.wait(timeout=timeout)
-    stdout_thread.join(timeout=5)
-    stderr_thread.join(timeout=5)
+    try:
+        output.wait_until(lambda text: _DONE_MARKER in text, timeout=wait_before_keypress)
+        _send_e_and_confirm_exit(process, timeout=1.0)
+        process.stdin.close()
+        process.wait(timeout=timeout)
+    except BaseException:
+        # See `_kill_process_group`'s own docstring: a wait that raises here (most often
+        # `process.wait`'s own `TimeoutExpired`) must not leave `process` running.
+        _kill_process_group(pgid)
+        raise
+    finally:
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
     return _ReviewRun(
         subprocess.CompletedProcess(
             process.args, process.returncode, "".join(stdout_chunks), "".join(stderr_chunks)
@@ -637,7 +668,7 @@ def _run_review_with_keypresses(
     *,
     keypresses: list[tuple[float, str]],
     final_wait: float = 3.0,
-    timeout: float = 30.0,
+    timeout: float = 60.0,
     env: dict[str, str] | None = None,
 ) -> _ReviewRun:
     """Like `_run_review_and_press_e_to_exit`, generalized to send an ordered sequence of
@@ -660,6 +691,22 @@ def _run_review_with_keypresses(
     sending it, sleeping the full `max_wait_seconds`, then resending once more and sleeping
     again, before the second tuple's own wait covers the mount. `final_wait` is the same
     kind of upper bound, now against `_DONE_MARKER`, before the closing "e".
+
+    `timeout` (bounding the final `process.wait` once "e" has been sent) defaults higher
+    than `_run_review_and_press_e_to_exit`'s: `PipelineBox`'s live spinner and per-frame
+    gradient sweep (`_render_row`) keep any still-"running"/parked step animating on
+    `ReviewApp`'s own `_TICK_INTERVAL` (4Hz) for as long as a park is showing, which
+    measured in the ~130KB/s steady state over a real pty even while idle, parked, and
+    waiting on a keypress -- confirmed independent of terminal size, so not `LINES`/
+    `COLUMNS`-driven. A caller that parks twice (this helper's whole reason to exist over
+    the single-park helper) pushes twice the animated-frame volume through the same real
+    `script`-relayed pty before `process.wait` ever starts counting, which is exactly the
+    "dozen real subprocesses started, output-drain thread starved of CPU" class already
+    documented on `_LiveOutput`/`_drain_in_background` above -- reproduced directly against
+    this exact helper under load, not theorized. 60s (vs. 30s) buys headroom against that
+    same contention for the multi-park case without masking a real hang: a genuinely wedged
+    process (e.g. a dropped stdin byte with no keystroke left to retry) would still fail
+    this bound, just later.
     """
 
     process = subprocess.Popen(
@@ -683,19 +730,25 @@ def _run_review_with_keypresses(
     stderr_thread = _drain_in_background(process.stderr, stderr_chunks)
     output = _LiveOutput(stdout_chunks)
 
-    first_wait, first_key = keypresses[0]
-    output.wait_until(lambda text: _PARK_MARKER in text, timeout=first_wait)
-    _send_key_confirmed(process, output, first_key, timeout=first_wait)
-    for max_wait, key in keypresses[1:]:
-        _send_key_confirmed(process, output, key, timeout=max_wait)
+    try:
+        first_wait, first_key = keypresses[0]
+        output.wait_until(lambda text: _PARK_MARKER in text, timeout=first_wait)
+        _send_key_confirmed(process, output, first_key, timeout=first_wait)
+        for max_wait, key in keypresses[1:]:
+            _send_key_confirmed(process, output, key, timeout=max_wait)
 
-    output.wait_until(lambda text: _DONE_MARKER in text, timeout=final_wait)
-    _send_e_and_confirm_exit(process, timeout=1.0)
-    process.stdin.close()
-
-    process.wait(timeout=timeout)
-    stdout_thread.join(timeout=5)
-    stderr_thread.join(timeout=5)
+        output.wait_until(lambda text: _DONE_MARKER in text, timeout=final_wait)
+        _send_e_and_confirm_exit(process, timeout=1.0)
+        process.stdin.close()
+        process.wait(timeout=timeout)
+    except BaseException:
+        # See `_kill_process_group`'s own docstring: a wait that raises here (most often
+        # `process.wait`'s own `TimeoutExpired`) must not leave `process` running.
+        _kill_process_group(pgid)
+        raise
+    finally:
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
 
     return _ReviewRun(
         subprocess.CompletedProcess(
@@ -750,6 +803,23 @@ def _assert_no_leftover_code_review_process(pgid: int) -> None:
         )
 
 
+# Every test below spawns a real ReviewApp over a real pty and therefore inherits
+# PipelineBox's live spinner/gradient animation for as long as any step is "running"/parked
+# (see pipeline_box.py's `_SHIMMER_TICK_SECONDS`) -- real, sustained CPU and pty-output load
+# for the whole test, not a brief spike. Under plain `-n auto` (`--dist=load`, pytest-xdist's
+# default), pytest-xdist is free to schedule several of these onto different workers at the
+# same time, so their animations compete for the CI runner's own small core count -- this is
+# what was actually pushing `_run_review_with_keypresses`'s exit-wait past even a 60s bound
+# in CI, not any single test being slow on its own (each passes in a couple of seconds in
+# isolation). `xdist_group` (used with `--dist=loadgroup` -- see `.github/workflows/ci.yml`)
+# pins every test carrying this marker to the same worker, so at most one of them ever
+# animates at once; the rest of the suite still spreads across every other worker exactly as
+# before. A plain `-n auto` run (e.g. this file's own local `uv run pytest -n auto` without
+# the extra flag) ignores the marker and schedules these exactly as it did previously.
+_REAL_PTY_FULL_RUN_GROUP = "real_pty_full_run"
+
+
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -796,6 +866,7 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_the_run(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -843,6 +914,7 @@ def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_th
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -875,6 +947,7 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
 # --- The approval park, proven against RebaseStep's real, already-shipped guard (#80) ----
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     repo_with_unpushed_local_default_commits: tuple[Path, str, str], tmp_path: Path
 ) -> None:
@@ -918,6 +991,7 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continues(
     repo_with_unpushed_local_default_commits: tuple[Path, str, str],
     tmp_path: Path,
@@ -952,6 +1026,7 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
     _assert_no_leftover_code_review_process(run.pgid)
 
 
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:

@@ -78,6 +78,18 @@ def render_rows(rows: Sequence[StepRow]) -> str:
 
 _SHIMMER_BASE_LIGHTNESS = 0.45
 _SHIMMER_PEAK_LIGHTNESS = 0.90
+# Matches rich.spinner.Spinner("dots").interval (80ms) -- the spinner icon itself can't
+# show a new frame any faster than that, so ticking `_animate_shimmer` past it (the
+# previous 1/60s, ~5x faster) only spent extra CPU/output re-rendering and re-writing an
+# unchanged spinner glyph, at real, measured cost: a still-"running"/parked step's steady
+# ANSI output over a real pty (~130KB/s at 60Hz) was enough to push a real end-to-end
+# `code-review review` subprocess -- and, on a loaded CI runner, its siblings -- past their
+# own real-pty tests' exit-wait timeouts (see tests/test_cli_review.py's
+# `_run_review_with_keypresses` docstring). The color shimmer (`gradient_text`) is
+# continuous, not frame-quantized, so sampling it at 12.5Hz instead of 60Hz still reads as
+# smooth motion to the eye; it just no longer redraws faster than anything on screen can
+# actually change.
+_SHIMMER_TICK_SECONDS = 0.08
 
 
 def gradient_text(label: str, phase: float) -> Text:
@@ -180,7 +192,7 @@ class PipelineBox(_BorderedBox):
             self.border_subtitle = branch
 
     def on_mount(self) -> None:
-        self.set_interval(1 / 60, self._animate_shimmer)
+        self.set_interval(_SHIMMER_TICK_SECONDS, self._animate_shimmer)
 
     def _animate_shimmer(self) -> None:
         """Re-render every tick so `gradient_text` recomputes the shimmer; `self.refresh()`
