@@ -16,6 +16,20 @@ shows no subtitle at all.
 box rows, Findings box title) -- every internal comparison (registry order, `parked_step`,
 `skipped_steps`, activity attribution) still keys off the canonical name from `registry`/
 `StepEvent.step_name`. `None`/`{}` renders every step under its raw canonical name.
+
+There is exactly one periodic timer in this whole app (`self._tick_timer`, `on_mount`),
+not one per widget. It used to be two: this app's own (recomputing real `StepRow` data at
+a throttled rate) plus `PipelineBox`'s own separate, faster one (a cosmetic-only repaint
+keeping its shimmer/spinner animating smoothly in between). Two independently-owned timers
+meant two things to stop, and only one of them ever got stopped on completion -- confirmed
+directly against a real pty run: `PipelineBox`'s own timer kept re-issuing its repaint
+forever, starving Textual's compositor of ever landing the final "done" frame, even though
+the run had genuinely finished (`tests/test_cli_review.py`'s `test_review_skipping_both_
+findings_of_a_two_finding_park_completes_the_run`). `_on_tick` now ticks at
+`PipelineBox`'s own faster `_SHIMMER_TICK_SECONDS` rate, calling its cheap
+`animate_shimmer()` on most ticks and the full, throttled `_render()` (real `StepRow` data,
+Findings/Status boxes) only every `_FULL_RENDER_EVERY_TICKS`th one -- one timer, one place
+that stops it, no second one left behind to forget.
 """
 
 from __future__ import annotations
@@ -33,10 +47,19 @@ from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
-from code_review.tui.widgets import FindingsList, PipelineBox, StatusBox
+from code_review.tui.widgets import _SHIMMER_TICK_SECONDS, FindingsList, PipelineBox, StatusBox
 
-# How often a running step's elapsed duration re-renders between events.
-_TICK_INTERVAL = 0.25
+# The app's single tick timer's interval -- PipelineBox's own shimmer/spinner rate (the
+# faster of the two rates this used to be), see this module's own docstring.
+_TICK_INTERVAL = _SHIMMER_TICK_SECONDS
+# How many ticks between full re-renders (real StepRow data: elapsed durations, new
+# activities, Findings/Status boxes) -- every other tick is a cheap, cosmetic-only
+# PipelineBox.animate_shimmer() call. 3 * _TICK_INTERVAL (~0.24s) keeps the full-render
+# rate close to this app's previous, separately-tuned 0.25s -- see this module's own
+# docstring for why the full render can't just run on every fast tick: that's the exact
+# real, measured output-volume/CPU cost `PipelineBox`'s own former timer was tuned to
+# avoid at its own faster rate (see `pipeline_box.py`'s `_SHIMMER_TICK_SECONDS`).
+_FULL_RENDER_EVERY_TICKS = 3
 
 
 class ReviewApp(App[None]):
@@ -95,6 +118,9 @@ class ReviewApp(App[None]):
         # re-matching it once no later step supersedes it.
         self._resolved_outcome_ids: set[int] = set()
         self._done = False  # True once `events` is exhausted or raises
+        # Counts self._tick_timer's own fast ticks, so _on_tick can throttle the full
+        # (real-data) render to every _FULL_RENDER_EVERY_TICKS'th one.
+        self._tick_count = 0
 
         # Set only if iterating `events` raised; `cli.py` uses it for a nonzero exit code.
         self.error: BaseException | None = None
@@ -103,7 +129,7 @@ class ReviewApp(App[None]):
         yield PipelineBox(self._rows(), branch=self._branch)
 
     def on_mount(self) -> None:
-        self._tick_timer: Timer = self.set_interval(_TICK_INTERVAL, self._render)
+        self._tick_timer: Timer = self.set_interval(_TICK_INTERVAL, self._on_tick)
         self.run_worker(self._consume_events(), exclusive=True)
         if self._input_relay is not None:
             # Separate group so `exclusive` on the events worker doesn't cancel this one.
@@ -112,6 +138,23 @@ class ReviewApp(App[None]):
             self.run_worker(self._consume_activities(), group="activity-relay")
         if self._approval_relay is not None:
             self.run_worker(self._relay_approval(), group="approval-relay")
+
+    def _on_tick(self) -> None:
+        """This app's single timer callback (see this module's own docstring): a full
+        `_render()` every `_FULL_RENDER_EVERY_TICKS`th tick, a cheap
+        `PipelineBox.animate_shimmer()` repaint on every other one.
+
+        Swallows `MountError` the same way `_render()` does, for the same reason -- a tick
+        can still land right as `self.exit()` fires."""
+
+        self._tick_count += 1
+        if self._tick_count % _FULL_RENDER_EVERY_TICKS == 0:
+            self._render()
+            return
+        try:
+            self.query_one(PipelineBox).animate_shimmer()
+        except MountError:
+            pass
 
     def action_exit_when_done(self) -> None:
         """Exits only once the run has finished."""
@@ -195,9 +238,6 @@ class ReviewApp(App[None]):
         finally:
             self._done = True
             self._tick_timer.stop()
-            # See PipelineBox.stop_shimmer's own docstring: left running, its independent
-            # timer starves this final _render() from ever actually reaching the screen.
-            self.query_one(PipelineBox).stop_shimmer()
             self._render()
 
     async def _relay_input(self) -> None:

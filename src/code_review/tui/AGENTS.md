@@ -38,12 +38,16 @@ without a real agent subprocess.
   events worker can't cancel the others: `_consume_events` (always), and — only when the
   corresponding relay is passed in — `_relay_input`, `_consume_activities`,
   `_relay_approval`.
-- `_consume_events` drains `events`, re-renders on every `StepEvent` and on a 0.25s timer
-  tick (so a running step's elapsed duration visibly ticks), and marks the run `_done` in a
-  `finally` once `events` is exhausted or raises. On an exception it infers the failing step
-  as whichever step was last seen `"running"` with no matching `"completed"` (`StepEvent`
-  itself has no "failed" status — see `state.py`) and stores it in `self._failed_step`,
-  read by every later render for the rest of the app's lifetime.
+- `_consume_events` drains `events`, re-renders on every `StepEvent` and on `_on_tick`'s
+  own throttled full-render (so a running step's elapsed duration visibly ticks), and marks
+  the run `_done` in a `finally` once `events` is exhausted or raises. On an exception it
+  infers the failing step as whichever step was last seen `"running"` with no matching
+  `"completed"` (`StepEvent` itself has no "failed" status — see `state.py`) and stores it
+  in `self._failed_step`, read by every later render for the rest of the app's lifetime.
+  `self._tick_timer` is the app's one and only periodic timer (see `app.py`'s module
+  docstring) — `_on_tick` ticks it at `PipelineBox`'s own faster shimmer rate, doing a
+  cheap `PipelineBox.animate_shimmer()` repaint on most ticks and the full render above
+  only every `_FULL_RENDER_EVERY_TICKS`th one.
 - The app does not exit itself when the run ends: it stops the tick timer and mounts a
   Status box naming the outcome. Pressing "e" (`action_exit_when_done`) is a no-op until
   `self._done` — a stray "e" mid-run can't cut it short; only Textual's own `ctrl+q`/
@@ -179,8 +183,13 @@ renders as a pending placeholder.
   row's name shimmers (`gradient_text`, phased by `time.monotonic()`) and its icon spins
   (`Spinner`, cached per step name in `PipelineBox._spinners` so the animation clock
   doesn't reset every render).
-- Self-driven 60fps `_animate_shimmer` timer re-renders the running row's colors between
-  `StepEvent`s; `update_rows` replaces the full row set on every `app.py` render tick.
+- `PipelineBox` owns no timer of its own: `animate_shimmer` is a plain, cheap
+  (`layout=False`) repaint method that `ReviewApp`'s single tick timer (`app.py`'s
+  `_on_tick`) calls on most ticks, at `_SHIMMER_TICK_SECONDS`'s 12.5Hz rate (matching
+  `Spinner("dots")`'s own 80ms frame interval — no point re-rendering faster than the
+  spinner glyph can actually change); `update_rows` replaces the full row set (real
+  `StepRow` data) on every `_FULL_RENDER_EVERY_TICKS`th tick instead. One timer total, not
+  one per widget — see `app.py`'s module docstring for why that matters.
 - Its own `DEFAULT_CSS` (`pipeline_box.tcss`, on top of `_BorderedBox`'s inherited one)
   sets `border-subtitle-align: right`, scoped to this widget only — `StatusBox` has no
   subtitle to align, so this rule lives here rather than in the shared `base.tcss`. The
