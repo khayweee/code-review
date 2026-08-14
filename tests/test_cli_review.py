@@ -42,10 +42,16 @@ resolve every park -- `RebaseStep.run` never reads `ctx.fix_round` at all, so an
 issue #24 guard with "fix" just re-parks on the identical finding forever; skip is the one
 non-abort way past that specific park (see `tui/AGENTS.md`'s "Findings box" section). Once
 `ReviewStep`/`TestSufficiencyStep` set `needs_approval` from `has_blocking_finding` (already
-shipped, `steps/review.py`/`steps/test_sufficiency.py`), `test_review_surfaces_a_blocking_
-finding_without_crashing` below changed too: a blocking finding now genuinely parks the run
-(it used to be silently ignored, pre-#80) -- `BLOCKING_FAKE_CLAUDE`'s own module docstring
-already anticipated this ("both steps report needs_approval=True from this one script").
+shipped, `steps/review.py`/`steps/test_sufficiency.py`), a blocking finding from either step
+genuinely parks the run too (it used to be silently ignored, pre-#80) --
+`test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run` below is this
+file's real-pty proof of that path. The single-finding, non-`RebaseStep` variant of that
+same proof (`BLOCKING_FAKE_CLAUDE`/`claude_superset_blocking.py`) was removed once
+`tests/tui/test_app.py::test_review_app_parks_with_a_review_output_outcome_without_crashing_on_markup`
+started covering the identical scenario -- same finding text, same "s" resolution, same
+no-crash assertion -- deterministically via Textual's `Pilot` instead of a real pty,
+subprocess, git repo, and fake `claude` executable; the two-finding real-pty test above
+still exercises that this parks for real through the actual pipeline wiring.
 """
 
 from __future__ import annotations
@@ -80,7 +86,6 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 _FAKES = Path(__file__).parent / "pipeline" / "fakes"
 AUTO_FIX_ROUND_FAKE_CLAUDE = _FAKES / "claude_superset_auto_fix_then_clean.py"
 CLEAN_FAKE_CLAUDE = _FAKES / "claude_superset_clean.py"
-BLOCKING_FAKE_CLAUDE = _FAKES / "claude_superset_blocking.py"
 BLOCKING_TWO_FINDINGS_FAKE_CLAUDE = _FAKES / "claude_superset_blocking_two_findings.py"
 
 
@@ -567,8 +572,26 @@ def _send_key_confirmed(
     `faulthandler`, not theorized: the real `code-review review` process was found
     completely idle (every thread parked in a blocking read/select, nothing spinning or
     holding a lock) waiting for a keystroke that plainly never reached its terminal
-    driver."""
+    driver.
 
+    If `output.current()` shows no counter at all right now (`baseline is None`) -- the
+    gap between one park fully resolving and the next one opening, or before the very
+    first park exists yet -- this waits for a real counter to actually render before
+    treating it as the baseline, rather than using `None` itself. Skipping that wait was a
+    real, confirmed bug (not a theoretical one): the very next thing that renders once a
+    park resolves is often the *next* park's own fresh "0/N decided" counter, appearing on
+    its own regardless of whether this key was ever received -- `_progressed`'s `!=
+    baseline` check treats `None -> "0/N"` exactly like "my key decided a row", since
+    both are simply "the reading changed". A key sent into that gap was, on a real wedged
+    run, silently credited as delivered by that unrelated park-open event alone -- caught
+    directly via a live dump of the running app's own state: `TestSufficiencyStep`'s park
+    had decided its first row but never even received the keypress meant for its second,
+    permanently parked with no keypress left in the sequence to answer it. Waiting for a
+    real counter first, before capturing the baseline this key's own delivery is judged
+    against, removes that ambiguity."""
+
+    if _latest_decided_progress(output.current()) is None:
+        output.wait_until(lambda text: _latest_decided_progress(text) is not None, timeout)
     baseline = _latest_decided_progress(output.current())
 
     def _progressed(text: str) -> bool:
@@ -867,54 +890,6 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
 
 
 @pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
-def test_review_surfaces_a_blocking_finding_and_skipping_both_parks_completes_the_run(
-    repo_with_branch: tuple[Path, str], tmp_path: Path
-) -> None:
-    """Acceptance criterion 3 from issue #60, updated for issue #80: a blocking ("ask-user")
-    finding from `ReviewStep` is surfaced -- rendered in the Findings box -- without the run
-    crashing. Before #80 this outcome's `needs_approval=True` was silently ignored; now it
-    genuinely parks the run (`BLOCKING_FAKE_CLAUDE`'s own module docstring already
-    anticipated this: "both steps report needs_approval=True from this one script", since
-    `TestSufficiencyStep` resolves the same fake `claude` on `PATH` and parks a second time
-    right after). This is no longer proving "approve" as a distinct outcome -- approve was
-    removed for good, with no replacement -- and chat can't stand in for it here either:
-    `BLOCKING_FAKE_CLAUDE` ignores whatever prompt it's given and always answers with the
-    same blocking finding (see its own module docstring), so a "fix" response would just
-    re-park both steps on the identical finding forever. "s" (skip) is the one mechanism
-    left that actually moves past a park like this, so both parks are answered with it here
-    -- proving a blocking finding still does not crash the run, and a human can move past it
-    and reach "Pipeline ran successfully.", the same acceptance criterion the original
-    "approve" version of this test proved before approve was removed."""
-
-    repo, branch = repo_with_branch
-    env = _env_with_fake_claude(BLOCKING_FAKE_CLAUDE, tmp_path)
-
-    run = _run_review_with_keypresses(
-        [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
-        cwd=repo,
-        keypresses=[(3.0, "s"), (2.0, "s")],
-        env=env,
-    )
-    result = run.result
-    output = _plain(result.stdout)
-
-    assert result.returncode == 0
-    assert "Traceback" not in output
-    assert "Pipeline ran successfully." in output
-    # A short fragment, not the full finding text -- `FindingsDescription`'s column is
-    # narrow enough (this sandbox's default 80x24 pty, `_plain`'s regex only stripping SGR
-    # color codes, not cursor-repositioning ones) that the full 54-character description
-    # wraps across two physical terminal lines, splitting the literal substring across a
-    # `\x1b[<row>;<col>H` escape sequence -- confirmed independent of this test's own
-    # keypresses (reproduced identically against the pre-#87-simplification "a"/"a" version
-    # of this test too), so this is a pre-existing environment-dependent fragility in the
-    # assertion itself, not something this change introduced.
-    assert "drops error handling" in output
-
-    _assert_no_leftover_code_review_process(run.pgid)
-
-
-@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -923,7 +898,21 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     step, so `ReviewStep`'s park has a real multi-row `FindingsList` -- the case #98's
     per-finding decision model exists for. Both rows must be answered with "s" before
     `ReviewStep`'s park actually resolves (issue #98's own new behavior), and the same
-    again for `TestSufficiencyStep`'s park right after."""
+    again for `TestSufficiencyStep`'s park right after.
+
+    This is the one test in this file whose 3rd keypress lands in the gap between one
+    park fully resolving and the next one opening -- exactly the case
+    `_send_key_confirmed`'s own docstring now covers (a real, confirmed bug: that gap's
+    `baseline is None` used to look identical to "my keypress was received", so a
+    keypress sent into it was sometimes silently credited to the *next* park merely
+    opening, not to anything it actually did -- leaving `TestSufficiencyStep`'s second row
+    permanently undecided with no keypress left in the sequence to answer it). Every
+    `max_wait_seconds` budget below is still generous (matching every other keypress in
+    this file, none below 3.0) and `final_wait` is passed well above
+    `_run_review_with_keypresses`'s own 3.0s default: this is the only caller that needs
+    two full approval round-trips *and* `PRStep` to all finish inside that one window
+    before "e" is ever sent, and `stdin` closes for good right after -- no keypress sent
+    after that point can ever reach the app, even once it finishes moments later."""
 
     repo, branch = repo_with_branch
     env = _env_with_fake_claude(BLOCKING_TWO_FINDINGS_FAKE_CLAUDE, tmp_path)
@@ -931,7 +920,8 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
         cwd=repo,
-        keypresses=[(3.0, "s"), (1.0, "s"), (2.0, "s"), (1.0, "s")],
+        keypresses=[(4.0, "s"), (4.0, "s"), (4.0, "s"), (4.0, "s")],
+        final_wait=10.0,
         env=env,
     )
     result = run.result

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Fake Claude CLI for a real-pty repro of a MULTI-finding blocking park (issue #98):
-like `claude_superset_blocking.py`, but returns TWO "ask-user" findings instead of one, so
+a blocking, "ask-user" answer shaped as the same `ReviewOutput`/`TestSufficiencyOutput`
+superset `claude_superset_clean.py` uses (see that script's docstring for why one payload
+covers both schemas), but with TWO "ask-user" findings instead of one, so
 `ReviewStep`/`TestSufficiencyStep` each park with a multi-row `FindingsList` rather than
 #98's degenerate single-row case."""
 

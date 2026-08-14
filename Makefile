@@ -24,4 +24,4 @@ install-dev:
 
 prune-branches:
 	git fetch --prune
-	git branch -vv | awk '/: gone]/{print $$1}' | xargs -r git branch -D
+	git branch -vv | awk '/: gone]/{sub(/^\* /, ""); print $$1}' | xargs -r git branch -D

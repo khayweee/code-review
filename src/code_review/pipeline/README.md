@@ -7,14 +7,14 @@ does not contain review policy or GitHub-specific behavior; those belong in
 
 ## Subunits
 
-| Subunit | Purpose | Input | Output |
-| --- | --- | --- | --- |
-| `Step` | Abstract base class subclassed by one unit of pipeline work. Its only abstract operation is asynchronous `run(ctx)`; it also provides a concrete `get_name()`. | `StepContext` | `StepOutcome` |
-| `StepContext` | Immutable per-pipeline-run data shared by every step (see `docs/GLOSSARY.md`'s "run" entry). | `cwd`, `agent`, `diff`, and `intent` | Read by steps; it is not itself transformed |
-| `StepOutcome` | A step's report to the executor. | Values chosen by the step | `needs_approval`, `auto_fixable`, and step-specific `findings` |
-| `StepEvent` | One progress unit `run_steps` yields: a step entering `"running"`, or its `"completed"` report. | Produced by the executor, not by steps themselves | `step_name`, `status`, `outcome` (set only when completed), `started_at`/`duration` |
-| `run_steps` | Executes the supplied steps sequentially, yielding a running/completed event pair per round, and pausing for a human at an approval park. | Ordered `list[Step]` and one `StepContext` | `AsyncIterator[StepEvent]`, two events per round in execution order |
-| `findings.py` | Shared finding schema (`Finding`), the fail-safe action default, the blocking-findings gate, and fix-loop rendering helpers. | `ReviewOutput`/`TestSufficiencyOutput`-shaped findings | `Finding`, `has_blocking_finding`, `describe_auto_fix_findings`, `describe_finding_decisions` |
+| Subunit       | Purpose                                                                                                                                                        | Input                                                  | Output                                                                                        |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `Step`        | Abstract base class subclassed by one unit of pipeline work. Its only abstract operation is asynchronous `run(ctx)`; it also provides a concrete `get_name()`. | `StepContext`                                          | `StepOutcome`                                                                                 |
+| `StepContext` | Immutable per-pipeline-run data shared by every step (see `docs/GLOSSARY.md`'s "run" entry).                                                                   | `cwd`, `agent`, `diff`, and `intent`                   | Read by steps; it is not itself transformed                                                   |
+| `StepOutcome` | A step's report to the executor.                                                                                                                               | Values chosen by the step                              | `needs_approval`, `auto_fixable`, and step-specific `findings`                                |
+| `StepEvent`   | One progress unit `run_steps` yields: a step entering `"running"`, or its `"completed"` report.                                                                | Produced by the executor, not by steps themselves      | `step_name`, `status`, `outcome` (set only when completed), `started_at`/`duration`           |
+| `run_steps`   | Executes the supplied steps sequentially, yielding a running/completed event pair per round, and pausing for a human at an approval park.                      | Ordered `list[Step]` and one `StepContext`             | `AsyncIterator[StepEvent]`, two events per round in execution order                           |
+| `findings.py` | Shared finding schema (`Finding`), the fail-safe action default, the blocking-findings gate, and fix-loop rendering helpers.                                   | `ReviewOutput`/`TestSufficiencyOutput`-shaped findings | `Finding`, `has_blocking_finding`, `describe_auto_fix_findings`, `describe_finding_decisions` |
 
 `StepOutcome.findings` is currently typed as `object` because each step owns its output
 schema. Callers narrow it to the expected type. `run_steps` acts on `needs_approval` and
@@ -84,7 +84,7 @@ This section is the shortest end-to-end mental model of object creation and cont
    - `InputRelay()`, and (for an interactive run) an `ActivityRelay` and `ApprovalRelay` so
      backend prompts, sub-step activity, and approval parks can all reach the TUI.
    - `StepContext(cwd, agent, diff, intent, on_input_needed=relay.request_input,
-     activity_reporter=activity_relay, on_approval_needed=approval_relay.request_approval)`.
+activity_reporter=activity_relay, on_approval_needed=approval_relay.request_approval)`.
    - `steps = [cls() for cls in IMPLEMENTED_STEPS]`.
 
 2. `cli.py` starts orchestration by creating `run_steps(steps, ctx)`.
@@ -119,7 +119,7 @@ This section is the shortest end-to-end mental model of object creation and cont
      `auto_fixable = True`.
    - The executor parks on `needs_approval`, or on a still-`auto_fixable` outcome once the
      automatic fix-round cap is exhausted, awaiting `ctx.on_approval_needed(step_name,
-     outcome)` for an "approve"/"skip"/"abort"/"fix" decision. See `pipeline/AGENTS.md`'s
+outcome)` for an "approve"/"skip"/"abort"/"fix" decision. See `pipeline/AGENTS.md`'s
      "Milestone 7" entries for the full loop and `executor.py`'s module docstring for the
      exact state machine.
 
@@ -143,10 +143,10 @@ in hand, or only a reporter read implicitly from a shared slot -- see "No `ctx`"
 That gives four named entry points, all funnelling through the same two null-safe
 primitives in `step.py`:
 
-| | Block (has a start and an end) | One-shot (a point in time) |
-| --- | --- | --- |
-| **Have `ctx`** | `async with ctx.report_activity(label): ...` | `await ctx.log(label)` |
-| **No `ctx`** | `async with report_activity(reporter, label): ...` | `await log_activity(reporter, label)` |
+|                | Block (has a start and an end)                     | One-shot (a point in time)            |
+| -------------- | -------------------------------------------------- | ------------------------------------- |
+| **Have `ctx`** | `async with ctx.report_activity(label): ...`       | `await ctx.log(label)`                |
+| **No `ctx`**   | `async with report_activity(reporter, label): ...` | `await log_activity(reporter, label)` |
 
 `ctx.report_activity`/`ctx.log` are thin `self.activity_reporter`-bound wrappers around the
 module-level `report_activity`/`log_activity` -- same implementation, just bound to `ctx`
@@ -164,14 +164,14 @@ How to choose:
 2. **Access, second -- default to `ctx`.** Inside `Step.run(ctx)`, or any function that
    already receives `ctx`, always use `ctx.report_activity`/`ctx.log`. Only reach for the
    free functions (`report_activity(current_activity_reporter.get(), label)` /
-   `log_activity(...)`) in shared plumbing with no `StepContext` parameter at all.
+   `log_activity(...)`) in shared helper code with no `StepContext` parameter at all.
    `current_activity_reporter` is a `contextvars.ContextVar` that `executor.run_steps` sets
    right before calling `step.run(ctx)` and clears right after -- so any code running during
    that window can call `.get()` and read the current step's reporter, even several function
    calls deep, without `ctx` or the reporter ever being passed to it as an argument. Today's
    two users are `steps/gitutils.py`'s `run_git` and `scm/github.py`'s `_run_gh`, both called
    from deep inside step logic, where adding `ctx` as a parameter to every helper along the
-   way just to reach them would be unnecessary plumbing. This is a documented, narrow
+   way just to reach them would be unnecessary threading. This is a documented, narrow
    exception, not a second style to pick freely -- a further case like it is a signal
    `StepContext` itself should grow instead (see `pipeline/AGENTS.md`'s Milestone 14 entry).
 
@@ -186,7 +186,7 @@ async with ctx.report_activity("Agent: reviewing diff via claude"):
 # One-shot, ctx-bound -- a single already-finished event.
 await ctx.log("Tool: Read(/path/to/file)")
 
-# Block, ambient -- shared plumbing with no StepContext to read from.
+# Block, no ctx -- shared helper code with no StepContext to read from.
 async with report_activity(current_activity_reporter.get(), label) as activity:
     process = await asyncio.create_subprocess_exec("git", *args, ...)
     if process.returncode != 0:
