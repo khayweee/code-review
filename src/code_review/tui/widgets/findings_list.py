@@ -21,7 +21,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Input, ListView, Static
 
 from code_review.pipeline.findings import Finding as FindingData
-from code_review.pipeline.findings import describe_finding_decisions
+from code_review.pipeline.findings import FindingDecision, describe_finding_decisions
 from code_review.pipeline.step import ApprovalDecision, ApprovalResponse
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
@@ -352,21 +352,47 @@ class FindingsList(Vertical):
 
     def _resolve_park(self) -> None:
         """Aggregate every row's final decision into the one `ApprovalResponse` that
-        resolves `self._pending`. A single-row park resolves with that row's own
-        response, unwrapped; otherwise every "fix"-decided row's instructions are
-        combined via `describe_finding_decisions`, or if every row chose "skip",
-        resolves `decision="skip"`.
+        resolves `self._pending`. Builds one `FindingDecision(finding, response)` per
+        decided row -- pairing the finding itself with the human's `ApprovalResponse`
+        against it, instead of a bare positional tuple, so `describe_finding_decisions`
+        reads as `decision.finding`/`decision.response` rather than `decision[0]`/
+        `decision[1]`. A single-row park resolves with that row's own `response`,
+        unwrapped; otherwise every "fix"-decided row's instructions are combined via
+        `describe_finding_decisions`, or if every row chose "skip", resolves
+        `decision="skip"`.
+
+        Example, 3 rows all confirmed with a suggestion (each row's own
+        `FindingDecision.response` was `decision="fix", instructions="<picked suggestion
+        text>"`):
+
+            ApprovalResponse(
+                decision="fix",
+                instructions=(
+                    "- [error] Off-by-one in pagination (pages.py:42): "
+                    "Change range(offset, limit) to range(offset, limit+1)\\n"
+                    "- [warning] Missing null check on user.email (users.py:18): "
+                    "Return 400 with a validation message\\n"
+                    "- [info] Inconsistent naming: userId vs user_id (models.py:9): "
+                    "Rename to user_id for consistency"
+                ),
+            )
+
+        One `ApprovalResponse` for the whole park, never one per row -- a "skip"-decided
+        row contributes no line to `instructions` (see `describe_finding_decisions`), and
+        if every row skipped, `combined` is `""` and this falls back to
+        `ApprovalResponse(decision="skip", instructions=None)` instead of an
+        empty-string `instructions="fix"`.
         """
 
         assert self._pending is not None
-        decided: list[tuple[FindingData, ApprovalResponse]] = []
+        decided: list[FindingDecision] = []
         for row in self._rows:
             response = row.row_decision
             if response is not None:
-                decided.append((row.finding, response))
+                decided.append(FindingDecision(finding=row.finding, response=response))
 
         if len(self._rows) == 1:
-            resolution = decided[0][1]
+            resolution = decided[0].response
         else:
             combined = describe_finding_decisions(decided)
             resolution = (

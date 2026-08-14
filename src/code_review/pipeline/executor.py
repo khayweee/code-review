@@ -171,6 +171,8 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
 
             if round_ctx.on_approval_needed is None:
                 raise ApprovalNotAttachedError(step_name)
+
+            # Blocks until the human answers the park. "approve"/"skip" both just continue to the
             response = await round_ctx.on_approval_needed(step_name, outcome)
             if response.decision == "abort":
                 raise RunAbortedError(step_name)

@@ -26,6 +26,7 @@ would fail schema validation exactly when a human's judgement is needed most. An
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
@@ -184,7 +185,24 @@ def describe_auto_fix_findings(
     return "\n".join(lines)
 
 
-def describe_finding_decisions(decisions: list[tuple[Finding, ApprovalResponse]]) -> str:
+@dataclass(frozen=True, slots=True)
+class FindingDecision:
+    """One finding paired with the human's `ApprovalResponse` decided against it: the
+    building block `tui.widgets.FindingsList._resolve_park` accumulates one per row, in
+    `self._rows` order, before folding all of them into `describe_finding_decisions`.
+
+    A plain frozen dataclass, not a pydantic `BaseModel`, matching every other
+    internal-plumbing type here (`ApprovalResponse`, `FixRound`, `StepEvent`): nothing
+    about this pairing crosses an LLM-output boundary the way `Finding` itself does (see
+    `Finding`'s own docstring), so there's nothing for pydantic validation to buy here. A
+    dataclass field holding a `Finding` (a `BaseModel`) needs no special config either way.
+    """
+
+    finding: Finding
+    response: ApprovalResponse
+
+
+def describe_finding_decisions(decisions: list[FindingDecision]) -> str:
     """Render every `"fix"`-decided finding in `decisions` as combined fix-round
     instructions text, for `tui.widgets.FindingsList`'s per-finding approval-park
     aggregation (`FindingsList._resolve_park` combines per-row decisions into the single
@@ -199,7 +217,8 @@ def describe_finding_decisions(decisions: list[tuple[Finding, ApprovalResponse]]
     """
 
     lines = []
-    for finding, response in decisions:
+    for decision in decisions:
+        finding, response = decision.finding, decision.response
         if response.decision != "fix":
             continue
         location = f" ({finding.location})" if finding.location else ""
