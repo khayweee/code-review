@@ -428,12 +428,12 @@ def test_pipeline_box_reuses_the_same_spinner_instance_while_a_step_keeps_runnin
     """Regression test: `update_rows` used to build a *fresh* `rich.spinner.Spinner` on
     every call. A `Spinner`'s animation clock (`start_time`) is set lazily on its own
     first `render()` call and never reset after that, so a fresh instance on every call
-    (as `ReviewApp`'s 0.25s tick timer would trigger) reset that clock back to "now" each
-    time and the frame never advanced far enough to look animated. `PipelineBox` must
-    reuse the *same* `Spinner` object for a running step across repeated `update_rows`
-    calls -- checked here directly via `PipelineBox._spinners`'s cache, rather than via
-    rendered frame content, since Rich's own render-time jitter makes frame content an
-    unreliable signal for this specific invariant.
+    (as `ReviewApp`'s own periodic full-render tick would trigger) reset that clock back to
+    "now" each time and the frame never advanced far enough to look animated. `PipelineBox`
+    must reuse the *same* `Spinner` object for a running step across repeated
+    `update_rows` calls -- checked here directly via `PipelineBox._spinners`'s cache,
+    rather than via rendered frame content, since Rich's own render-time jitter makes frame
+    content an unreliable signal for this specific invariant.
     """
 
     async def scenario() -> None:
@@ -559,16 +559,19 @@ def test_pipeline_box_activity_line_ticks_live_then_collapses_to_a_final_duratio
     asyncio.run(scenario())
 
 
-def test_pipeline_box_shimmers_a_running_steps_name_purely_from_its_own_interval_tick() -> None:
-    """Regression test: `PipelineBox.on_mount` used to wire its 60fps timer to
+def test_pipeline_box_animate_shimmer_repaints_a_running_steps_name_from_current_time() -> None:
+    """Regression test: `PipelineBox.on_mount` used to wire its own 60fps timer to
     `self.refresh`, which repaints whatever renderable is already stored but never calls
     `gradient_text` again -- so a running step's shimmer only ever moved on a *real*
-    `update_rows` call (see `_animate_shimmer`'s own docstring). It's now wired to
-    `_animate_shimmer`, which reruns `render_rows_live` (and therefore `gradient_text`,
-    phased by `time.monotonic()`) on every tick. Proven here by waiting real wall-clock time
-    with *no* `update_rows` call at all and checking the rendered color escape codes for the
-    running row's name actually change -- `_render_content`'s `color_system=None` can't see
-    this, so this test renders with real color on instead."""
+    `update_rows` call (see `animate_shimmer`'s own docstring). `PipelineBox` no longer
+    owns a timer of its own at all -- `ReviewApp`'s single tick timer calls
+    `animate_shimmer` directly now (see `app.py`'s module docstring for why there is
+    exactly one timer, not one per widget) -- so this drives it the same way, calling it
+    directly rather than relying on a timer this widget would need to own itself. Proven
+    here by waiting real wall-clock time between calls, with *no* `update_rows` call at
+    all, and checking the rendered color escape codes for the running row's name actually
+    change -- `_render_content`'s `color_system=None` can't see this, so this test renders
+    with real color on instead."""
 
     async def scenario() -> None:
         app = _HostApp([StepRow(name="RebaseStep", status="running", duration=0.0)])
@@ -587,8 +590,9 @@ def test_pipeline_box_shimmers_a_running_steps_name_purely_from_its_own_interval
             first = _colored_render()
             changed = False
             for _ in range(60):
-                await pilot.pause()
                 await asyncio.sleep(0.02)
+                box.animate_shimmer()
+                await pilot.pause()
                 if _colored_render() != first:
                     changed = True
                     break
@@ -1974,9 +1978,10 @@ def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redunda
     not. This is the load-bearing correctness requirement of that move: `show_decision`
     must recognize an already-open `Input` and leave it alone rather than reconstruct it,
     or a human's in-progress typed text would be silently wiped on the very next periodic
-    render (`app.py`'s `_render` calls this on an 0.25s timer regardless of whether the
-    output actually changed). Asserts the `Input` is found specifically inside the
-    highlighted row's own `FindingsSuggestion` (not merely "somewhere in the box"), so this
+    render (`app.py`'s `_on_tick` calls `_render` regardless of whether the output actually
+    changed, on every `_FULL_RENDER_EVERY_TICKS`th tick). Asserts the `Input` is found
+    specifically inside the highlighted row's own `FindingsSuggestion` (not merely
+    "somewhere in the box"), so this
     proves the *new* in-place location, not just that a chat still exists somewhere."""
 
     async def scenario() -> None:

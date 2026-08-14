@@ -1029,9 +1029,9 @@ def test_review_app_shows_synthetic_activity_events_nested_under_the_running_ste
                 assert fetch_line.startswith(" ")
                 assert "RebaseStep" in _pipeline_box_content(app.query_one(PipelineBox))
 
-                # Live-ticking: let at least one real 0.25s tick interval pass (see
-                # `app.py`'s `_TICK_INTERVAL`) and confirm the rendered line actually
-                # changed, i.e. the duration is advancing, not frozen.
+                # Live-ticking: let at least one real full-render tick pass (see `app.py`'s
+                # `_on_tick`/`_FULL_RENDER_EVERY_TICKS`, ~0.24s) and confirm the rendered
+                # line actually changed, i.e. the duration is advancing, not frozen.
                 ticked_line = fetch_line
                 for _ in range(60):
                     await pilot.pause()

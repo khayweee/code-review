@@ -2,9 +2,11 @@
 plus each row's own optional `StepRow.detail` text (e.g. `PRStep`'s opened/updated PR link).
 
 Renders plain `StepRow`/`ActivityRow` data (see `state.py`); the formatting helpers are
-pure and Textual-free, while `PipelineBox` itself is the live, animated widget.
-`render_rows_live` renders Rich renderables so the running row can shimmer/spin;
-`render_rows` is the plain-text fallback for tests.
+pure and Textual-free. `PipelineBox` itself owns no timer of its own -- `animate_shimmer`
+is a plain repaint method `ReviewApp`'s own single tick timer calls (see `app.py`'s module
+docstring for why there is exactly one timer, not one per widget). `render_rows_live`
+renders Rich renderables so the running row can shimmer/spin; `render_rows` is the
+plain-text fallback for tests.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from rich.console import Group
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
-from textual.timer import Timer
 
 from code_review.tui.state import ActivityRow, StepRow
 from code_review.tui.widgets.base import _BorderedBox
@@ -80,7 +81,7 @@ def render_rows(rows: Sequence[StepRow]) -> str:
 _SHIMMER_BASE_LIGHTNESS = 0.45
 _SHIMMER_PEAK_LIGHTNESS = 0.90
 # Matches rich.spinner.Spinner("dots").interval (80ms) -- the spinner icon itself can't
-# show a new frame any faster than that, so ticking `_animate_shimmer` past it (the
+# show a new frame any faster than that, so ticking `animate_shimmer` past it (the
 # previous 1/60s, ~5x faster) only spent extra CPU/output re-rendering and re-writing an
 # unchanged spinner glyph, at real, measured cost: a still-"running"/parked step's steady
 # ANSI output over a real pty (~130KB/s at 60Hz) was enough to push a real end-to-end
@@ -89,7 +90,8 @@ _SHIMMER_PEAK_LIGHTNESS = 0.90
 # `_run_review_with_keypresses` docstring). The color shimmer (`gradient_text`) is
 # continuous, not frame-quantized, so sampling it at 12.5Hz instead of 60Hz still reads as
 # smooth motion to the eye; it just no longer redraws faster than anything on screen can
-# actually change.
+# actually change. `app.py` imports this directly as its own single tick timer's interval
+# -- see that module's docstring for why there is only one timer, not one per widget.
 _SHIMMER_TICK_SECONDS = 0.08
 
 
@@ -192,35 +194,21 @@ class PipelineBox(_BorderedBox):
         if branch is not None:
             self.border_subtitle = branch
 
-    def on_mount(self) -> None:
-        self._shimmer_timer: Timer = self.set_interval(
-            _SHIMMER_TICK_SECONDS, self._animate_shimmer
-        )
-
-    def stop_shimmer(self) -> None:
-        """Stop the shimmer timer -- `ReviewApp` calls this once the run is done.
-
-        This timer is this widget's own, independent of `ReviewApp`'s tick timer (which
-        `_consume_events` does stop on completion): left running, it keeps calling
-        `self.update(..., layout=False)` on every `_SHIMMER_TICK_SECONDS` tick forever,
-        including after the run finishes. Confirmed directly (a real pty run against a
-        two-approval-park scenario, `tests/test_cli_review.py`'s `test_review_skipping_
-        both_findings_of_a_two_finding_park_completes_the_run`): a still-running shimmer
-        timer, re-issuing its own `layout=False` update on every tick indefinitely, starves
-        Textual's compositor of ever landing the one real `layout=True` update (`ReviewApp.
-        _render`'s own final `update_rows`/Status-box-mount pass) that shows the run is
-        actually done -- the screen stays frozen on the last frame from before completion,
-        looping the same bytes to the terminal forever, even though `ReviewApp._done` and
-        every widget's own state are already fully correct. Stopping this timer here is
-        what lets that final frame actually reach the screen."""
-
-        self._shimmer_timer.stop()
-
-    def _animate_shimmer(self) -> None:
-        """Re-render every tick so `gradient_text` recomputes the shimmer; `self.refresh()`
+    def animate_shimmer(self) -> None:
+        """Re-render from the current rows/spinners so `gradient_text` recomputes the
+        shimmer sweep and the "dots" spinner's own glyph can advance; `self.refresh()`
         alone would just repaint the stale renderable. `layout=False` since only color
-        changes, not row count/line length. Named `_animate_shimmer` because `Widget`
-        already has a private `_animate`."""
+        changes, not row count/line length.
+
+        Called by `ReviewApp`'s own single tick timer (see `app.py`'s module docstring),
+        not a timer this widget owns itself -- two independently-owned timers (this one
+        plus `ReviewApp`'s) used to both drive repaints here, and `ReviewApp` stopping only
+        its own on completion left this one running forever, starving Textual's compositor
+        of ever landing the final "done" repaint (confirmed directly against a real pty
+        run: `tests/test_cli_review.py`'s `test_review_skipping_both_findings_of_a_two_
+        finding_park_completes_the_run`, the screen frozen on the last pre-completion frame
+        even though the run had genuinely finished). A single timer, owned where the "done"
+        state itself lives, can't leave a second one behind to forget."""
 
         self.update(render_rows_live(self._rows, self._spinners), layout=False)
 

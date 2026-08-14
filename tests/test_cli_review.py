@@ -718,9 +718,10 @@ def _run_review_with_keypresses(
     `timeout` (bounding the final `process.wait` once "e" has been sent) defaults higher
     than `_run_review_and_press_e_to_exit`'s: `PipelineBox`'s live spinner and per-frame
     gradient sweep (`_render_row`) keep any still-"running"/parked step animating on
-    `ReviewApp`'s own `_TICK_INTERVAL` (4Hz) for as long as a park is showing, which
-    measured in the ~130KB/s steady state over a real pty even while idle, parked, and
-    waiting on a keypress -- confirmed independent of terminal size, so not `LINES`/
+    `ReviewApp`'s own `_TICK_INTERVAL` (12.5Hz -- `PipelineBox.animate_shimmer`'s own rate,
+    `app.py`'s single tick timer, see that module's docstring) for as long as a park is
+    showing, which measured in the ~130KB/s steady state over a real pty even while idle,
+    parked, and waiting on a keypress -- confirmed independent of terminal size, so not `LINES`/
     `COLUMNS`-driven. A caller that parks twice (this helper's whole reason to exist over
     the single-park helper) pushes twice the animated-frame volume through the same real
     `script`-relayed pty before `process.wait` ever starts counting, which is exactly the

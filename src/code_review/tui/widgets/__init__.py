@@ -32,6 +32,7 @@ from code_review.tui.widgets.findings_suggestion import (
 from code_review.tui.widgets.pipeline_box import (
     _SHIMMER_BASE_LIGHTNESS,
     _SHIMMER_PEAK_LIGHTNESS,
+    _SHIMMER_TICK_SECONDS,
     PipelineBox,
     _render_row,
     format_activity_row,
@@ -70,6 +71,7 @@ __all__ = [
     "_SEVERITY_DOT_STYLES",
     "_SHIMMER_BASE_LIGHTNESS",
     "_SHIMMER_PEAK_LIGHTNESS",
+    "_SHIMMER_TICK_SECONDS",
     "_STATUS_DOT_STYLES",
     "_STATUS_ICONS",
     "_decision_entries",
