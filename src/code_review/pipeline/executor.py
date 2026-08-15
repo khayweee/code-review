@@ -63,12 +63,8 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 
 from code_review.pipeline.findings import describe_auto_fix_findings
-from code_review.pipeline.step import (
-    Step,
-    StepContext,
-    StepEvent,
-    current_activity_reporter,
-)
+from code_review.pipeline.schemas import StepEvent
+from code_review.pipeline.step import Step, StepContext, current_activity_reporter
 
 # Cap on automatic fix-round re-runs before a still-auto_fixable outcome falls through to a
 # park instead of looping forever. Not a config field or CLI flag. 2 lets a step recover

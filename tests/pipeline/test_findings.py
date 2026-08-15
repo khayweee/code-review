@@ -17,13 +17,12 @@ from __future__ import annotations
 from code_review.pipeline.findings import (
     DEFAULT_ACTION,
     Finding,
-    FindingDecision,
     action_or_default,
     describe_finding_decisions,
     filter_pipeline_owned_delivery_findings,
     has_blocking_finding,
 )
-from code_review.pipeline.step import ApprovalResponse
+from code_review.pipeline.schemas import ApprovalResponse, FindingDecision
 from code_review.steps.review import ReviewOutput
 
 

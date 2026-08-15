@@ -13,7 +13,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from code_review.pipeline.findings import Finding as FindingData
-from code_review.pipeline.step import ApprovalDecision
+from code_review.pipeline.schemas import ApprovalDecision
 from code_review.tui.widgets.styles import (
     _DECISION_MARKER_ICONS,
     _DECISION_MARKER_STYLES,

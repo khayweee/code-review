@@ -28,9 +28,9 @@ meaning changes, edit the glossary in the same commit. It owns what words mean;
   state_dir()/runs`, wired into `cli.py review` so a run's command/activity trail survives
   closing the TUI. No schema, no resume logic, never read back by this tool itself — not a
   step toward the "database, resume-after-crash machinery" `docs/ROADMAP.md` deliberately
-  ruled out (see its milestone 2 rationale). Depends on both `pipeline.step.StepEvent` and
-  `tui.activity.ActivityEvent`, so it lives at this top level rather than under `pipeline/`/
-  `steps/` (which must never import `tui/`).
+  ruled out (see its milestone 2 rationale). Depends on both `pipeline.schemas.StepEvent`
+  and `tui.schemas.ActivityEvent`, so it lives at this top level rather than under
+  `pipeline/`/`steps/` (which must never import `tui/`).
 - `src/code_review/config.py` — trusted-vs-descriptive config split (not built yet).
 - `src/code_review/agent/` — the Agent abstraction: shells out to a coding-agent CLI
   (starting with `claude`), one call in / one result out.

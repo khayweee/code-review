@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 
 from code_review.pipeline.step import ActivityHandle
-from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.activity import ActivityRelay
+from code_review.tui.schemas import ActivityEvent
 
 
 def test_activity_queues_a_started_event_on_entry() -> None:

@@ -20,8 +20,8 @@ does not contain review policy or GitHub-specific behavior; those belong in
 schema. Callers narrow it to the expected type. `run_steps` acts on `needs_approval` and
 `auto_fixable` today: a step opted into `supports_fix_round` gets bounded automatic fix
 rounds before falling through to a park; `needs_approval` parks outright. See
-`pipeline/step.py`'s `FixRound`/`StepContext.fix_round` and `pipeline/AGENTS.md`'s
-"Milestone 7" entries for the full loop.
+`pipeline/schemas.py`'s `FixRound`, `pipeline/step.py`'s `StepContext.fix_round`, and
+`pipeline/AGENTS.md`'s "Milestone 7" entries for the full loop.
 
 `StepEvent` is what a caller actually iterates today, not `StepOutcome` directly -- pulling
 a step's `StepOutcome` out means reading it off that step's `"completed"` event. `step_name`

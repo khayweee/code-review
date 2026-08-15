@@ -26,14 +26,14 @@ would fail schema validation exactly when a human's judgement is needed most. An
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-# Top-level import (not TYPE_CHECKING-gated): findings.py and step.py both live in
-# pipeline/, and step.py never imports findings.py, so no cycle here.
-from code_review.pipeline.step import ApprovalResponse
+# Top-level import (not TYPE_CHECKING-gated): findings.py and schemas.py both live in
+# pipeline/, and schemas.py never imports findings.py at runtime (only TYPE_CHECKING, for
+# FindingDecision's own `finding: Finding` field), so no cycle here.
+from code_review.pipeline.schemas import FindingDecision
 
 if TYPE_CHECKING:
     # steps/ depends on pipeline/, never the reverse; ReviewOutput/TestSufficiencyOutput/
@@ -154,7 +154,7 @@ def describe_auto_fix_findings(
     payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent | PullRequestOutcome,
 ) -> str:
     """Render every finding in `payload` whose resolved action is "auto-fix" as fix-round
-    instructions text (`pipeline.step.FixRound.instructions`).
+    instructions text (`pipeline.schemas.FixRound.instructions`).
 
     `payload` is `StepOutcome.payload`: a bare `list[Finding]`, a
     `ReviewOutput`/`TestSufficiencyOutput` with a `.findings` list, or an `Intent`/
@@ -183,23 +183,6 @@ def describe_auto_fix_findings(
         lines.append(f"- [{finding.severity}] {finding.description}{location}")
 
     return "\n".join(lines)
-
-
-@dataclass(frozen=True, slots=True)
-class FindingDecision:
-    """One finding paired with the human's `ApprovalResponse` decided against it: the
-    building block `tui.widgets.FindingsList._resolve_park` accumulates one per row, in
-    `self._rows` order, before folding all of them into `describe_finding_decisions`.
-
-    A plain frozen dataclass, not a pydantic `BaseModel`, matching every other
-    internal-plumbing type here (`ApprovalResponse`, `FixRound`, `StepEvent`): nothing
-    about this pairing crosses an LLM-output boundary the way `Finding` itself does (see
-    `Finding`'s own docstring), so there's nothing for pydantic validation to buy here. A
-    dataclass field holding a `Finding` (a `BaseModel`) needs no special config either way.
-    """
-
-    finding: Finding
-    response: ApprovalResponse
 
 
 def describe_finding_decisions(decisions: list[FindingDecision]) -> str:

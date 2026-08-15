@@ -36,7 +36,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import StepEvent, StepOutcome
+from code_review.pipeline.schemas import StepEvent
+from code_review.pipeline.step import StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.pr import PullRequestOutcome
 from code_review.steps.registry import STEP_DISPLAY_NAMES, STEP_REGISTRY

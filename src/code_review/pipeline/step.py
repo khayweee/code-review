@@ -38,9 +38,12 @@ instructions, uncapped -- see `executor.py`'s module docstring for the full loop
 generic consumer (the executor's fix-round path, the TUI's findings display) narrows it
 with `isinstance` over that same closed set instead of duck-typing an `object`.
 
-`StepEvent` is `executor.run_steps`'s progress unit: one per "running" and one per
-"completed" per step/round. `started_at`/`duration` use `time.monotonic()`, not wall-clock
-time.
+`FixRound`/`ApprovalDecision`/`ApprovalResponse`/`StepEvent` are passive plumbing types, not
+defined in this file -- they live in `pipeline/schemas.py` (imported here at top level,
+since `with_fix_round` constructs a `FixRound` at runtime) alongside every other
+frozen/slotted dataclass `pipeline/` shares with its callers. `StepEvent` is
+`executor.run_steps`'s progress unit: one per "running" and one per "completed" per
+step/round. `started_at`/`duration` use `time.monotonic()`, not wall-clock time.
 """
 
 from __future__ import annotations
@@ -51,9 +54,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from code_review.agent import Agent
+from code_review.pipeline.schemas import ApprovalResponse, FixRound
 
 if TYPE_CHECKING:
     # steps/ depends on pipeline/, never the reverse; a top-level import would be circular.
@@ -136,38 +140,6 @@ async def log_activity(reporter: ActivityReporter | None, label: str) -> None:
 
     if reporter is not None:
         await reporter.log(label)
-
-
-@dataclass(frozen=True, slots=True)
-class FixRound:
-    """What to fix in a fix-mode re-run, as free text.
-
-    Carries either the auto-fix findings' rendered description
-    (`pipeline/findings.py`'s `describe_auto_fix_findings`) or a human's typed "fix"
-    instructions, collapsed to one `instructions: str` so a step's prompt only ever
-    branches on `ctx.fix_round is not None`.
-    """
-
-    instructions: str
-
-
-# Standalone alias (not inlined) so tui/approval_relay.py and tui/screens.py can import the
-# same type instead of each defining an overlapping Literal.
-ApprovalDecision = Literal["approve", "skip", "abort", "fix"]
-
-
-@dataclass(frozen=True, slots=True)
-class ApprovalResponse:
-    """A human's answer to a parked step's approval request.
-
-    `instructions` is set only when `decision == "fix"` (the human's typed text), `None`
-    otherwise. `executor.run_steps` turns a "fix" response into a `FixRound` and re-runs
-    the step; "approve"/"skip" continue to the next step; "abort" raises
-    `executor.RunAbortedError`.
-    """
-
-    decision: ApprovalDecision
-    instructions: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,15 +243,3 @@ class Step(ABC):
         """
 
         return type(self).__name__
-
-
-@dataclass(frozen=True, slots=True)
-class StepEvent:
-    """One progress event from ``executor.run_steps``: a step entering "running", or a
-    step's "completed" report (its ``StepOutcome`` plus timing)."""
-
-    step_name: str
-    status: Literal["running", "completed"]
-    outcome: StepOutcome | None
-    started_at: float
-    duration: float | None

@@ -9,12 +9,13 @@ from __future__ import annotations
 import pytest
 
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import StepEvent, StepOutcome
+from code_review.pipeline.schemas import StepEvent
+from code_review.pipeline.step import StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.pr import PullRequestOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
-from code_review.tui.activity import ActivityEvent
+from code_review.tui.schemas import ActivityEvent
 from code_review.tui.state import (
     ActivityRow,
     StepRow,

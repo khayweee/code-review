@@ -82,7 +82,7 @@ including from code that has no direct access to the step's own context.
   nonzero subprocess exit — a log-visible signal only; neither ever raises on an ordinary
   command failure. `report_activity`'s no-reporter branch changed from `nullcontext()` to
   `nullcontext(ActivityHandle())` so `.fail(...)` never needs a null check at the call site.
-  `tui.activity.ActivityEvent` gained a matching `error: str | None = None`, set only on a
+  `tui.schemas.ActivityEvent` gained a matching `error: str | None = None`, set only on a
   "finished" event whose block called `.fail(...)`; `ActivityRelay.__init__` also gained an
   `on_event` callback, invoked synchronously wherever an event would be queued — the seam
   `run_log.py`'s `RunLogWriter` (see its own module docstring) hooks to persist the same
@@ -116,8 +116,9 @@ Instead of only parking on a fixable finding, a step can now attempt bounded aut
 fixes first, and a human can request as many manual fix rounds as they want at a park.
 
 - `pipeline/step.py` extends `StepContext` immutably with `fix_round: FixRound | None`
-  (`FixRound` is a frozen dataclass wrapping `instructions: str`, collapsing the automatic
-  and human-typed paths to a single shape).
+  (`FixRound` -- a frozen dataclass wrapping `instructions: str`, collapsing the automatic
+  and human-typed paths to a single shape -- lives in `pipeline/schemas.py` alongside every
+  other passive plumbing type `pipeline/` shares with its callers).
 - The approval seam extends from a bare `Decision` string to `ApprovalResponse(decision:
   ApprovalDecision, instructions: str | None)`, where `ApprovalDecision` gains a fourth
   value, `"fix"`, alongside `"approve"`/`"skip"`/`"abort"`.

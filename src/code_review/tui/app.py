@@ -41,10 +41,11 @@ from textual.app import App, ComposeResult
 from textual.timer import Timer
 from textual.widget import MountError
 
-from code_review.pipeline.step import StepEvent
-from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.pipeline.schemas import StepEvent
+from code_review.tui.activity import ActivityRelay
 from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
+from code_review.tui.schemas import ActivityEvent
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
 from code_review.tui.widgets import _SHIMMER_TICK_SECONDS, FindingsList, PipelineBox, StatusBox
@@ -246,9 +247,9 @@ class ReviewApp(App[None]):
 
         assert self._input_relay is not None
         while True:
-            prompt, future = await self._input_relay.next_request()
-            answer = await self.push_screen_wait(InputPromptScreen(prompt))
-            future.set_result(answer)
+            request = await self._input_relay.next_request()
+            answer = await self.push_screen_wait(InputPromptScreen(request.prompt))
+            request.pending_answer.set_result(answer)
 
     async def _consume_activities(self) -> None:
         """Poll `self._activity_relay` for reported sub-step activity and re-render.
@@ -268,23 +269,23 @@ class ReviewApp(App[None]):
         Marks `self._parked_step`, re-renders, then awaits the mounted
         `FindingsList.await_decision()` directly (no modal). "skip" is recorded into
         `self._skipped_steps`; "abort" is `run_steps`'s own job via `RunAbortedError`.
-        Clears `_parked_step` and re-renders again before resolving `future`, so rendered
-        state reflects the decision before the parked `run_steps` call resumes.
+        Clears `_parked_step` and re-renders again before resolving `pending_response`, so
+        rendered state reflects the decision before the parked `run_steps` call resumes.
         """
 
         assert self._approval_relay is not None
         while True:
-            step_name, outcome, future = await self._approval_relay.next_request()
-            self._parked_step = step_name
+            request = await self._approval_relay.next_request()
+            self._parked_step = request.step_name
             self._render()
             findings_box = self.query_one(FindingsList)
             response = await findings_box.await_decision()
             self._parked_step = None
-            self._resolved_outcome_ids.add(id(outcome))
+            self._resolved_outcome_ids.add(id(request.outcome))
             if response.decision == "skip":
-                self._skipped_steps.add(step_name)
+                self._skipped_steps.add(request.step_name)
             self._render()
-            future.set_result(response)
+            request.pending_response.set_result(response)
 
 
 def _tag_activity_events(

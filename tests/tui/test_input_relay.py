@@ -10,7 +10,7 @@ import asyncio
 from code_review.tui.input_relay import InputRelay
 
 
-def test_request_input_blocks_until_next_request_resolves_its_future() -> None:
+def test_request_input_blocks_until_next_request_resolves_its_pending_answer() -> None:
     async def scenario() -> str:
         relay = InputRelay()
         request_task = asyncio.ensure_future(relay.request_input("proceed?"))
@@ -19,11 +19,11 @@ def test_request_input_blocks_until_next_request_resolves_its_future() -> None:
         await asyncio.sleep(0)
         assert not request_task.done()
 
-        prompt, future = await relay.next_request()
-        assert prompt == "proceed?"
-        assert not future.done()
+        request = await relay.next_request()
+        assert request.prompt == "proceed?"
+        assert not request.pending_answer.done()
 
-        future.set_result("yes")
+        request.pending_answer.set_result("yes")
         return await request_task
 
     answer = asyncio.run(scenario())
@@ -37,13 +37,13 @@ def test_multiple_queued_requests_are_delivered_in_order() -> None:
         first_task = asyncio.ensure_future(relay.request_input("first?"))
         second_task = asyncio.ensure_future(relay.request_input("second?"))
 
-        first_prompt, first_future = await relay.next_request()
-        assert first_prompt == "first?"
-        second_prompt, second_future = await relay.next_request()
-        assert second_prompt == "second?"
+        first_request = await relay.next_request()
+        assert first_request.prompt == "first?"
+        second_request = await relay.next_request()
+        assert second_request.prompt == "second?"
 
-        first_future.set_result("first answer")
-        second_future.set_result("second answer")
+        first_request.pending_answer.set_result("first answer")
+        second_request.pending_answer.set_result("second answer")
 
         return [await first_task, await second_task]
 
@@ -61,10 +61,10 @@ def test_next_request_blocks_until_a_request_is_queued() -> None:
         assert not next_request_task.done()
 
         request_task = asyncio.ensure_future(relay.request_input("proceed?"))
-        prompt, future = await next_request_task
-        assert prompt == "proceed?"
+        request = await next_request_task
+        assert request.prompt == "proceed?"
 
-        future.set_result("ok")
+        request.pending_answer.set_result("ok")
         return await request_task
 
     answer = asyncio.run(scenario())

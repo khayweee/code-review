@@ -1,6 +1,6 @@
 """Pure, Textual-independent backfill of pipeline progress into display rows.
 
-`backfill` turns `pipeline.step.StepEvent`s seen so far into one `StepRow` per registry
+`backfill` turns `pipeline.schemas.StepEvent`s seen so far into one `StepRow` per registry
 entry; no Textual import, so it's unit-testable against hand-built `StepEvent`s. Every
 comparison inside `backfill` keys off the canonical step name (`Step.get_name()`); its
 optional `display_names` param only relabels the resulting `StepRow.name` for rendering, so
@@ -37,12 +37,13 @@ from dataclasses import dataclass
 from typing import Literal
 
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import StepEvent, StepOutcome
+from code_review.pipeline.schemas import StepEvent
+from code_review.pipeline.step import StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.pr import PullRequestOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
-from code_review.tui.activity import ActivityEvent
+from code_review.tui.schemas import ActivityEvent
 
 Status = Literal["pending", "running", "completed", "failed", "parked", "skipped"]
 

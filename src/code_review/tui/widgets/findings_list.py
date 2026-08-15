@@ -21,8 +21,8 @@ from textual.css.query import NoMatches
 from textual.widgets import Input, ListView, Static
 
 from code_review.pipeline.findings import Finding as FindingData
-from code_review.pipeline.findings import FindingDecision, describe_finding_decisions
-from code_review.pipeline.step import ApprovalDecision, ApprovalResponse
+from code_review.pipeline.findings import describe_finding_decisions
+from code_review.pipeline.schemas import ApprovalDecision, ApprovalResponse, FindingDecision
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.widgets.finding import Finding
@@ -50,7 +50,7 @@ def _findings_summary(output: ReviewOutput | TestSufficiencyOutput | list[Findin
 
 # `_set_footer_hint` appends a live "N/M decided" count after this while parked.
 _FOOTER_HINT = (
-    "Enter to confirm this finding  |  left/right or 1-9 browse options  |  f to chat"
+    "Enter to confirm this finding  |  ←/→ browse options  |  f to chat"
     "  |  s to skip this finding  |  x to abort the run"
 )
 
