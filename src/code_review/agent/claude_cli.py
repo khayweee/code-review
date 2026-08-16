@@ -139,7 +139,7 @@ async def _run_streaming(
 
     try:
         while True:
-            line = await process.stdout.readline()
+            line = await _read_stream_line(process.stdout)
             if not line:
                 break
 
@@ -163,12 +163,41 @@ async def _run_streaming(
             if event:
                 await opts.on_stream_event(event)
 
-    finally:
-        stderr = await stderr_task
+    except BaseException:
+        # Unwinding stops draining stdout, so the child may be parked on a full stdout
+        # pipe and never close stderr -- awaiting the pump here would deadlock instead of
+        # surfacing this exception. run()'s finally reaps the group either way.
+        stderr_task.cancel()
+        raise
 
+    stderr = await stderr_task
     await process.wait()
 
     return b"".join(stdout_lines), stderr, result_response
+
+
+async def _read_stream_line(stream: asyncio.StreamReader) -> bytes:
+    """Read one NDJSON line off ``stream``, with no cap on how long that line may be.
+
+    ``StreamReader.readline()`` cannot be used here: past the reader's 64 KiB limit it
+    discards the buffered line and raises ``ValueError("Separator is found, but chunk is
+    longer than limit")``, which any stream-json line carrying a large tool result (a
+    whole-file ``Read``, a wide ``Edit``) trips. Reassemble the line from bounded reads
+    instead. Returns ``b""`` at EOF.
+    """
+
+    chunks: list[bytes] = []
+    while True:
+        try:
+            chunks.append(await stream.readuntil(b"\n"))
+        except asyncio.LimitOverrunError as exc:
+            # The newline is either past the limit or not here yet; either way
+            # exc.consumed bytes are already buffered and belong to this line.
+            chunks.append(await stream.readexactly(exc.consumed))
+            continue
+        except asyncio.IncompleteReadError as exc:
+            chunks.append(exc.partial)  # EOF with no trailing newline
+        return b"".join(chunks)
 
 
 def _parse_stream_line(obj: dict[str, object], session_id: str | None) -> StreamEvent | None:
