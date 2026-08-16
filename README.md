@@ -5,8 +5,9 @@ what the change was meant to do, reviews it for correctness and risk, checks the
 good enough to catch a regression, and opens a PR with that evidence attached — stopping to
 ask a human whenever an agent isn't confident enough to act alone.
 
-**Status:** early. The package scaffold, CLI entry point, and tooling exist; the pipeline
-logic does not. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the build order,
+**Status:** the full pipeline runs end to end — worktree isolation, intent, rebase,
+review, test sufficiency, and PR — driven by a live terminal UI. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the build order,
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md) for what the terminology means, and
 [`AGENTS.md`](AGENTS.md) for the milestone currently in progress.
 
@@ -54,6 +55,26 @@ code-review uninstall   # remove the tool and its state directory
 uv sync
 uv run code-review --help
 ```
+
+## Run a review
+
+From inside the repo whose branch you want reviewed, with that branch pushed and its
+default-branch remote (`origin`) up to date:
+
+```bash
+code-review review my-branch --intent "what this change is trying to do"
+```
+
+(`uv run code-review review my-branch --intent "..."` if you're working on this repo
+instead of the installed tool.)
+
+`review` needs a real terminal on both stdin and stdout — it renders a live full-screen
+progress view and won't run piped or redirected. It diffs `my-branch` against
+`origin/main`, runs the whole pipeline (worktree, intent, rebase, review, test
+sufficiency, PR) inside a throwaway git worktree so your real checkout is never touched,
+and removes that worktree when the run ends (pass `--keep-worktree` to leave it in place
+for inspection). A per-run transcript is written under `~/.code-review/runs` regardless
+of outcome.
 
 ## Development
 
