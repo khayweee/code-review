@@ -228,3 +228,59 @@ duck-typed its way back to one of those four via `isinstance`/`getattr`.
   `getattr(payload, "findings", None)` fallback yields `None` for it (same as `Intent`), and
   `tui/state.py`'s `latest_findings` isinstance-narrowing simply never matches it -- neither
   needed a code change for the new member.
+
+## Worktree isolation: `StepContext.branch`, `StepOutcome.cwd_override`, `WorktreeStep`
+
+`cli.py review` used to create the run's throwaway `git worktree` itself, pre-pipeline, and
+pass the resulting path straight into `StepContext(cwd=...)`. Moved into a real, registered
+first step (`steps/worktree.py`'s `WorktreeStep`) so that *any* caller of `run_steps` --
+not only `cli.py`'s specific `review` command -- gets worktree isolation for free, at the
+cost of two new, honestly-different additions to the shared types `step_outcomes` alone
+didn't cover:
+
+- `StepContext.branch: str` -- required, alongside `cwd`/`agent`/`diff`/`intent`.
+  `WorktreeStep` needs the branch under review before any worktree (and so before `ctx.cwd`'s
+  HEAD) exists to derive it from. **Only `WorktreeStep` reads this.** `RebaseStep`/`PRStep`
+  still re-derive "the branch under review" from `ctx.cwd`'s HEAD (`gitutils.current_branch`)
+  exactly as before -- that trick keeps working unmodified because `WorktreeStep` makes
+  `ctx.cwd`'s HEAD equal to `ctx.branch` by the time either of them runs. Do not thread
+  `ctx.branch` into another step without a real reason; the existing HEAD-derivation trick is
+  the intended, single source of truth for every step downstream of `WorktreeStep`.
+- `StepOutcome.cwd_override: Path | None = None` -- lets a step redirect `ctx.cwd` for every
+  step after it. `executor.run_steps` folds a non-`None` `cwd_override` into the outer `ctx`
+  at the exact same point it already folds `step_outcomes` (once a step's slot fully
+  settles), via the same `dataclasses.replace(ctx, ...)` call.
+
+**Why this needed a new mechanism instead of reusing `step_outcomes`, and why that doesn't
+reverse the "no step branches on a sibling's outcome to decide whether/how to run" invariant
+(this file's Milestone 2 entry, `executor.py`'s own module docstring):** every step still
+runs, unconditionally, in the same fixed order -- nothing here changes *whether* or *when* a
+step runs, only the resource path (`ctx.cwd`) it runs against, which `step_outcomes`'s own
+read-only, opt-in-per-consumer contract was never designed to carry. Be honest that this is
+narrower than `step_outcomes`'s justification, not a restatement of it: `step_outcomes` is
+optional, per-consumer data a step *may choose* to read to shape its own output (e.g. `PRStep`
+rendering `ReviewStep`'s risk verdict, or not, if `step_outcomes` is empty); `cwd_override` is
+mandatory shared infrastructure state -- every step after `WorktreeStep` *must* see the
+redirected `cwd`, or its `git`/agent calls would silently operate on the wrong (or, absent
+`WorktreeStep`, nonexistent-until-now) working directory. Only `WorktreeStep` is expected to
+ever set it; nothing in the type system stops another step from doing so, but nothing else
+should.
+
+**Fix-round interaction**: `WorktreeStep` does not set `supports_fix_round = True` and never
+sets `needs_approval`/`auto_fixable`, so `executor.py`'s inner `while True` loop runs it
+exactly once per pipeline run -- `round_ctx` and the outer `ctx` are identical for its one
+and only round, so there is no meaningful "which `ctx` does `cwd_override` apply to"
+ambiguity to resolve. The fold happens on the outer `ctx` at the same point `step_outcomes`
+already does, immediately after `WorktreeStep`'s single round settles, before `RebaseStep`
+(the next step in `STEP_REGISTRY`) ever builds its own `round_ctx` from that updated `ctx`.
+
+**Failure surface**: `WorktreeStep.run` raises straight through on any git failure --
+including `steps/worktree.py`'s `BranchAlreadyCheckedOutError` when `<branch>` is already
+checked out elsewhere -- exactly like e.g. `RebaseStep`'s own unclassified-`git`-failure
+`RuntimeError`. `executor.run_steps` does nothing special with it; it propagates out of the
+async generator, caught by `tui/app.py`'s `_consume_events` and surfaced via `ReviewApp.error`
+same as any other step failure, rendered as a normal failed-step Status message through
+`cli.py`'s already-generic `if tui_app.error is not None` path. This is a genuine behavior
+change from the pre-`WorktreeStep` design (a pre-TUI `typer.Exit` with no TUI flash) but a
+deliberate one: it makes worktree-collision failures look and behave like every other
+pipeline-step failure, rather than a special case.

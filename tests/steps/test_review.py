@@ -181,7 +181,9 @@ def test_review_step_outcome_is_clean_and_auto_fixable_after_scope_filtering(
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=CLEAN_FAKE_CLI)
 
     outcome = asyncio.run(step.run(ctx))
@@ -208,7 +210,12 @@ def test_review_step_needs_approval_and_is_not_auto_fixable_on_an_ask_user_findi
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, on_approval_needed=_approve
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        on_approval_needed=_approve,
     )
     step: Step = ReviewStep(executable=BLOCKING_FAKE_CLI)
 
@@ -232,7 +239,9 @@ def test_review_step_prompt_includes_intent_conformance_clause_for_explicit_inte
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
@@ -252,7 +261,9 @@ def test_review_step_prompt_omits_intent_conformance_clause_for_non_explicit_int
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_INFERRED_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_INFERRED_INTENT
+    )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
@@ -279,7 +290,9 @@ def test_review_step_calls_agent_exactly_once_per_round(tmp_path: Path) -> None:
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     events = asyncio.run(_collect([step], ctx))
@@ -319,7 +332,9 @@ def test_review_step_automatic_fix_round_edits_the_tree_and_returns_a_fresh_revi
     original_greeting = (repo / "greeting.txt").read_text()
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=AUTO_FIX_ROUND_FAKE_CLI)
 
     events = asyncio.run(_collect([step], ctx))
@@ -390,7 +405,12 @@ def test_review_step_reports_exactly_one_activity_span_for_the_agent_call(
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
@@ -431,7 +451,12 @@ def test_review_step_still_finishes_its_activity_span_when_the_agent_call_raises
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=NONZERO_EXIT_FAKE_CLI)
 
@@ -469,7 +494,12 @@ def test_review_step_streams_each_tool_call_as_a_nested_activity(tmp_path: Path)
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=STREAMS_A_TOOL_CALL_FAKE_CLI)
 
@@ -511,7 +541,12 @@ def test_review_step_logs_an_errored_tool_result_as_its_own_activity(tmp_path: P
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=STREAMS_AN_ERRORED_TOOL_CALL_FAKE_CLI)
 
@@ -561,7 +596,12 @@ def test_review_step_logs_streamed_assistant_text_as_its_own_activity(tmp_path: 
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=STREAMS_ASSISTANT_TEXT_FAKE_CLI)
 

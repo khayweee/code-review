@@ -83,8 +83,11 @@ This section is the shortest end-to-end mental model of object creation and cont
    - `ClaudeCLI()` as the `Agent` implementation.
    - `InputRelay()`, and (for an interactive run) an `ActivityRelay` and `ApprovalRelay` so
      backend prompts, sub-step activity, and approval parks can all reach the TUI.
-   - `StepContext(cwd, agent, diff, intent, on_input_needed=relay.request_input,
+   - `StepContext(cwd, branch, agent, diff, intent, on_input_needed=relay.request_input,
 activity_reporter=activity_relay, on_approval_needed=approval_relay.request_approval)`.
+     `cwd` is the user's real repo -- `steps/worktree.py`'s `WorktreeStep`, the first step in
+     `IMPLEMENTED_STEPS`, redirects it to a fresh worktree for every step after it
+     (`StepOutcome.cwd_override`; see `pipeline/AGENTS.md`'s WorktreeStep section).
    - `steps = [cls() for cls in IMPLEMENTED_STEPS]`.
 
 2. `cli.py` starts orchestration by creating `run_steps(steps, ctx)`.

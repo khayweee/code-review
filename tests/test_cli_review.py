@@ -1,11 +1,26 @@
 """Tests for `code-review review` (Milestone 13, issue #40; four-step pipeline wiring,
-issue #60; `PRStep` joined as a fifth step in issue #119): the TTY-required fail-fast path,
-`_diff_against_head`, and real end-to-end runs of the full `IntentStep` -> `RebaseStep` ->
-`ReviewStep` -> `TestSufficiencyStep` -> `PRStep` pipeline (`steps/registry.py`'s
-`IMPLEMENTED_STEPS`). `repo_with_branch` (see its own docstring) leaves the checkout on its
-local "main" -- equal to `PRStep`'s own default `default_branch` -- so `PRStep` always
-takes its clean-skip path in every full-run test below, with no `gh` call and no fake `gh`
-executable needed on `PATH`.
+issue #60; `PRStep` joined as a fifth step in issue #119; worktree isolation, a real
+`WorktreeStep` joined as the pipeline's new first step): the TTY-required fail-fast path,
+`_diff_against_default_branch`, and real end-to-end runs of the full `WorktreeStep` ->
+`IntentStep` -> `RebaseStep` -> `ReviewStep` -> `TestSufficiencyStep` -> `PRStep` pipeline
+(`steps/registry.py`'s `IMPLEMENTED_STEPS`), each now running against a throwaway `git
+worktree` (`steps/worktree.py`'s `WorktreeStep`) with `<branch>` checked out for real, never
+the user's own `repo` checkout. `repo_with_branch` (see its own docstring) leaves `repo`
+itself on local "main" so "feature/change" is free for `WorktreeStep` to check out; since
+worktree isolation makes `<branch>` (not whatever `repo` happens to have checked out) the
+real branch under review, `PRStep` no longer takes its old clean-skip path in the full-run
+tests below -- "feature/change" != `PRStep`'s own default `default_branch` ("main") -- so
+those tests now need a fake `gh` on `PATH` (`_env_with_fake_claude_and_gh`) and a real,
+reachable `origin` whose URL nonetheless parses as a GitHub slug for `resolve_repo_slug`
+(`_github_shaped_origin`, via a fake `ssh` transport so `RebaseStep`'s real `git fetch origin
+main` never touches the network).
+
+`WorktreeStep` creation now happens inside the pipeline itself (`StepOutcome.cwd_override`,
+see `pipeline/AGENTS.md`'s WorktreeStep section), not as pre-TUI `cli.py` plumbing -- so the
+"already checked out elsewhere" collision (`test_review_fails_clearly_when_branch_is_already_
+checked_out_elsewhere` below) now surfaces as an ordinary failed pipeline step inside a real
+TUI run (`ReviewApp`'s Status box, "e" to exit), not a pre-TUI `typer.Exit` with no TUI
+flash.
 
 `CliRunner`'s captured stdio is never a TTY, so it is this file's natural test of the
 "needs a real terminal" error path -- no mocking `isatty` (see `cli.py`'s `review`
@@ -75,8 +90,9 @@ import typer
 from typer.testing import CliRunner
 
 from code_review.agent import ClaudeCLI
-from code_review.cli import _diff_against_head, _run_pipeline, app
+from code_review.cli import _diff_against_default_branch, _run_pipeline, app
 from code_review.steps.intent import Intent
+from code_review.steps.worktree import worktree_path_for_branch
 from code_review.tui.input_relay import InputRelay
 
 runner = CliRunner()
@@ -102,7 +118,9 @@ def repo_with_branch(tmp_path: Path) -> tuple[Path, str]:
     """A real repo (`repo`, this fixture's returned path) on a local branch literally named
     "main", wired to a real `origin` remote whose own "main" is the exact same commit --
     plus a `feature/change` branch one commit ahead of `repo`'s "main" with a real diff
-    (`git diff HEAD...feature/change`, this fixture's `HEAD`, sees it).
+    (`git diff origin/main...feature/change` sees it). `repo` itself is left checked out on
+    "main", not "feature/change" -- so "feature/change" is free for `WorktreeStep`
+    (`steps/worktree.py`) to check out for real when `review` runs against it.
 
     Two real local repos, mirroring `tests/steps/conftest.py`'s `origin_and_checkout`
     pattern: `origin` stands in for the remote, `repo` is the checkout under test.
@@ -148,21 +166,24 @@ def repo_with_branch(tmp_path: Path) -> tuple[Path, str]:
 
 @pytest.fixture
 def repo_with_unpushed_local_default_commits(tmp_path: Path) -> tuple[Path, str, str]:
-    """Like `repo_with_branch` above, but real, end-to-end proof for issue #80: `repo`'s
-    checked-out HEAD (local "main", exactly as `repo_with_branch` leaves it) gains one
-    commit never pushed to `origin` -- so local "main"'s tip and HEAD are literally the
-    same commit, which trivially satisfies `steps/rebase.py`'s issue #24 guard's second
-    condition ("local `default_branch`'s tip is itself an ancestor of HEAD") by identity,
-    while the first condition (local `default_branch` strictly ahead of `origin/main`)
-    holds because that commit was never pushed. `RebaseStep`'s own guard fires the moment
-    `review` reaches it, parking the whole run -- this is the already-shipped bug (issue
-    #24) this ticket (#80) is proven against: before #80, the executor silently ignored
-    `needs_approval=True` and rebased anyway.
+    """Like `repo_with_branch` above, but real, end-to-end proof for issue #24/#80: local
+    "main" gains one commit never pushed to `origin`, and "feature/change" (the branch under
+    review) is branched from local "main"'s *new* tip -- carrying that unpushed commit
+    forward as its own ancestor, exactly `steps/rebase.py`'s own guard scenario ("committed
+    to locally, then merged into the feature branch"). This is what makes the guard's second
+    condition ("local `default_branch`'s tip is an ancestor of HEAD") hold once worktree
+    isolation makes "feature/change" itself -- not whatever `repo`'s own checkout happens to
+    be -- the real HEAD `RebaseStep` runs against; branching "feature/change" from local
+    main's *old* (pre-unpushed-commit) tip, as an earlier version of this fixture did, only
+    ever worked by relying on the same "HEAD is whatever `repo` has checked out, not
+    `<branch>`" bug this ticket fixes. `RebaseStep`'s own guard fires the moment `review`
+    reaches it, parking the whole run -- the already-shipped bug (issue #24) issue #80 is
+    proven against: before #80, the executor silently ignored `needs_approval=True` and
+    rebased anyway.
 
-    Returns `(repo, branch, unpushed_sha)`: `branch` is `repo_with_branch`'s own
-    "feature/change" (used only for `_diff_against_head`'s diff, unrelated to the guard);
-    `unpushed_sha` is the local-only commit's full SHA, whose short form both `RebaseStep`'s
-    resulting `Finding.description` and the parked `FindingsBox`'s own displayed text name.
+    Returns `(repo, branch, unpushed_sha)`: `branch` is "feature/change"; `unpushed_sha` is
+    the local-only commit's full SHA, whose short form both `RebaseStep`'s resulting
+    `Finding.description` and the parked `FindingsBox`'s own displayed text name.
     """
 
     origin = tmp_path / "origin"
@@ -184,17 +205,17 @@ def repo_with_unpushed_local_default_commits(tmp_path: Path) -> tuple[Path, str,
     _run_git(["fetch", "-q", "origin"], repo)
     _run_git(["checkout", "-q", "-b", "main", "origin/main"], repo)
 
+    (repo / "local_main_only.txt").write_text("unpushed\n")
+    _run_git(["add", "-A"], repo)
+    _run_git(["commit", "-q", "-m", "add local-main-only file"], repo)
+    unpushed_sha = _run_git(["rev-parse", "HEAD"], repo).stdout.strip()
+
     greeting = repo / "greeting.txt"
     _run_git(["checkout", "-q", "-b", "feature/change"], repo)
     greeting.write_text("hello\nworld\n")
     _run_git(["add", "-A"], repo)
     _run_git(["commit", "-q", "-m", "add world"], repo)
     _run_git(["checkout", "-q", "main"], repo)
-
-    (repo / "local_main_only.txt").write_text("unpushed\n")
-    _run_git(["add", "-A"], repo)
-    _run_git(["commit", "-q", "-m", "add local-main-only file"], repo)
-    unpushed_sha = _run_git(["rev-parse", "HEAD"], repo).stdout.strip()
 
     return repo, "feature/change", unpushed_sha
 
@@ -234,6 +255,71 @@ def _env_with_fake_claude(fake_cli: Path, tmp_path: Path) -> dict[str, str]:
     return env
 
 
+FAKE_GH = Path(__file__).parent / "scm" / "fakes" / "gh_fake.py"
+_GITHUB_SHAPED_ORIGIN_URL = "git@github.com:khayweee/code-review.git"
+
+# A fake `ssh` (wired via `GIT_SSH_COMMAND`, a real git env-var seam): git invokes ssh as
+# `<ssh> [options] user@host 'remote command'` (e.g. `git-upload-pack 'owner/repo.git'`) --
+# this substitute ignores the host entirely and serves `FAKE_SSH_ORIGIN_PATH` (a real local
+# repo) instead, so a real `git fetch origin ...` against `_GITHUB_SHAPED_ORIGIN_URL` reaches
+# a real, hermetic local repo with no network access, while `git remote get-url origin`
+# still reports the unmodified GitHub-shaped URL (matches `scm/github.py`'s
+# `resolve_repo_slug` regex) -- `insteadOf`/`pushInsteadOf` can't do this instead: git's own
+# `remote get-url` deliberately expands those, so the URL it reports would stop looking
+# GitHub-shaped too.
+_FAKE_SSH_SOURCE = """#!/usr/bin/env python3
+import os
+import sys
+
+origin = os.environ["FAKE_SSH_ORIGIN_PATH"]
+remote_command = sys.argv[-1]
+if remote_command.startswith("git-upload-pack"):
+    os.execvp("git", ["git", "upload-pack", origin])
+elif remote_command.startswith("git-receive-pack"):
+    os.execvp("git", ["git", "receive-pack", origin])
+else:
+    sys.stderr.write(f"fake ssh: unhandled remote command {remote_command!r}\\n")
+    sys.exit(1)
+"""
+
+
+def _github_shaped_origin(repo: Path) -> None:
+    """Point `repo`'s already-fetched `origin` remote at a GitHub-shaped URL (never
+    reachable on its own -- see `_env_with_fake_claude_and_gh`'s `GIT_SSH_COMMAND` setup),
+    safe to call anytime after the fixture's own real local fetch already populated
+    `origin/main`: `git` never revalidates/deletes already-fetched remote-tracking refs on a
+    plain `remote set-url` (mirrors `tests/steps/test_pr.py`'s identical technique)."""
+
+    _run_git(["remote", "set-url", "origin", _GITHUB_SHAPED_ORIGIN_URL], repo)
+
+
+def _env_with_fake_claude_and_gh(fake_cli: Path, origin: Path, tmp_path: Path) -> dict[str, str]:
+    """Like `_env_with_fake_claude`, plus a fake `gh` (mirrors `tests/scm/fakes/gh_fake.py`'s
+    own convention -- `pr view` finds nothing, `pr create` succeeds) and the fake `ssh`
+    transport above, so `PRStep` -- which now genuinely runs instead of skipping, once the
+    checked-out branch is a real feature branch under worktree isolation -- can resolve a
+    repo slug and open a PR without ever touching the network. `origin` is the real local
+    repo backing the run's `origin` remote (already fetched by the fixture); callers must
+    have already pointed `repo`'s `origin` URL at `_GITHUB_SHAPED_ORIGIN_URL` themselves
+    (`_github_shaped_origin`) before this env is used.
+    """
+
+    env = _env_with_fake_claude(fake_cli, tmp_path)
+    bin_dir = Path(env["PATH"].split(os.pathsep)[0])
+
+    fake_gh = bin_dir / "gh"
+    fake_gh.write_text(FAKE_GH.read_text())
+    fake_gh.chmod(0o755)
+
+    fake_ssh = bin_dir / "fake_ssh.py"
+    fake_ssh.write_text(_FAKE_SSH_SOURCE)
+    fake_ssh.chmod(0o755)
+
+    env["GIT_SSH_COMMAND"] = str(fake_ssh)
+    env["FAKE_SSH_ORIGIN_PATH"] = str(origin)
+    return env
+
+
 # --- TTY-required fail-fast path, via CliRunner (never a real TTY) ---------------------
 
 
@@ -270,53 +356,49 @@ def test_review_tty_check_runs_before_intent_validation(
     assert "must be non-empty" not in output
 
 
-# --- _diff_against_head, direct calls against a real repo ------------------------------
+# --- _diff_against_default_branch, direct calls against a real repo --------------------
 
 
-def test_diff_against_head_returns_the_branchs_changes_since_merge_base(
-    repo_with_branch: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+def test_diff_against_default_branch_returns_the_branchs_changes_since_the_default_branch(
+    repo_with_branch: tuple[Path, str],
 ) -> None:
     repo, branch = repo_with_branch
-    monkeypatch.chdir(repo)
 
-    diff = _diff_against_head(branch)
+    diff = _diff_against_default_branch(branch, repo)
 
     assert "+world" in diff
 
 
-def test_diff_against_head_surfaces_a_bad_ref_as_a_clear_cli_exit(
+def test_diff_against_default_branch_surfaces_a_bad_ref_as_a_clear_cli_exit(
     repo_with_branch: tuple[Path, str],
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo, _branch = repo_with_branch
-    monkeypatch.chdir(repo)
 
-    # `_diff_against_head` is called directly here, not through Typer's CLI runner, so its
-    # `typer.Exit` (Click's `Exit`) surfaces as itself rather than the `SystemExit` Typer
-    # converts it to when a full command run raises it. The message is this module's own
-    # wording, not `git diff`'s raw "ambiguous argument"/path-vs-revision stderr -- a bad
-    # BRANCH is caught by a dedicated `git rev-parse --verify` check before the real diff
-    # call runs.
+    # `_diff_against_default_branch` is called directly here, not through Typer's CLI
+    # runner, so its `typer.Exit` (Click's `Exit`) surfaces as itself rather than the
+    # `SystemExit` Typer converts it to when a full command run raises it. The message is
+    # this module's own wording, not `git diff`'s raw "ambiguous argument"/path-vs-revision
+    # stderr -- a bad BRANCH is caught by a dedicated `git rev-parse --verify` check before
+    # the real diff call runs.
     with pytest.raises(typer.Exit):
-        _diff_against_head("does-not-exist")
+        _diff_against_default_branch("does-not-exist", repo)
 
     err = capsys.readouterr().err
     assert "'does-not-exist' is not a valid branch or ref" in err
     assert "ambiguous argument" not in err
 
 
-def test_diff_against_head_reports_when_git_is_missing(
+def test_diff_against_default_branch_reports_when_git_is_missing(
     repo_with_branch: tuple[Path, str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo, branch = repo_with_branch
-    monkeypatch.chdir(repo)
     monkeypatch.setenv("PATH", "")
 
     with pytest.raises(typer.Exit):
-        _diff_against_head(branch)
+        _diff_against_default_branch(branch, repo)
 
     assert "git" in capsys.readouterr().err.lower()
 
@@ -328,17 +410,20 @@ def test_run_pipeline_diff_fetch_does_not_block_the_event_loop(
     repo_with_branch: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`_run_pipeline` (the `events` generator `review` hands `ReviewApp`) fetches the diff
-    via `asyncio.to_thread`, not a direct call -- so a slow `_diff_against_head` must not
-    stall the event loop `ReviewApp` itself relies on to paint. Proven here by running a
-    concurrent ticker alongside a `_diff_against_head` replaced with a one-second
-    `time.sleep`: if the diff fetch blocked the loop, the ticker would get zero ticks in
-    that second instead of many."""
+    via `asyncio.to_thread`, not a direct call -- so a slow `_diff_against_default_branch`
+    must not stall the event loop `ReviewApp` itself relies on to paint. Proven here by
+    running a concurrent ticker alongside `_diff_against_default_branch` replaced with a
+    one-second `time.sleep`: if the diff fetch blocked the loop, the ticker would get zero
+    ticks in that second instead of many. This never reaches `RebaseStep`/`PRStep` (only
+    `IntentStep`'s own "running" event is awaited below), so `repo`'s plain local `origin`
+    (no worktree, no fake `gh`) is enough."""
 
     repo, branch = repo_with_branch
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr("code_review.cli._diff_against_head", lambda _branch: _slow_diff())
+    monkeypatch.setattr(
+        "code_review.cli._diff_against_default_branch", lambda _branch, _cwd: _slow_diff()
+    )
 
-    tick_count = asyncio.run(_run_pipeline_first_event_while_ticking(branch))
+    tick_count = asyncio.run(_run_pipeline_first_event_while_ticking(branch, repo))
 
     assert tick_count > 10
 
@@ -348,7 +433,7 @@ def _slow_diff() -> str:
     return "+world\n"
 
 
-async def _run_pipeline_first_event_while_ticking(branch: str) -> int:
+async def _run_pipeline_first_event_while_ticking(branch: str, cwd: Path) -> int:
     ticks = 0
 
     async def _tick() -> None:
@@ -360,7 +445,7 @@ async def _run_pipeline_first_event_while_ticking(branch: str) -> int:
     agent = ClaudeCLI()
     relay = InputRelay()
     intent = Intent(summary="add world greeting", source="explicit", score=1.0)
-    events = _run_pipeline(branch, intent, agent, relay)
+    events = _run_pipeline(branch, intent, agent, relay, cwd)
 
     ticker = asyncio.create_task(_tick())
     await events.__anext__()  # IntentStep's "running" event -- reached only after the diff
@@ -633,15 +718,16 @@ def _run_review_and_press_e_to_exit(
     wait_until`), then sends "e" to close it, resending once if the process doesn't
     actually start exiting (see `_send_e_and_confirm_exit`). `wait_before_keypress`'s
     default is a generous upper bound over the run's own real duration (well under two
-    seconds even with all five steps running -- `IntentStep`/`RebaseStep`/`PRStep` are pure
-    local `git` (`PRStep` takes its clean-skip path here, see this module's own docstring),
-    and `ReviewStep`/`TestSufficiencyStep` each spawn one fake `claude` process that
-    drains stdin and prints immediately), not a tight one, since this is a real subprocess
-    and terminal, not a mock -- but the actual wait is normally a small fraction of it.
-    `env` defaults to `None` (inherit this process's own environment); the full-run tests
-    below pass `_env_with_fake_claude`'s result so `ReviewStep`/`TestSufficiencyStep`'s
-    `ClaudeCLI` calls resolve a fake `claude` on `PATH` instead of hanging or failing
-    waiting for a real one."""
+    seconds even with all six steps running -- `WorktreeStep`/`IntentStep`/`RebaseStep` are
+    pure local `git`, `PRStep` is one real `gh pr create`/`gh pr edit` call against a fake
+    `gh` on `PATH` (see `_env_with_fake_claude_and_gh`), and `ReviewStep`/
+    `TestSufficiencyStep` each spawn one fake `claude` process that drains stdin and prints
+    immediately), not a tight one, since this is a real subprocess and terminal, not a mock
+    -- but the actual wait is normally a small fraction of it. `env` defaults to `None`
+    (inherit this process's own environment); the full-run tests below pass
+    `_env_with_fake_claude`'s (or `_env_with_fake_claude_and_gh`'s) result so `ReviewStep`/
+    `TestSufficiencyStep`'s `ClaudeCLI` calls resolve a fake `claude` on `PATH` instead of
+    hanging or failing waiting for a real one."""
 
     process = subprocess.Popen(
         _script_argv(args),
@@ -844,26 +930,70 @@ _REAL_PTY_FULL_RUN_GROUP = "real_pty_full_run"
 
 
 @pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
-def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
+def test_review_fails_clearly_when_branch_is_already_checked_out_elsewhere(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
-    """A real terminal (pty), a real git repo and diff, a real five-step pipeline run
-    (`IntentStep` -> `RebaseStep` -> `ReviewStep` -> `TestSufficiencyStep` -> `PRStep`, real
-    `git` subprocesses and a real `ClaudeCLI` subprocess against a fake `claude` on `PATH`;
-    `PRStep` itself takes its clean-skip path here, see this module's own docstring)
-    through the real executor and `ReviewApp` -- exits with code 0 once "e" is pressed, no
-    traceback, every step name rendered as completed in the Pipeline box, the clean-run
-    Status message shown, and (checked via `ps` right after `script` returns) no leftover
-    `code-review`/textual process. This is acceptance criterion 1 (all four steps from
-    issue #60 run, in order -- `PRStep` joined later, issue #119) and criterion 4 (demoable
-    end to end) from issue #60.
+    """`repo_with_branch` leaves `repo` itself checked out on "main" -- requesting a review
+    of "main" collides with that, exactly the case `git worktree add` refuses ("already
+    checked out"). `WorktreeStep` (the pipeline's first step) raises `worktree.py`'s own
+    `BranchAlreadyCheckedOutError` straight through, so this now surfaces as an ordinary
+    failed pipeline step inside a real `ReviewApp` run (Status box, "e" to exit), not a
+    pre-TUI exit with no TUI flash -- a real terminal is still needed all the way through,
+    and no fake `claude` is needed since `IntentStep` (let alone `ReviewStep`) never runs."""
+
+    repo, _branch = repo_with_branch
+    env = dict(os.environ)
+    env["CODE_REVIEW_STATE_DIR"] = str(tmp_path / "state")
+
+    run = _run_review_and_press_e_to_exit(
+        [_code_review_executable(), "review", "main", "--intent", "add world greeting"],
+        cwd=repo,
+        env=env,
+    )
+    result = run.result
+    output = _plain(result.stdout)
+
+    assert result.returncode == 1
+    assert "Traceback" not in output
+    assert "already checked out" in output
+    assert "fatal:" not in output  # git's own raw stderr never leaks through
+    assert "◌ Intent" in output  # no further step ran -- WorktreeStep failed first
+
+    _assert_no_leftover_code_review_process(run.pgid)
+
+
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
+def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
+    repo_with_branch: tuple[Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real terminal (pty), a real git repo and diff, a real six-step pipeline run
+    (`WorktreeStep` -> `IntentStep` -> `RebaseStep` -> `ReviewStep` -> `TestSufficiencyStep`
+    -> `PRStep`, real `git` subprocesses and a real `ClaudeCLI` subprocess against a fake
+    `claude` on `PATH`; `PRStep` genuinely opens a PR here via a fake `gh` on `PATH`, since
+    worktree isolation makes "feature/change" -- not whatever `repo` happens to have checked
+    out -- the real branch under review, see this module's own docstring) through the real
+    executor and `ReviewApp` -- exits with code 0 once "e" is pressed, no traceback, every
+    step name rendered as completed in the Pipeline box, the clean-run Status message shown,
+    and (checked via `ps` right after `script` returns) no leftover `code-review`/textual
+    process. This is acceptance criterion 1 (all four steps from issue #60 run, in order --
+    `PRStep` joined later, issue #119; `WorktreeStep` joined first, worktree isolation) and
+    criterion 4 (demoable end to end) from issue #60.
 
     Also covers `run_log.py`'s wiring end to end: `review` writes a per-run log file under
     `CODE_REVIEW_STATE_DIR/runs` (isolated to `tmp_path` by `_env_with_fake_claude`) and
-    echoes its path -- see `tests/test_run_log.py` for `run_log.py`'s own unit tests."""
+    echoes its path -- see `tests/test_run_log.py` for `run_log.py`'s own unit tests.
+
+    Also covers worktree isolation end to end: the throwaway `git worktree` `WorktreeStep`
+    creates (`steps/worktree.py`) is named `code_review_feature-change_<short-sha>`, exists
+    while the run is in flight, and is gone once it finishes (no `--keep-worktree` here)."""
 
     repo, branch = repo_with_branch
-    env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
+    origin = tmp_path / "origin"
+    _github_shaped_origin(repo)
+    env = _env_with_fake_claude_and_gh(CLEAN_FAKE_CLAUDE, origin, tmp_path)
+    monkeypatch.setenv("CODE_REVIEW_STATE_DIR", str(tmp_path / "state"))
+    expected_worktree = asyncio.run(worktree_path_for_branch(branch, repo))
+    assert expected_worktree.name.startswith("code_review_feature-change_")
 
     run = _run_review_and_press_e_to_exit(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
@@ -875,7 +1005,7 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
+    for step_name in ("Worktree", "Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
@@ -884,8 +1014,17 @@ def test_review_runs_end_to_end_against_a_real_repo_and_exits_cleanly(
     assert len(run_logs) == 1
     log_text = run_logs[0].read_text()
     assert "Pipeline ran successfully." in log_text
-    for step_name in ("IntentStep", "RebaseStep", "ReviewStep", "TestSufficiencyStep", "PRStep"):
+    for step_name in (
+        "WorktreeStep",
+        "IntentStep",
+        "RebaseStep",
+        "ReviewStep",
+        "TestSufficiencyStep",
+        "PRStep",
+    ):
         assert step_name in log_text
+
+    assert not expected_worktree.exists()  # removed once the run finished, no --keep-worktree
 
     _assert_no_leftover_code_review_process(run.pgid)
 
@@ -916,7 +1055,9 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
     after that point can ever reach the app, even once it finishes moments later."""
 
     repo, branch = repo_with_branch
-    env = _env_with_fake_claude(BLOCKING_TWO_FINDINGS_FAKE_CLAUDE, tmp_path)
+    origin = tmp_path / "origin"
+    _github_shaped_origin(repo)
+    env = _env_with_fake_claude_and_gh(BLOCKING_TWO_FINDINGS_FAKE_CLAUDE, origin, tmp_path)
 
     run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
@@ -940,7 +1081,9 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
 
 @pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
 def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
-    repo_with_unpushed_local_default_commits: tuple[Path, str, str], tmp_path: Path
+    repo_with_unpushed_local_default_commits: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """This is the ticket's own headline acceptance criterion: a branch whose history
     includes unpushed local-default commits parks at `RebaseStep` and presents the inline
@@ -958,6 +1101,10 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     # CODE_REVIEW_STATE_DIR -- see `_env_with_fake_claude`'s own docstring.
     env = dict(os.environ)
     env["CODE_REVIEW_STATE_DIR"] = str(tmp_path / "state")
+    # Same override for *this* process, so `worktree_path_for_branch` below resolves the
+    # identical worktree path the subprocess itself will use, not the real `~/.code-review`.
+    monkeypatch.setenv("CODE_REVIEW_STATE_DIR", str(tmp_path / "state"))
+    expected_worktree = asyncio.run(worktree_path_for_branch(branch, repo))
 
     run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
@@ -979,6 +1126,54 @@ def test_review_parks_at_rebase_step_on_unpushed_local_default_commits(
     # ever started.
     assert "◌ Review" in output
 
+    # Worktree isolation cleans up even on RunAbortedError -- no --keep-worktree here.
+    assert not expected_worktree.exists()
+
+    _assert_no_leftover_code_review_process(run.pgid)
+
+
+@pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
+def test_review_keep_worktree_leaves_it_on_disk_and_reports_its_path(
+    repo_with_unpushed_local_default_commits: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--keep-worktree` on an aborted run (cheapest real scenario: no fake `claude` needed,
+    mirrors `test_review_parks_at_rebase_step_on_unpushed_local_default_commits` above)
+    proves both halves of the flag's contract: the worktree survives the run instead of
+    being removed, and its path is echoed so the user can find it -- and it really is a
+    working checkout of `branch`, not an empty directory."""
+
+    repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
+
+    env = dict(os.environ)
+    env["CODE_REVIEW_STATE_DIR"] = str(tmp_path / "state")
+    monkeypatch.setenv("CODE_REVIEW_STATE_DIR", str(tmp_path / "state"))
+    expected_worktree = asyncio.run(worktree_path_for_branch(branch, repo))
+
+    run = _run_review_with_keypresses(
+        [
+            _code_review_executable(),
+            "review",
+            branch,
+            "--intent",
+            "add world greeting",
+            "--keep-worktree",
+        ],
+        cwd=repo,
+        keypresses=[(3.0, "x")],
+        env=env,
+    )
+    result = run.result
+    output = _plain(result.stdout)
+
+    assert result.returncode == 1
+    assert "--keep-worktree" in output
+    assert str(expected_worktree) in output
+    assert expected_worktree.is_dir()
+    checked_out = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], expected_worktree).stdout.strip()
+    assert checked_out == branch
+
     _assert_no_leftover_code_review_process(run.pgid)
 
 
@@ -997,7 +1192,9 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
     specific guard short of aborting the whole run."""
 
     repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
-    env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
+    origin = tmp_path / "origin"
+    _github_shaped_origin(repo)
+    env = _env_with_fake_claude_and_gh(CLEAN_FAKE_CLAUDE, origin, tmp_path)
 
     run = _run_review_with_keypresses(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
@@ -1010,7 +1207,7 @@ def test_review_choosing_skip_at_the_rebase_park_records_it_skipped_and_continue
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
+    for step_name in ("Worktree", "Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 
@@ -1034,7 +1231,9 @@ def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park
     instead of exiting cleanly."""
 
     repo, branch = repo_with_branch
-    env = _env_with_fake_claude(AUTO_FIX_ROUND_FAKE_CLAUDE, tmp_path)
+    origin = tmp_path / "origin"
+    _github_shaped_origin(repo)
+    env = _env_with_fake_claude_and_gh(AUTO_FIX_ROUND_FAKE_CLAUDE, origin, tmp_path)
 
     run = _run_review_and_press_e_to_exit(
         [_code_review_executable(), "review", branch, "--intent", "add world greeting"],
@@ -1047,7 +1246,7 @@ def test_review_reaches_success_via_reviewsteps_automatic_fix_round_with_no_park
 
     assert result.returncode == 0
     assert "Traceback" not in output
-    for step_name in ("Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
+    for step_name in ("Worktree", "Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
         assert step_name in output
     assert "Pipeline ran successfully." in output
 

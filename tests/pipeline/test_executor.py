@@ -177,7 +177,9 @@ def test_step_round_trips_through_executor_against_real_diff(tmp_path: Path) -> 
     assert "+world" in diff  # sanity: the diff we built is the one the step should see
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_STAND_IN_INTENT
+    )
     step: Step = _ReviewStep()
 
     events = asyncio.run(_collect([step], ctx))
@@ -205,7 +207,9 @@ def test_executor_runs_steps_in_fixed_list_order_against_real_diff(tmp_path: Pat
     repo, diff = _real_repo_with_diff(tmp_path)
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_STAND_IN_INTENT
+    )
     steps: list[Step] = [_OrderStep(ORDER_FAKE_CLI_A), _OrderStep(ORDER_FAKE_CLI_B)]
 
     events = asyncio.run(_collect(steps, ctx))
@@ -255,7 +259,7 @@ def test_intent_step_runs_first_and_a_later_step_reads_the_same_intent_via_ctx(
     intent = Intent(summary=intent_text, source="explicit", score=1.0)
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=intent)
+    ctx = StepContext(cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=intent)
     steps: list[Step] = [IntentStep(), _IntentReadingStep()]
 
     events = asyncio.run(_collect(steps, ctx))
@@ -283,7 +287,9 @@ def test_run_steps_yields_a_running_and_completed_event_per_step_in_order(
     repo, diff = _real_repo_with_diff(tmp_path)
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_STAND_IN_INTENT
+    )
     steps: list[Step] = [_OrderStep(ORDER_FAKE_CLI_A), _OrderStep(ORDER_FAKE_CLI_B)]
 
     events = asyncio.run(_collect(steps, ctx))
@@ -332,7 +338,14 @@ def test_run_steps_binds_the_ambient_activity_reporter_but_a_step_with_no_git_ca
     relay = ActivityRelay()
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=intent, activity_reporter=relay)
+    ctx = StepContext(
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=intent,
+        activity_reporter=relay,
+    )
     steps: list[Step] = [IntentStep()]
 
     events = asyncio.run(_collect(steps, ctx))
@@ -405,6 +418,7 @@ def test_run_steps_continues_to_the_next_step_when_the_decision_is_approve(
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -433,6 +447,7 @@ def test_run_steps_continues_to_the_next_step_when_the_decision_is_skip(tmp_path
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -457,6 +472,7 @@ def test_run_steps_raises_run_aborted_error_and_runs_no_further_step_on_abort(
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -488,6 +504,7 @@ def test_run_steps_only_yields_the_parked_steps_own_running_and_completed_events
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -522,7 +539,9 @@ def test_run_steps_fails_closed_when_a_step_parks_with_no_approval_relay_attache
     repo, diff = _real_repo_with_diff(tmp_path)
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_STAND_IN_INTENT
+    )
     steps: list[Step] = [_ParkingStep(_PARKING_OUTCOME), _MarkerStep()]
 
     async def _collect_or_raise() -> list[StepEvent]:
@@ -544,6 +563,7 @@ def test_run_steps_does_not_park_and_never_calls_on_approval_needed_when_needs_a
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -621,6 +641,7 @@ def test_run_steps_auto_fix_round_re_runs_exactly_once_with_fix_round_context_be
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -664,6 +685,7 @@ def test_run_steps_stops_automatic_fix_rounds_once_the_cap_is_exhausted_and_park
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -716,6 +738,7 @@ def test_run_steps_never_auto_fixes_a_finding_with_unset_action_even_on_a_fix_ro
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -753,6 +776,7 @@ def test_run_steps_does_not_round_or_park_a_step_that_does_not_support_fix_round
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,
@@ -801,7 +825,9 @@ def test_run_steps_threads_an_earlier_steps_settled_outcome_into_a_later_steps_c
     )
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_STAND_IN_INTENT
+    )
     steps: list[Step] = [_MarkerStep(), reporting_step]
 
     asyncio.run(_collect(steps, ctx))
@@ -821,7 +847,9 @@ def test_run_steps_gives_the_first_step_in_a_run_an_empty_step_outcomes(tmp_path
     )
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_STAND_IN_INTENT
+    )
 
     asyncio.run(_collect([reporting_step], ctx))
     asyncio.run(agent.close())
@@ -848,7 +876,9 @@ def test_run_steps_only_records_a_fix_round_steps_final_settled_outcome_not_each
     )
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_STAND_IN_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_STAND_IN_INTENT
+    )
     steps: list[Step] = [fixable_step, reporting_step]
 
     events = asyncio.run(_collect(steps, ctx))
@@ -892,6 +922,7 @@ def test_run_steps_fix_approval_response_re_runs_with_instructions_and_is_never_
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
         cwd=repo,
+        branch="unused-placeholder",
         agent=agent,
         diff=diff,
         intent=_STAND_IN_INTENT,

@@ -2,11 +2,13 @@
 
 `StepContext` is a bag of per-pipeline-run dependencies a step needs (see
 `docs/GLOSSARY.md`'s "run" entry for the pipeline-run vs agent-call distinction): working
-directory, `Agent`, diff, `Intent`, plus fix-loop/approval-park state (`on_approval_needed`,
-`fix_round`), plus `step_outcomes`, a read-only record of earlier steps' already-settled
-`StepOutcome`s a later step may summarize (see that field's own docstring and
-`pipeline/AGENTS.md` for why this doesn't reverse the "no step branches on a sibling's
-outcome" invariant).
+directory, branch under review, `Agent`, diff, `Intent`, plus fix-loop/approval-park state
+(`on_approval_needed`, `fix_round`), plus `step_outcomes`, a read-only record of earlier
+steps' already-settled `StepOutcome`s a later step may summarize (see that field's own
+docstring and `pipeline/AGENTS.md` for why this doesn't reverse the "no step branches on a
+sibling's outcome" invariant), plus `StepOutcome.cwd_override`, a narrower, mandatory
+counterpart to `step_outcomes` that lets `WorktreeStep` redirect `ctx.cwd` for every step
+after it (see that field's own docstring and `pipeline/AGENTS.md`'s WorktreeStep section).
 
 `ActivityReporter` is a structural `Protocol` so `pipeline/`/`steps/` never import `tui/`
 directly; satisfied structurally by `tui.activity.ActivityRelay`. `StepContext.
@@ -153,6 +155,14 @@ class StepContext:
     agent: Agent
     diff: str
     intent: Intent
+    # The branch under review, verified to exist before any Step runs (cli.py's
+    # _verify_branch_exists). WorktreeStep is the only reader: it has to know the branch
+    # before any worktree (and so before ctx.cwd's HEAD) exists, unlike RebaseStep/PRStep,
+    # which re-derive "the branch under review" from ctx.cwd's HEAD once WorktreeStep has
+    # already made that true (see those steps' own module docstrings). Required, not
+    # defaulted, matching cwd/agent/diff/intent -- see pipeline/AGENTS.md's WorktreeStep
+    # section for why no other step should read this.
+    branch: str
     # Relay for interactive-input prompts, passed through to a step's own RunOpts. Reserved:
     # no step consumes it yet. cli.py wires it to tui.input_relay.InputRelay.request_input.
     on_input_needed: Callable[[str], Awaitable[str]] | None = None
@@ -217,6 +227,14 @@ class StepOutcome:
     # The closed set of shapes a step actually reports -- see module docstring. A step
     # narrows this back to whichever member it produced, typically via isinstance.
     payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent | PullRequestOutcome
+    # Redirects ctx.cwd for every step after this one, once this step's slot settles
+    # (executor.run_steps folds it in the same place/way it folds step_outcomes). None
+    # (the default) leaves ctx.cwd untouched -- true for every step but WorktreeStep, whose
+    # whole job is pointing the rest of the pipeline at a freshly created worktree. See
+    # pipeline/AGENTS.md's WorktreeStep section for why this is a narrower, different kind
+    # of cross-step effect than step_outcomes (mandatory shared infrastructure state every
+    # later step's git calls depend on, not optional data a step may choose to read).
+    cwd_override: Path | None = None
 
 
 class Step(ABC):

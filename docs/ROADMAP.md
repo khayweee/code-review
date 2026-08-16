@@ -52,8 +52,13 @@ on the milestones before it.
    risk-flavored line from milestone 5. Requires the `gh` CLI (not installed as of the
    scaffold — install it when starting this milestone).
 9. **Head continuity** (rest of `pipeline/executor.py`). Add the in-memory "last approved
-   SHA" guard once more than one process/worktree can touch the same checkout. Not needed
-   while everything is single-threaded and single-worktree.
+   SHA" guard once more than one process/worktree can touch the same checkout. The
+   "single-worktree" half of that assumption no longer holds -- every `review` run now gets
+   its own throwaway `git worktree`, created by `WorktreeStep`
+   (`src/code_review/steps/worktree.py`), the pipeline's own first step -- but each run still
+   owns its worktree exclusively for its own lifetime (a second concurrent run on the same
+   branch fails fast on git's own "already checked out" collision, surfaced as an ordinary
+   step failure, rather than racing), so this guard still isn't needed yet.
 10. **Trust boundary** (`src/code_review/config.py`). Partition config into
     code-executing/trusted-only fields vs. descriptive/pushed-branch-is-fine fields, pinned
     to a fetched-fresh exact commit. Add this the moment the tool points at a repo where

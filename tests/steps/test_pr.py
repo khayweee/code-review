@@ -98,7 +98,12 @@ def _repo_on_feature_branch(origin_and_checkout: tuple[Path, Path]) -> Path:
 
 
 def _ctx(repo: Path, agent: _SpyAgent, **overrides: object) -> StepContext:
-    defaults: dict[str, object] = dict(cwd=repo, agent=agent, diff="", intent=_STAND_IN_INTENT)
+    # branch is unread by PRStep (it re-derives "the branch under review" from ctx.cwd's
+    # HEAD via gitutils.current_branch, see pr.py's own module docstring) -- a fixed
+    # placeholder is fine here, only WorktreeStep reads ctx.branch.
+    defaults: dict[str, object] = dict(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff="", intent=_STAND_IN_INTENT
+    )
     defaults.update(overrides)
     return StepContext(**defaults)  # type: ignore[arg-type]
 

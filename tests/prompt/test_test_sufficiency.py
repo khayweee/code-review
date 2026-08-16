@@ -31,7 +31,12 @@ def _ctx(
     fix_round: FixRound | None = None,
 ) -> StepContext:
     return StepContext(  # type: ignore[arg-type]
-        cwd=Path("."), agent=_SpyAgent(), diff=diff, intent=intent, fix_round=fix_round
+        cwd=Path("."),
+        branch="unused-placeholder",
+        agent=_SpyAgent(),
+        diff=diff,
+        intent=intent,
+        fix_round=fix_round,
     )
 
 

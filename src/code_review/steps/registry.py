@@ -22,9 +22,11 @@ from code_review.steps.pr import PRStep
 from code_review.steps.rebase import RebaseStep
 from code_review.steps.review import ReviewStep
 from code_review.steps.test_sufficiency import TestSufficiencyStep
+from code_review.steps.worktree import WorktreeStep
 
 # Every step this pipeline will ever run, in fixed order, present or not-yet-written.
 STEP_REGISTRY: tuple[str, ...] = (
+    "WorktreeStep",
     "IntentStep",
     "RebaseStep",
     "ReviewStep",
@@ -35,6 +37,7 @@ STEP_REGISTRY: tuple[str, ...] = (
 # Ordered prefix of `STEP_REGISTRY` that has a class today; `get_name()` must match the
 # corresponding position in `STEP_REGISTRY`.
 IMPLEMENTED_STEPS: tuple[type[Step], ...] = (
+    WorktreeStep,
     IntentStep,
     RebaseStep,
     ReviewStep,
@@ -46,6 +49,7 @@ IMPLEMENTED_STEPS: tuple[type[Step], ...] = (
 # raw class name. Must have exactly one entry per `STEP_REGISTRY` entry; enforced by
 # `tests/steps/test_registry.py`.
 STEP_DISPLAY_NAMES: dict[str, str] = {
+    "WorktreeStep": "Worktree",
     "IntentStep": "Intent",
     "RebaseStep": "Rebase",
     "ReviewStep": "Review",

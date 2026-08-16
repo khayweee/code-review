@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
 
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
@@ -43,6 +45,7 @@ from code_review.steps.pr import PullRequestOutcome
 from code_review.steps.registry import STEP_DISPLAY_NAMES, STEP_REGISTRY
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestArtifact, TestSufficiencyOutput
+from code_review.steps.worktree import sanitize_branch_name_for_path, worktrees_root
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp
 from code_review.tui.approval_relay import ApprovalRelay
@@ -133,6 +136,19 @@ _PR_OUTCOME = StepOutcome(
 )
 
 
+async def _simulate_worktree_activity(activity_relay: ActivityRelay) -> None:
+    """`WorktreeStep`'s real single `git worktree add` call, reported the same way every
+    other step's `steps/gitutils.py`-backed git call is -- target path (relative to `cwd`,
+    matching `create_worktree`'s own `os.path.relpath` -- see `steps/worktree.py`) and
+    branch included, not just the bare subcommand."""
+
+    branch_segment = sanitize_branch_name_for_path("fix/nil-check")
+    worktree_path = worktrees_root() / f"code_review_{branch_segment}_a1b2c3d"
+    relative_worktree_path = os.path.relpath(worktree_path, Path.cwd())
+    async with activity_relay.activity(f"git worktree add {relative_worktree_path} fix/nil-check"):
+        await asyncio.sleep(0.4)
+
+
 async def _simulate_git_activity(activity_relay: ActivityRelay) -> None:
     """`RebaseStep`'s real individual `git fetch`/`git rebase` calls, each its own
     `activity()` span reported ambiently by `steps/gitutils.py`'s `run_git` -- reported here
@@ -181,11 +197,12 @@ async def _simulate_pr_activity(activity_relay: ActivityRelay) -> None:
 async def _fake_events(
     fail: bool, activity_relay: ActivityRelay, approval_relay: ApprovalRelay
 ) -> AsyncIterator[StepEvent]:
-    """Steps in `STEP_REGISTRY` order, all five with a class today (see `registry.py`), so
+    """Steps in `STEP_REGISTRY` order, all six with a class today (see `registry.py`), so
     none render as a pending placeholder.
 
     Each step's `simulate_activity` callable stands in for the nested sub-step activity
-    issues #64/#65 report for real (`RebaseStep`'s individual `git fetch`/`git rebase` spans
+    issues #64/#65 report for real (`WorktreeStep`'s single `git worktree add` span via
+    `_simulate_worktree_activity`; `RebaseStep`'s individual `git fetch`/`git rebase` spans
     via `_simulate_git_activity`; `ReviewStep`/`TestSufficiencyStep`'s one coarse agent-call
     span plus nested one-shot tool-call events via `_simulate_agent_call`; `PRStep`'s `git
     diff`/`gh pr view`/`gh pr create` spans via `_simulate_pr_activity`) -- reported here
@@ -210,6 +227,7 @@ async def _fake_events(
     """
 
     steps: list[tuple[str, StepOutcome, Callable[[ActivityRelay], Awaitable[None]] | None]] = [
+        ("WorktreeStep", _NO_FINDINGS, _simulate_worktree_activity),
         ("IntentStep", _INTENT_OUTCOME, None),
         ("RebaseStep", _NO_FINDINGS, _simulate_git_activity),
         (

@@ -3,10 +3,44 @@
 Scope: this package only. See the [root AGENTS.md](../../../AGENTS.md) for repo-wide
 conventions.
 
+## worktree.py
+
+`WorktreeStep`, the pipeline's actual first step (`STEP_REGISTRY`'s first entry): creates a
+throwaway `git worktree` with `ctx.branch` checked out for real (never `--detach`, so
+`rebase.py`'s/`pr.py`'s own "the branch under review is `ctx.cwd`'s HEAD" assumption below
+actually holds by the time either of them runs) and redirects every later step's `ctx.cwd`
+at it via `StepOutcome.cwd_override` -- see `pipeline/AGENTS.md`'s WorktreeStep section for
+the full mechanism and why it needed a new field rather than reusing `step_outcomes`.
+
+- Moved here from a short-lived top-level `src/code_review/worktree.py` the moment it grew a
+  real `Step` -- that placement's whole justification (no `pipeline`/`steps` dependency) no
+  longer held once it depended on both.
+- `resolve_branch_head_short_sha`/`create_worktree` are async, built on `gitutils.py`'s
+  `run_git`, exactly like every other step's git subprocess work (non-blocking, reported as
+  ambient TUI activity). `remove_worktree` stays sync and does NOT go through `run_git`:
+  `cli.py`'s `review` calls it directly after the TUI has fully exited (no running step, so
+  no ambient `ActivityReporter` for it to report through), the same pre/post-TUI sync
+  convention `cli.py`'s own `_verify_branch`/`_diff_against_default_branch` already use.
+  `--force`d, since a run may leave uncommitted edits behind (e.g. an unfinished fix round
+  never committed) -- `--keep-worktree` is the escape hatch for a user who wants those
+  preserved instead of discarded by this cleanup.
+- `BranchAlreadyCheckedOutError` (branch already checked out in another worktree of this
+  same repo, most commonly the user's own main working copy) is raised straight out of
+  `WorktreeStep.run`, uncaught -- it surfaces as an ordinary step failure through
+  `ReviewApp`/`cli.py`'s already-generic failed-run path, exactly like e.g. `RebaseStep`'s
+  own unclassified-`git`-failure `RuntimeError`, not a special pre-TUI exit.
+- Naming: `<state_dir>/worktrees/code_review_<branch_name>_<short_hash_head>`, where
+  `branch_name` is `ctx.branch` with `/` (and other filesystem-unsafe characters) replaced
+  so the directory name is always one valid path segment, and `short_hash_head` is `ctx.
+  branch`'s own tip commit's short SHA, resolved in the user's real repo before the worktree
+  exists.
+
 ## intent.py
 
-Holds the `Intent` dataclass and `IntentStep`, the pipeline's first step — carries
-`ctx.intent` (built once by `cli.py` from `--intent`) forward with no agent call.
+Holds the `Intent` dataclass and `IntentStep`, the first step to actually answer "what is
+this change trying to do" (`worktree.py`'s `WorktreeStep` runs before it -- pure environment
+setup, not part of answering that question) — carries `ctx.intent` (built once by `cli.py`
+from `--intent`) forward with no agent call.
 
 - `IntentStep` never calls `wrap_intent` and never hands wrapped intent text forward
   through its `StepOutcome` — it carries `ctx.intent` as-is (Milestone 3, issue #19).
