@@ -62,7 +62,7 @@ class _SpyAgent:
 def test_intent_step_never_invokes_the_agent_it_is_given() -> None:
     spy = _SpyAgent()
     intent = Intent(summary="add retry logic", source="explicit", score=1.0)
-    ctx = StepContext(cwd=Path("."), agent=spy, diff="", intent=intent)
+    ctx = StepContext(cwd=Path("."), branch="unused-placeholder", agent=spy, diff="", intent=intent)
 
     asyncio.run(IntentStep().run(ctx))
 
@@ -72,7 +72,7 @@ def test_intent_step_never_invokes_the_agent_it_is_given() -> None:
 def test_intent_step_returns_a_deterministic_outcome_carrying_ctx_intent() -> None:
     spy = _SpyAgent()
     intent = Intent(summary="add retry logic", source="explicit", score=1.0)
-    ctx = StepContext(cwd=Path("."), agent=spy, diff="", intent=intent)
+    ctx = StepContext(cwd=Path("."), branch="unused-placeholder", agent=spy, diff="", intent=intent)
 
     outcome = asyncio.run(IntentStep().run(ctx))
 
@@ -89,7 +89,7 @@ def test_intent_step_raises_a_clear_error_if_ctx_intent_is_missing() -> None:
     confusingly deep inside a later step that assumes `ctx.intent` is present."""
 
     spy = _SpyAgent()
-    ctx = StepContext(cwd=Path("."), agent=spy, diff="", intent=None)  # type: ignore[arg-type]
+    ctx = StepContext(cwd=Path("."), branch="unused-placeholder", agent=spy, diff="", intent=None)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="intent"):
         asyncio.run(IntentStep().run(ctx))

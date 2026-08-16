@@ -9,6 +9,9 @@ are "no-op" and "auto-fix" -- the only actions that survive filtering, so the re
 `risk_level` starts at "low" so the scope filter's risk-reset branch never triggers here;
 that reset path already has its own regression coverage in `tests/steps/test_review.py`'s
 Milestone 5/issue #26 tests.
+
+Also reports `usage`/`total_cost_usd` (see `claude_cli.py`'s `_usage_from`), proving
+`ReviewStep.run` threads `Result.usage` onto its returned `StepOutcome.usage`.
 """
 
 from __future__ import annotations
@@ -42,6 +45,8 @@ response = {
         ],
         "risk_level": "low",
         "risk_rationale": "only style-level findings on author-written code",
-    }
+    },
+    "usage": {"input_tokens": 1200, "output_tokens": 340},
+    "total_cost_usd": 0.0421,
 }
 print(json.dumps(response))

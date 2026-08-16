@@ -257,6 +257,121 @@ def test_log_nested_inside_an_activity_records_that_activity_as_its_parent() -> 
     assert outer_finished.parent_id is None
 
 
+def test_start_queues_a_started_event_with_the_ambient_activity_as_parent() -> None:
+    async def scenario() -> list[ActivityEvent]:
+        relay = ActivityRelay()
+        async with relay.activity("outer"):
+            activity_id = await relay.start("tool call")
+            await relay.finish(activity_id, "tool call")
+        events = []
+        for _ in range(4):
+            events.append(await relay.next_event())
+        return events
+
+    outer_started, tool_started, tool_finished, _outer_finished = asyncio.run(scenario())
+
+    assert tool_started.status == "started"
+    assert tool_started.label == "tool call"
+    assert tool_started.parent_id == outer_started.activity_id
+    assert tool_finished.activity_id == tool_started.activity_id
+
+
+def test_start_and_finish_do_not_affect_ambient_nesting_for_later_activities() -> None:
+    """`start`/`finish` must not touch the ambient `_current_activity_id` `activity()` uses
+    for auto-nesting: a span opened via `start` has no children of its own in this design,
+    and a later, unrelated `activity()`/`log()` call must still nest under whatever was
+    ambient before `start` ran, not under the still-open (or since-closed) `start` span."""
+
+    async def scenario() -> list[ActivityEvent]:
+        relay = ActivityRelay()
+        async with relay.activity("outer"):
+            activity_id = await relay.start("tool call")
+            await relay.log("narration")
+            await relay.finish(activity_id, "tool call")
+        events = []
+        for _ in range(6):
+            events.append(await relay.next_event())
+        return events
+
+    (
+        outer_started,
+        _tool_started,
+        narration_started,
+        _narration_finished,
+        _tool_finished,
+        _outer_finished,
+    ) = asyncio.run(scenario())
+
+    assert narration_started.label == "narration"
+    assert narration_started.parent_id == outer_started.activity_id
+
+
+def test_two_interleaved_start_finish_pairs_share_the_same_enclosing_parent() -> None:
+    """Two tool calls opened before either closes (e.g. Claude calling two tools in one
+    turn: TOOL_USE, TOOL_USE, TOOL_RESULT, TOOL_RESULT) must both nest under the same
+    enclosing activity, never under each other."""
+
+    async def scenario() -> list[ActivityEvent]:
+        relay = ActivityRelay()
+        async with relay.activity("outer"):
+            first_id = await relay.start("first tool")
+            second_id = await relay.start("second tool")
+            await relay.finish(first_id, "first tool")
+            await relay.finish(second_id, "second tool")
+        events = []
+        for _ in range(6):
+            events.append(await relay.next_event())
+        return events
+
+    (
+        outer_started,
+        first_started,
+        second_started,
+        first_finished,
+        second_finished,
+        _outer_finished,
+    ) = asyncio.run(scenario())
+
+    assert first_started.parent_id == outer_started.activity_id
+    assert second_started.parent_id == outer_started.activity_id
+    assert first_finished.parent_id == outer_started.activity_id
+    assert second_finished.parent_id == outer_started.activity_id
+    assert first_started.activity_id != second_started.activity_id
+
+
+def test_finish_carries_a_real_elapsed_duration() -> None:
+    async def scenario() -> list[ActivityEvent]:
+        relay = ActivityRelay()
+        activity_id = await relay.start("slow tool")
+        await asyncio.sleep(0.05)
+        await relay.finish(activity_id, "slow tool")
+        started = await relay.next_event()
+        finished = await relay.next_event()
+        return [started, finished]
+
+    started, finished = asyncio.run(scenario())
+
+    assert finished.timestamp - started.timestamp >= 0.05
+
+
+def test_finish_error_lands_on_the_finished_events_error_field() -> None:
+    """Mirrors `ActivityHandle.fail(detail)`'s existing "started" event never carries an
+    error, only "finished" does -- convention for the `activity()`/block-shaped path."""
+
+    async def scenario() -> list[ActivityEvent]:
+        relay = ActivityRelay()
+        activity_id = await relay.start("Tool: Read(/fake/missing.txt)")
+        await relay.finish(activity_id, "Tool: Read(/fake/missing.txt)", error="file not found")
+        started = await relay.next_event()
+        finished = await relay.next_event()
+        return [started, finished]
+
+    started, finished = asyncio.run(scenario())
+
+    assert started.error is None
+    assert finished.error == "file not found"
+
+
 def test_next_event_blocks_until_an_activity_is_reported() -> None:
     async def scenario() -> ActivityEvent:
         relay = ActivityRelay()

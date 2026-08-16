@@ -1,6 +1,6 @@
 """Shared base class for bordered, auto-height boxes: `PipelineBox` and `StatusBox`.
 
-`FindingsList` needs a `Vertical` instead of a `Static`, so it duplicates this CSS
+`FindingBox` needs a `Vertical` instead of a `Static`, so it duplicates this CSS
 rule rather than subclassing this.
 """
 

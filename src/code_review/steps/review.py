@@ -96,7 +96,7 @@ class ReviewStep(Step):
             # path when there's nothing to stream tool calls to -- e.g. every test that
             # runs ReviewStep against a fake CLI without a StepContext.activity_reporter.
             on_stream_event = (
-                tool_stream_relay(ctx.activity_reporter)
+                tool_stream_relay(ctx.activity_reporter, ctx.cwd)
                 if ctx.activity_reporter is not None
                 else None
             )
@@ -123,4 +123,5 @@ class ReviewStep(Step):
             needs_approval=blocking,
             auto_fixable=auto_fixable,
             payload=filtered,
+            usage=result.usage,
         )

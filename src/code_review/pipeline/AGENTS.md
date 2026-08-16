@@ -89,10 +89,16 @@ including from code that has no direct access to the step's own context.
   stream to disk. See `pipeline/README.md`'s "Reporting sub-step activity" section for the
   full usage contract.
 - `steps/tool_activity.py`'s `tool_stream_relay` (shared between `ReviewStep`/
-  `TestSufficiencyStep`) is the other consumer of the one-shot `log`/`log_activity` path
-  above, translating a streamed agent call's `StreamEvent`s into activity log lines --
-  tool calls, errored tool results, and (a later increment) the model's own streamed
-  narration text. See that module's own docstring for the full mapping.
+  `TestSufficiencyStep`) translates a streamed agent call's `StreamEvent`s into activity log
+  lines: narration text stays one-shot via `log`/`log_activity`, but a tool call's real
+  duration only exists as the span between its `TOOL_USE` and matching `TOOL_RESULT` event,
+  so a later increment added a third `ActivityReporter` shape for exactly that --
+  `start`/`finish` (and their null-safe `start_activity`/`finish_activity` wrappers),
+  open/closed at two different callback call sites rather than one `async with` block,
+  deliberately never touching the ambient nesting `activity()` uses (a span opened this way
+  has no children, and two may be genuinely concurrent). An errored `TOOL_RESULT` finishes
+  that same span with `error` set, mirroring `ActivityHandle.fail(detail)`, instead of
+  logging a second, distinct activity. See that module's own docstring for the full mapping.
 
 ## Milestone 7, ticket 1: the approval park (#80)
 
@@ -146,7 +152,7 @@ fixes first, and a human can request as many manual fix rounds as they want at a
   (`tests/steps/test_review.py`'s "Fix mode" section) and a real `code-review review` run.
 - Issue #98 later added a sibling pure function, `describe_finding_decisions`, reusing
   `describe_auto_fix_findings`'s exact rendering convention for a different producer: a
-  human's own per-finding "fix" instructions from `tui.widgets.FindingsList`'s per-finding
+  human's own per-finding "fix" instructions from `tui.widgets.FindingBox`'s per-finding
   approval-park decisions, not the automatic auto-fix path. `ApprovalResponse`/`FixRound`
   themselves stay untouched by that issue -- both remain a single flat `instructions: str |
   None` -- since the aggregation happens entirely on the `tui/` side before a park resolves;
@@ -228,3 +234,93 @@ duck-typed its way back to one of those four via `isinstance`/`getattr`.
   `getattr(payload, "findings", None)` fallback yields `None` for it (same as `Intent`), and
   `tui/state.py`'s `latest_findings` isinstance-narrowing simply never matches it -- neither
   needed a code change for the new member.
+
+## Worktree isolation: `StepContext.branch`, `StepOutcome.cwd_override`, `WorktreeStep`
+
+`cli.py review` used to create the run's throwaway `git worktree` itself, pre-pipeline, and
+pass the resulting path straight into `StepContext(cwd=...)`. Moved into a real, registered
+first step (`steps/worktree.py`'s `WorktreeStep`) so that *any* caller of `run_steps` --
+not only `cli.py`'s specific `review` command -- gets worktree isolation for free, at the
+cost of two new, honestly-different additions to the shared types `step_outcomes` alone
+didn't cover:
+
+- `StepContext.branch: str` -- required, alongside `cwd`/`agent`/`diff`/`intent`.
+  `WorktreeStep` needs the branch under review before any worktree (and so before `ctx.cwd`'s
+  HEAD) exists to derive it from, and checks it out **detached** at its tip commit -- never
+  by name -- so the throwaway worktree never shares a mutable branch ref with wherever else
+  `ctx.branch` happens to be checked out (most commonly the user's own real checkout; see
+  `steps/worktree.py`'s module docstring for the corruption a by-name checkout risked).
+  `RebaseStep` still re-derives nothing (`git rebase` works the same on a detached HEAD), but
+  a detached `ctx.cwd` has no branch name for `gitutils.current_branch` to find, so `PRStep`
+  reads `ctx.branch` directly instead -- the one other reason to thread it past `WorktreeStep`.
+  Do not add a third without an equally real reason; `ctx.branch` is otherwise still meant to
+  stay `WorktreeStep`/`PRStep`-only, not a general-purpose "the branch" field every step reads.
+- `StepOutcome.cwd_override: Path | None = None` -- lets a step redirect `ctx.cwd` for every
+  step after it. `executor.run_steps` folds a non-`None` `cwd_override` into the outer `ctx`
+  at the exact same point it already folds `step_outcomes` (once a step's slot fully
+  settles), via the same `dataclasses.replace(ctx, ...)` call.
+
+**Why this needed a new mechanism instead of reusing `step_outcomes`, and why that doesn't
+reverse the "no step branches on a sibling's outcome to decide whether/how to run" invariant
+(this file's Milestone 2 entry, `executor.py`'s own module docstring):** every step still
+runs, unconditionally, in the same fixed order -- nothing here changes *whether* or *when* a
+step runs, only the resource path (`ctx.cwd`) it runs against, which `step_outcomes`'s own
+read-only, opt-in-per-consumer contract was never designed to carry. Be honest that this is
+narrower than `step_outcomes`'s justification, not a restatement of it: `step_outcomes` is
+optional, per-consumer data a step *may choose* to read to shape its own output (e.g. `PRStep`
+rendering `ReviewStep`'s risk verdict, or not, if `step_outcomes` is empty); `cwd_override` is
+mandatory shared infrastructure state -- every step after `WorktreeStep` *must* see the
+redirected `cwd`, or its `git`/agent calls would silently operate on the wrong (or, absent
+`WorktreeStep`, nonexistent-until-now) working directory. Only `WorktreeStep` is expected to
+ever set it; nothing in the type system stops another step from doing so, but nothing else
+should.
+
+**Fix-round interaction**: `WorktreeStep` does not set `supports_fix_round = True` and never
+sets `needs_approval`/`auto_fixable`, so `executor.py`'s inner `while True` loop runs it
+exactly once per pipeline run -- `round_ctx` and the outer `ctx` are identical for its one
+and only round, so there is no meaningful "which `ctx` does `cwd_override` apply to"
+ambiguity to resolve. The fold happens on the outer `ctx` at the same point `step_outcomes`
+already does, immediately after `WorktreeStep`'s single round settles, before `RebaseStep`
+(the next step in `STEP_REGISTRY`) ever builds its own `round_ctx` from that updated `ctx`.
+
+**Failure surface**: `WorktreeStep.run` raises straight through on any git failure -- a
+plain `RuntimeError` carrying git's own stderr, exactly like e.g. `RebaseStep`'s own
+unclassified-`git`-failure `RuntimeError`. `executor.run_steps` does nothing special with
+it; it propagates out of the async generator, caught by `tui/app.py`'s `_consume_events`
+and surfaced via `ReviewApp.error` same as any other step failure, rendered as a normal
+failed-step Status message through `cli.py`'s already-generic `if tui_app.error is not
+None` path. This is a genuine behavior change from the pre-`WorktreeStep` design (a
+pre-TUI `typer.Exit` with no TUI flash) but a deliberate one: it makes `WorktreeStep`
+failures look and behave like every other pipeline-step failure, rather than a special
+case. (An earlier version of `WorktreeStep` checked `<branch>` out by name and raised a
+dedicated `BranchAlreadyCheckedOutError` when it collided with another checkout of the
+same branch -- removed once the by-name checkout itself was, since a detached checkout
+can't collide in the first place; see `steps/worktree.py`.)
+
+## Run report: `StepOutcome.usage`, `run_report.py`
+
+The TUI's Status box now shows a run's total LLM token usage plus a per-step breakdown,
+alongside its existing "Pipeline ran successfully"/"Pipeline failed" message -- v1, token
+usage only; a later stat (e.g. issues identified/fixed) is a plain addition to
+`PipelineRunReport`, not scaffolding built ahead of need.
+
+- `StepOutcome.usage: Usage | None = None` (last field, `agent.Usage`) -- one round's
+  agent-call usage, or `None` for a step that made no agent call. `ReviewStep`/
+  `TestSufficiencyStep` are the only two steps that set it (`result.usage` off their own
+  `ctx.agent.run(...)` call); every other step leaves it at the default.
+- `run_report.py` (inside `pipeline/`, not top-level like `run_log.py` -- it only ever needs
+  `StepEvent`/`StepOutcome`/`agent.Usage`, all already reachable from `pipeline/`, unlike
+  `run_log.py`'s genuine need for both `pipeline.schemas` and `tui.schemas`). Mirrors
+  `tui/state.py`'s shape: pure functions over a `Sequence[StepEvent]`, no Textual import.
+  `build_run_report` sums each step's `usage` across every round it ran (a
+  `supports_fix_round` step can run more than once per slot -- see "Milestone 7, ticket 2"
+  above) into a `PipelineRunReport`; a step that never set `usage` is omitted from
+  `per_step`, not rendered as a zeroed row, and a run with no usage data anywhere reports
+  `None` totals, not `0`. `format_run_report` renders it as plain text, returning `""` (no
+  block, not an empty one) when `per_step` is empty.
+- `tui/state.py`'s `final_status_message` gained optional `report`/`display_names` params
+  appending `format_run_report`'s text between the outcome line and the exit hint;
+  `ReviewApp.run_report` (`tui/app.py`) is built from `self._seen` via `build_run_report` in
+  `_consume_events`'s `finally`, unconditionally (a partial report on a failed run is still
+  useful, not misleading). `cli.py`'s run-log write passes the same report through, so the
+  persisted log matches what the TUI showed.

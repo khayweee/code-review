@@ -36,7 +36,7 @@ meaning changes, edit the glossary in the same commit. It owns what words mean;
   (starting with `claude`), one call in / one result out.
 - `src/code_review/pipeline/` — `Step` protocol, `StepContext`/`StepOutcome`, and the
   executor (fixed step order; fix/approval loop added later).
-- `src/code_review/steps/` — the actual pipeline steps: intent, rebase, review,
+- `src/code_review/steps/` — the actual pipeline steps: worktree, intent, rebase, review,
   test_sufficiency, pr.
 - `src/code_review/prompt/` — pure prompt-construction helpers (sanitize/wrap/clause
   builders) used by the steps above; a leaf package depended on by `steps/`, not the

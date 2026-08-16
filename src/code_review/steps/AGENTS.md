@@ -3,10 +3,47 @@
 Scope: this package only. See the [root AGENTS.md](../../../AGENTS.md) for repo-wide
 conventions.
 
+## worktree.py
+
+`WorktreeStep`, the pipeline's actual first step (`STEP_REGISTRY`'s first entry): creates a
+throwaway `git worktree`, checked out **detached** at `ctx.branch`'s tip commit, and
+redirects every later step's `ctx.cwd` at it via `StepOutcome.cwd_override` -- see
+`pipeline/AGENTS.md`'s WorktreeStep section for the full mechanism and why it needed a new
+field rather than reusing `step_outcomes`.
+
+- Moved here from a short-lived top-level `src/code_review/worktree.py` the moment it grew a
+  real `Step` -- that placement's whole justification (no `pipeline`/`steps` dependency) no
+  longer held once it depended on both.
+- `resolve_branch_head_short_sha`/`create_worktree` are async, built on `gitutils.py`'s
+  `run_git`, exactly like every other step's git subprocess work (non-blocking, reported as
+  ambient TUI activity). `remove_worktree` stays sync and does NOT go through `run_git`:
+  `cli.py`'s `review` calls it directly after the TUI has fully exited (no running step, so
+  no ambient `ActivityReporter` for it to report through), the same pre/post-TUI sync
+  convention `cli.py`'s own `_verify_branch`/`_diff_against_default_branch` already use.
+  `--force`d, since a run may leave uncommitted edits behind (e.g. an unfinished fix round
+  never committed) -- `--keep-worktree` is the escape hatch for a user who wants those
+  preserved instead of discarded by this cleanup.
+- `create_worktree` checks `ctx.branch` out with `git worktree add --detach`, never by name.
+  Reviewing the branch you're currently on (so `ctx.branch` is already HEAD in the user's
+  real checkout) is the ordinary workflow, not an edge case, and a real by-name checkout
+  would either refuse (git's own "already checked out" collision) or, forced past, share the
+  branch *ref* across both worktrees -- `RebaseStep`'s in-place rebase inside the throwaway
+  worktree would then silently rewrite the user's own checkout's branch ref out from under
+  its stale index/working tree. Detached, that ref is never touched at all, so it can never
+  collide with (or corrupt) any other checkout of the same branch. See `pr.py`'s own bullet
+  below for what this costs `PRStep`.
+- Naming: `<state_dir>/worktrees/code_review_<branch_name>_<short_hash_head>`, where
+  `branch_name` is `ctx.branch` with `/` (and other filesystem-unsafe characters) replaced
+  so the directory name is always one valid path segment, and `short_hash_head` is `ctx.
+  branch`'s own tip commit's short SHA, resolved in the user's real repo before the worktree
+  exists.
+
 ## intent.py
 
-Holds the `Intent` dataclass and `IntentStep`, the pipeline's first step — carries
-`ctx.intent` (built once by `cli.py` from `--intent`) forward with no agent call.
+Holds the `Intent` dataclass and `IntentStep`, the first step to actually answer "what is
+this change trying to do" (`worktree.py`'s `WorktreeStep` runs before it -- pure environment
+setup, not part of answering that question) — carries `ctx.intent` (built once by `cli.py`
+from `--intent`) forward with no agent call.
 
 - `IntentStep` never calls `wrap_intent` and never hands wrapped intent text forward
   through its `StepOutcome` — it carries `ctx.intent` as-is (Milestone 3, issue #19).
@@ -44,6 +81,8 @@ risk verdict, with an added fix-mode round for driving edits before parking for 
   the live working tree rather than the stale `ctx.diff` string a prior round's own edits
   invalidate (see `prompt/AGENTS.md`'s `review.py` section for what the fix-mode prompt asks
   the agent to do differently).
+- Also threads `result.usage` onto its returned `StepOutcome.usage` (see
+  `pipeline/AGENTS.md`'s "Run report" section) -- no shape change to the step itself.
 
 ## test_sufficiency.py
 
@@ -69,6 +108,8 @@ schema/orchestration split and its fix-mode support.
   separately-defined, same-named local constant rather than an import from `review.py`, per
   issue #58's no-cross-step-sharing decision.
 - Registered in `STEP_REGISTRY`'s `IMPLEMENTED_STEPS` and wired into `cli.py` (issue #60).
+- Also threads `result.usage` onto its returned `StepOutcome.usage`, mirroring `review.py`'s
+  identical addition (see `pipeline/AGENTS.md`'s "Run report" section).
 
 ## pr.py
 
@@ -91,10 +132,13 @@ Assembles PR evidence and opens the pull request via `gh` - the pipeline's last 
   would over-report files - everything origin gained since the local ref was last updated,
   on top of the real feature-branch delta (pinned by a regression test in
   `tests/steps/test_pr.py`).
-- **"The branch under review" is HEAD**, exactly like `rebase.py`: resolved via
-  `gitutils.current_branch(ctx.cwd)`, never a `StepContext` field. Equal to
-  `default_branch` (a constructor field, same "not auto-detected" reasoning as
-  `RebaseStep`'s own) means skip immediately - no `git diff`/`gh` call at all.
+- **"The branch under review" is `ctx.branch`**, unlike `rebase.py` (which needs no branch
+  name at all). `WorktreeStep` checks its worktree out detached (`steps/worktree.py`'s
+  module docstring), so `gitutils.current_branch(ctx.cwd)` would just return `None` here;
+  `gh pr create --head`/`gh pr view` only ever needed the branch as a name, never an actual
+  local checkout of it. Equal to `default_branch` (a constructor field, same "not
+  auto-detected" reasoning as `RebaseStep`'s own) means skip immediately - no `git diff`/
+  `gh` call at all.
 - Intent/Risk/Testing sections are assembled from the pipeline's own already-computed
   state: `ctx.intent.summary` for Intent, and `ctx.step_outcomes.get("ReviewStep")` /
   `ctx.step_outcomes.get("TestSufficiencyStep")` (see `pipeline/AGENTS.md`'s
@@ -139,12 +183,13 @@ of its own.
   `wrap_intent`/`redact_secrets`/`strip_adversarial` convention, signalling "safe for a
   sibling step module to import" - realized by `steps/pr.py` (issue #119), which calls
   `run_git(["diff", "--name-status", ...])` directly for its deterministic "What Changed"
-  section, and by `current_branch` (issue #119, mirrors `ref_sha`'s `None`-on-failure
-  convention), which both `pr.py` and `scm/github.py`'s `resolve_repo_slug` call. The
-  latter is this module's first consumer *outside* `steps/` -- `scm/` importing
-  `steps.gitutils.run_git` (rather than a new `gh`-only subprocess helper) is a deliberate,
-  narrow exception, not a general "scm/ may import steps/" license; see
-  `scm/AGENTS.md`.
+  section. `scm/github.py`'s `resolve_repo_slug` also calls `run_git` directly, the first
+  consumer of this module *outside* `steps/` -- `scm/` importing `steps.gitutils.run_git`
+  (rather than a new `gh`-only subprocess helper) is a deliberate, narrow exception, not a
+  general "scm/ may import steps/" license; see `scm/AGENTS.md`. `current_branch` (mirrors
+  `ref_sha`'s `None`-on-failure convention) has no consumer today -- `pr.py` used it until
+  `WorktreeStep` started checking worktrees out detached, at which point it switched to
+  reading `ctx.branch` directly (see `worktree.py`'s and `pr.py`'s own bullets above).
 - `run_git` reports itself as a timed activity (Milestone 14, issue #64) for every call it
   makes, with zero changes at any of `rebase.py`'s own call sites — it reaches the running
   step's `ActivityReporter` ambiently (`pipeline.step.current_activity_reporter`), not

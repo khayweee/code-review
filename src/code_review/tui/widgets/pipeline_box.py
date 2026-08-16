@@ -49,18 +49,40 @@ def format_row(row: StepRow) -> str:
     return f"{icon} {row.name}{duration}{detail}"
 
 
-def format_activity_row(activity: ActivityRow, *, is_last: bool) -> str:
+def format_activity_row(activity: ActivityRow, *, is_last: bool, depth: int = 1) -> str:
     """Render one `ActivityRow` as a directory-tree-style line beneath its owning step.
 
     `is_last` picks the closing `└ ` connector vs. a continuing `├ `; the caller computes
-    it since this function only sees one row at a time.
+    it since this function only sees one row at a time. `depth` is how many activity levels
+    deep this row sits (1 for a row reported directly under its step, 2 for a tool call an
+    agent made while that agent's own span was open, via `ActivityRow.children`, etc.) --
+    each level adds one more `"  "` of indent so a child visibly nests under its parent
+    rather than reading as a sibling at the same indent.
     """
 
     connector = "└ " if is_last else "├ "
     icon = _STATUS_ICONS[activity.status]
     duration = "" if activity.duration is None else f"  {format_duration(activity.duration)}"
     detail = "" if activity.detail is None else f"  {activity.detail}"
-    return f"  {connector} {icon} {activity.label}{duration}{detail}"
+    indent = "  " * depth
+    return f"{indent}{connector} {icon} {activity.label}{duration}{detail}"
+
+
+def _iter_activity_lines(
+    activities: Sequence[ActivityRow], *, depth: int = 1
+) -> list[tuple[ActivityRow, int, bool]]:
+    """Flatten `activities` (and, recursively, each one's own `children`) into
+    `(activity, depth, is_last)` triples in tree display order -- a row immediately
+    followed by its own children before any of its siblings, each level one `depth` deeper
+    than its parent. Shared by `render_rows`/`render_rows_live` so both walk the same tree
+    the same way."""
+
+    lines: list[tuple[ActivityRow, int, bool]] = []
+    last_index = len(activities) - 1
+    for index, activity in enumerate(activities):
+        lines.append((activity, depth, index == last_index))
+        lines.extend(_iter_activity_lines(activity.children, depth=depth + 1))
+    return lines
 
 
 def render_rows(rows: Sequence[StepRow]) -> str:
@@ -70,10 +92,9 @@ def render_rows(rows: Sequence[StepRow]) -> str:
     lines = []
     for row in rows:
         lines.append(format_row(row))
-        last_index = len(row.activities) - 1
         lines.extend(
-            format_activity_row(activity, is_last=index == last_index)
-            for index, activity in enumerate(row.activities)
+            format_activity_row(activity, is_last=is_last, depth=depth)
+            for activity, depth, is_last in _iter_activity_lines(row.activities)
         )
     return "\n".join(lines)
 
@@ -156,11 +177,10 @@ def render_rows_live(rows: Sequence[StepRow], spinners: dict[str, Spinner]) -> G
         step_table.add_row(*_render_row(row, spinners))
         renderables.append(step_table)
 
-        last_index = len(row.activities) - 1
-        for index, activity in enumerate(row.activities):
+        for activity, depth, is_last in _iter_activity_lines(row.activities):
             renderables.append(
                 Text(
-                    format_activity_row(activity, is_last=index == last_index),
+                    format_activity_row(activity, is_last=is_last, depth=depth),
                     style=_ACTIVITY_STYLE,
                 )
             )

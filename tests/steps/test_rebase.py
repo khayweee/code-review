@@ -82,7 +82,12 @@ def _init_repo(path: Path) -> None:
 
 
 def _ctx(checkout: Path, agent: _SpyAgent) -> StepContext:
-    return StepContext(cwd=checkout, agent=agent, diff="", intent=_STAND_IN_INTENT)
+    # branch is unread by RebaseStep (it re-derives "the branch under review" from ctx.cwd's
+    # HEAD, see rebase.py's own module docstring) -- a fixed placeholder is fine here, only
+    # WorktreeStep reads ctx.branch.
+    return StepContext(
+        cwd=checkout, branch="unused-placeholder", agent=agent, diff="", intent=_STAND_IN_INTENT
+    )
 
 
 def _assert_not_mid_rebase(checkout: Path) -> None:
@@ -409,6 +414,7 @@ async def _approve(step_name: str, outcome: StepOutcome) -> ApprovalResponse:
 def _ctx_with_relay(checkout: Path, agent: _SpyAgent, relay: ActivityRelay) -> StepContext:
     return StepContext(
         cwd=checkout,
+        branch="unused-placeholder",
         agent=agent,
         diff="",
         intent=_STAND_IN_INTENT,

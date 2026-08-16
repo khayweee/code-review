@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from code_review.agent import Agent, ClaudeCLI, ProcessExitError
+from code_review.agent import Agent, ClaudeCLI, ProcessExitError, Usage
 from code_review.pipeline import (
     ApprovalResponse,
     Step,
@@ -181,7 +181,9 @@ def test_review_step_outcome_is_clean_and_auto_fixable_after_scope_filtering(
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=CLEAN_FAKE_CLI)
 
     outcome = asyncio.run(step.run(ctx))
@@ -197,6 +199,24 @@ def test_review_step_outcome_is_clean_and_auto_fixable_after_scope_filtering(
     assert outcome.auto_fixable is True
 
 
+def test_review_step_outcome_carries_the_agent_calls_usage(tmp_path: Path) -> None:
+    """`ReviewStep.run` threads `Result.usage` straight onto its returned
+    `StepOutcome.usage` -- `CLEAN_FAKE_CLI` reports `usage`/`total_cost_usd` (see
+    `claude_cli.py`'s `_usage_from`)."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
+    step: Step = ReviewStep(executable=CLEAN_FAKE_CLI)
+
+    outcome = asyncio.run(step.run(ctx))
+    asyncio.run(agent.close())
+
+    assert outcome.usage == Usage(input_tokens=1200, output_tokens=340, total_cost_usd=0.0421)
+
+
 def test_review_step_needs_approval_and_is_not_auto_fixable_on_an_ask_user_finding(
     tmp_path: Path,
 ) -> None:
@@ -208,7 +228,12 @@ def test_review_step_needs_approval_and_is_not_auto_fixable_on_an_ask_user_findi
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, on_approval_needed=_approve
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        on_approval_needed=_approve,
     )
     step: Step = ReviewStep(executable=BLOCKING_FAKE_CLI)
 
@@ -232,7 +257,9 @@ def test_review_step_prompt_includes_intent_conformance_clause_for_explicit_inte
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
@@ -252,7 +279,9 @@ def test_review_step_prompt_omits_intent_conformance_clause_for_non_explicit_int
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_INFERRED_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_INFERRED_INTENT
+    )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
@@ -279,7 +308,9 @@ def test_review_step_calls_agent_exactly_once_per_round(tmp_path: Path) -> None:
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
     events = asyncio.run(_collect([step], ctx))
@@ -319,7 +350,9 @@ def test_review_step_automatic_fix_round_edits_the_tree_and_returns_a_fresh_revi
     original_greeting = (repo / "greeting.txt").read_text()
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = ReviewStep(executable=AUTO_FIX_ROUND_FAKE_CLI)
 
     events = asyncio.run(_collect([step], ctx))
@@ -390,7 +423,12 @@ def test_review_step_reports_exactly_one_activity_span_for_the_agent_call(
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=PROMPT_PROBE_FAKE_CLI)
 
@@ -431,7 +469,12 @@ def test_review_step_still_finishes_its_activity_span_when_the_agent_call_raises
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=NONZERO_EXIT_FAKE_CLI)
 
@@ -454,22 +497,27 @@ def test_review_step_still_finishes_its_activity_span_when_the_agent_call_raises
 
 
 def test_review_step_streams_each_tool_call_as_a_nested_activity(tmp_path: Path) -> None:
-    """`tool_stream_relay` (`steps/tool_activity.py`) turns each `TOOL_USE` from a real
-    streaming `ClaudeCLI` call into its own one-shot nested `reporter.log(...)` activity
-    (started immediately followed by finished, per `ActivityRelay.log`'s contract) --
-    proven against `STREAMS_A_TOOL_CALL_FAKE_CLI`'s real stream-json transcript (one tool
-    call, non-error result), not a stand-in `Agent`. `run_steps` yields exactly one round
-    here (a clean answer, no park), so this fixture's 4 activity events -- Agent started,
-    Tool started, Tool finished, Agent finished -- are the whole stream. The matching
-    non-error `TOOL_RESULT` produces no event of its own -- see the sibling
-    `test_review_step_logs_an_errored_tool_result_as_its_own_activity` below for the
-    error case, which does."""
+    """`tool_stream_relay` (`steps/tool_activity.py`) turns each `TOOL_USE`/`TOOL_RESULT`
+    pair from a real streaming `ClaudeCLI` call into one nested activity span -- opened on
+    `TOOL_USE`, closed on the matching `TOOL_RESULT` -- proven against
+    `STREAMS_A_TOOL_CALL_FAKE_CLI`'s real stream-json transcript (one tool call, non-error
+    result, with a real sleep between its two stream-json lines), not a stand-in `Agent`.
+    `run_steps` yields exactly one round here (a clean answer, no park), so this fixture's
+    4 activity events -- Agent started, Tool started, Tool finished, Agent finished -- are
+    the whole stream. Asserting the finished event's timestamp is measurably later than the
+    started one's proves the reported duration spans the real tool call, not an instant
+    one-shot log."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=STREAMS_A_TOOL_CALL_FAKE_CLI)
 
@@ -494,29 +542,37 @@ def test_review_step_streams_each_tool_call_as_a_nested_activity(tmp_path: Path)
     assert tool_finished.status == "finished"
     assert tool_finished.activity_id == tool_started.activity_id
     assert tool_finished.label == tool_started.label
+    # The fixture sleeps 0.05s between its tool_use and tool_result stream-json lines --
+    # a real elapsed duration, not the ~0s a one-shot log-at-TOOL_USE would report.
+    assert tool_finished.timestamp - tool_started.timestamp >= 0.05
 
     assert agent_finished.status == "finished"
     assert agent_finished.activity_id == agent_started.activity_id
 
 
 def test_review_step_logs_an_errored_tool_result_as_its_own_activity(tmp_path: Path) -> None:
-    """`tool_stream_relay` logs a second, distinct activity for an errored `TOOL_RESULT`
-    (`payload["is_error"]` truthy) beyond the call itself -- proven against
-    `STREAMS_AN_ERRORED_TOOL_CALL_FAKE_CLI`'s real stream-json transcript (one tool call,
-    one error result). `run_steps` yields exactly one round here, so this fixture's 6
-    activity events -- Agent started, Tool-call started/finished, Tool-error
+    """`tool_stream_relay` finishes the tool-call span itself with `error` set for an
+    errored `TOOL_RESULT` (`payload["is_error"]` truthy), rather than logging a second,
+    distinct activity -- proven against `STREAMS_AN_ERRORED_TOOL_CALL_FAKE_CLI`'s real
+    stream-json transcript (one tool call, one error result). `run_steps` yields exactly
+    one round here, so this fixture's 4 activity events -- Agent started, Tool-call
     started/finished, Agent finished -- are the whole stream."""
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=STREAMS_AN_ERRORED_TOOL_CALL_FAKE_CLI)
 
     async def scenario() -> list[ActivityEvent]:
-        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 6))
+        drain_task = asyncio.ensure_future(_drain_activity_events(relay, 4))
         async for _event in run_steps([step], ctx):
             pass
         return await drain_task
@@ -525,8 +581,6 @@ def test_review_step_logs_an_errored_tool_result_as_its_own_activity(tmp_path: P
         agent_started,
         call_started,
         call_finished,
-        error_started,
-        error_finished,
         agent_finished,
     ) = asyncio.run(scenario())
     asyncio.run(agent.close())
@@ -536,14 +590,12 @@ def test_review_step_logs_an_errored_tool_result_as_its_own_activity(tmp_path: P
     assert call_started.status == "started"
     assert call_started.label == "Tool: Read(/fake/missing.txt)"
     assert call_started.parent_id == agent_started.activity_id
-    assert call_finished.activity_id == call_started.activity_id
+    assert call_started.error is None
 
-    assert error_started.status == "started"
-    assert error_started.label == "Tool error: file not found"
-    assert error_started.parent_id == agent_started.activity_id
-    # A distinct activity from the tool-call one, not a reuse of its id.
-    assert error_started.activity_id != call_started.activity_id
-    assert error_finished.activity_id == error_started.activity_id
+    assert call_finished.status == "finished"
+    assert call_finished.activity_id == call_started.activity_id
+    assert call_finished.label == call_started.label
+    assert call_finished.error == "file not found"
 
     assert agent_finished.activity_id == agent_started.activity_id
 
@@ -561,7 +613,12 @@ def test_review_step_logs_streamed_assistant_text_as_its_own_activity(tmp_path: 
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = ReviewStep(executable=STREAMS_ASSISTANT_TEXT_FAKE_CLI)
 

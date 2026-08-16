@@ -41,6 +41,7 @@ from textual.app import App, ComposeResult
 from textual.timer import Timer
 from textual.widget import MountError
 
+from code_review.pipeline.run_report import PipelineRunReport, build_run_report
 from code_review.pipeline.schemas import StepEvent
 from code_review.tui.activity import ActivityRelay
 from code_review.tui.approval_relay import ApprovalRelay
@@ -48,7 +49,7 @@ from code_review.tui.input_relay import InputRelay
 from code_review.tui.schemas import ActivityEvent
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.state import StepRow, backfill, final_status_message, latest_findings
-from code_review.tui.widgets import _SHIMMER_TICK_SECONDS, FindingsList, PipelineBox, StatusBox
+from code_review.tui.widgets import _SHIMMER_TICK_SECONDS, FindingBox, PipelineBox, StatusBox
 
 # The app's single tick timer's interval -- PipelineBox's own shimmer/spinner rate (the
 # faster of the two rates this used to be), see this module's own docstring.
@@ -125,6 +126,8 @@ class ReviewApp(App[None]):
 
         # Set only if iterating `events` raised; `cli.py` uses it for a nonzero exit code.
         self.error: BaseException | None = None
+        # Set once the run ends (success or failure), from self._seen -- see _consume_events.
+        self.run_report: PipelineRunReport | None = None
 
     def compose(self) -> ComposeResult:
         yield PipelineBox(self._rows(), branch=self._branch)
@@ -200,7 +203,7 @@ class ReviewApp(App[None]):
             event for event in self._seen if id(event.outcome) not in self._resolved_outcome_ids
         ]
         result = latest_findings(visible_events)
-        boxes = list(self.query(FindingsList))
+        boxes = list(self.query(FindingBox))
         if result is None:
             for box in boxes:
                 box.remove()
@@ -210,7 +213,7 @@ class ReviewApp(App[None]):
             if boxes:
                 boxes[0].update_findings(output, display_name)
             else:
-                self.mount(FindingsList(output, display_name))
+                self.mount(FindingBox(output, display_name))
 
     def _render_status(self) -> None:
         """Mount, update in place, or remove the Status box; appears only once
@@ -221,7 +224,9 @@ class ReviewApp(App[None]):
             for box in boxes:
                 box.remove()
             return
-        message = final_status_message(self.error)
+        message = final_status_message(
+            self.error, report=self.run_report, display_names=self._display_names
+        )
         if boxes:
             boxes[0].update_status(message)
         else:
@@ -239,6 +244,7 @@ class ReviewApp(App[None]):
         finally:
             self._done = True
             self._tick_timer.stop()
+            self.run_report = build_run_report(self._seen)
             self._render()
 
     async def _relay_input(self) -> None:
@@ -267,7 +273,7 @@ class ReviewApp(App[None]):
         """Poll `self._approval_relay` for a parked step's approve/skip/fix/abort request.
 
         Marks `self._parked_step`, re-renders, then awaits the mounted
-        `FindingsList.await_decision()` directly (no modal). "skip" is recorded into
+        `FindingBox.await_decision()` directly (no modal). "skip" is recorded into
         `self._skipped_steps`; "abort" is `run_steps`'s own job via `RunAbortedError`.
         Clears `_parked_step` and re-renders again before resolving `pending_response`, so
         rendered state reflects the decision before the parked `run_steps` call resumes.
@@ -278,7 +284,7 @@ class ReviewApp(App[None]):
             request = await self._approval_relay.next_request()
             self._parked_step = request.step_name
             self._render()
-            findings_box = self.query_one(FindingsList)
+            findings_box = self.query_one(FindingBox)
             response = await findings_box.await_decision()
             self._parked_step = None
             self._resolved_outcome_ids.add(id(request.outcome))

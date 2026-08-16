@@ -54,6 +54,14 @@ already-computed output (e.g. `PRStep` rendering `ReviewStep`'s risk verdict) --
 no step's execution or the pipeline's step order, so it does not undermine this module's
 "nothing here inspects a prior step's `StepOutcome` to decide whether or how to run the
 next one" invariant; see `pipeline/AGENTS.md` for the full rationale.
+
+**`cwd_override`**: at that exact same fold point, a settled outcome's `cwd_override` (only
+`WorktreeStep` ever sets it) also replaces `ctx.cwd` for every step after it -- every step
+still runs, unconditionally, in the same fixed order; only the resource path they operate
+against changes. See `pipeline/AGENTS.md`'s WorktreeStep section for why this is an honestly
+different, narrower kind of cross-step effect than `step_outcomes` (mandatory shared
+infrastructure state every later step's git calls depend on, not optional data a step may
+choose to read for its own output).
 """
 
 from __future__ import annotations
@@ -184,4 +192,12 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
         # final outcome into the outer ctx's step_outcomes exactly once per step, never once
         # per round, so a later step can read it. round_ctx (about to be rebuilt for the
         # next step) is never the target here; only the outer ctx carries this forward.
-        ctx = replace(ctx, step_outcomes={**ctx.step_outcomes, step_name: outcome})
+        new_step_outcomes = {**ctx.step_outcomes, step_name: outcome}
+        # Same fold point, for the one other field a settled outcome can carry forward:
+        # WorktreeStep's cwd_override. See pipeline/AGENTS.md's WorktreeStep section for why
+        # this is a different, mandatory-infrastructure kind of cross-step effect than
+        # step_outcomes, not a second precedent for one.
+        if outcome.cwd_override is not None:
+            ctx = replace(ctx, step_outcomes=new_step_outcomes, cwd=outcome.cwd_override)
+        else:
+            ctx = replace(ctx, step_outcomes=new_step_outcomes)

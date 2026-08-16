@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from code_review.agent import Agent, ClaudeCLI
+from code_review.agent import Agent, ClaudeCLI, Usage
 from code_review.pipeline import (
     ApprovalResponse,
     Step,
@@ -169,7 +169,9 @@ def test_test_sufficiency_step_outcome_is_clean_on_info_and_no_op_findings_only(
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = TestSufficiencyStep(executable=CLEAN_FAKE_CLI)
 
     outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
@@ -182,6 +184,24 @@ def test_test_sufficiency_step_outcome_is_clean_on_info_and_no_op_findings_only(
     assert outcome.needs_approval is False
 
 
+def test_test_sufficiency_step_outcome_carries_the_agent_calls_usage(tmp_path: Path) -> None:
+    """`TestSufficiencyStep.run` threads `Result.usage` straight onto its returned
+    `StepOutcome.usage` -- `CLEAN_FAKE_CLI` reports `usage`/`total_cost_usd` (see
+    `claude_cli.py`'s `_usage_from`)."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
+    step: Step = TestSufficiencyStep(executable=CLEAN_FAKE_CLI)
+
+    outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
+    asyncio.run(agent.close())
+
+    assert outcome.usage == Usage(input_tokens=900, output_tokens=210, total_cost_usd=0.0198)
+
+
 def test_test_sufficiency_step_needs_approval_on_an_ask_user_finding(tmp_path: Path) -> None:
     """Acceptance criterion: running `TestSufficiencyStep` against a fake agent returning a
     finding with `action="ask-user"` produces `StepOutcome(needs_approval=True, ...)`."""
@@ -189,7 +209,12 @@ def test_test_sufficiency_step_needs_approval_on_an_ask_user_finding(tmp_path: P
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, on_approval_needed=_approve
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        on_approval_needed=_approve,
     )
     step: Step = TestSufficiencyStep(executable=BLOCKING_FAKE_CLI)
 
@@ -212,7 +237,9 @@ def test_test_sufficiency_step_calls_agent_exactly_once(tmp_path: Path) -> None:
 
     repo, diff = _real_repo_with_diff(tmp_path)
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = TestSufficiencyStep(executable=CLEAN_FAKE_CLI)
 
     events = asyncio.run(_collect([step], ctx))
@@ -252,7 +279,9 @@ def test_test_sufficiency_step_automatic_fix_round_writes_a_test_and_returns_a_f
     assert not written_test_file.exists()
 
     agent: Agent = ClaudeCLI()
-    ctx = StepContext(cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT)
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
     step: Step = TestSufficiencyStep(executable=AUTO_FIX_ROUND_FAKE_CLI)
 
     events = asyncio.run(_collect([step], ctx))
@@ -312,7 +341,12 @@ def test_test_sufficiency_step_never_auto_fixes_a_finding_with_unset_action(
 
     agent: Agent = ClaudeCLI()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, on_approval_needed=approve
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        on_approval_needed=approve,
     )
     step: Step = TestSufficiencyStep(executable=UNSET_ACTION_FAKE_CLI)
 
@@ -366,7 +400,12 @@ def test_test_sufficiency_step_streams_each_tool_call_as_a_nested_activity(
     agent: Agent = ClaudeCLI()
     relay = ActivityRelay()
     ctx = StepContext(
-        cwd=repo, agent=agent, diff=diff, intent=_EXPLICIT_INTENT, activity_reporter=relay
+        cwd=repo,
+        branch="unused-placeholder",
+        agent=agent,
+        diff=diff,
+        intent=_EXPLICIT_INTENT,
+        activity_reporter=relay,
     )
     step: Step = TestSufficiencyStep(executable=STREAMS_A_TOOL_CALL_FAKE_CLI)
 

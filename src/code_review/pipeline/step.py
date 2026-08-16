@@ -2,11 +2,13 @@
 
 `StepContext` is a bag of per-pipeline-run dependencies a step needs (see
 `docs/GLOSSARY.md`'s "run" entry for the pipeline-run vs agent-call distinction): working
-directory, `Agent`, diff, `Intent`, plus fix-loop/approval-park state (`on_approval_needed`,
-`fix_round`), plus `step_outcomes`, a read-only record of earlier steps' already-settled
-`StepOutcome`s a later step may summarize (see that field's own docstring and
-`pipeline/AGENTS.md` for why this doesn't reverse the "no step branches on a sibling's
-outcome" invariant).
+directory, branch under review, `Agent`, diff, `Intent`, plus fix-loop/approval-park state
+(`on_approval_needed`, `fix_round`), plus `step_outcomes`, a read-only record of earlier
+steps' already-settled `StepOutcome`s a later step may summarize (see that field's own
+docstring and `pipeline/AGENTS.md` for why this doesn't reverse the "no step branches on a
+sibling's outcome" invariant), plus `StepOutcome.cwd_override`, a narrower, mandatory
+counterpart to `step_outcomes` that lets `WorktreeStep` redirect `ctx.cwd` for every step
+after it (see that field's own docstring and `pipeline/AGENTS.md`'s WorktreeStep section).
 
 `ActivityReporter` is a structural `Protocol` so `pipeline/`/`steps/` never import `tui/`
 directly; satisfied structurally by `tui.activity.ActivityRelay`. `StepContext.
@@ -25,9 +27,11 @@ Ambient reporting: `steps/gitutils.py`'s `run_git` has no `StepContext` to read
 `contextvars.ContextVar`) carries whichever reporter is in scope for the currently running
 step, read via `.get()`. `executor.run_steps` is the sole writer, `.set()`/`.reset()`-ing it
 immediately around each `step.run(ctx)` call so the value never leaks across steps or
-sibling tasks. `report_activity`/`log_activity` are the two null-safe primitives every
-activity report funnels through, whether the caller is `ctx`-bound or ambient (see their
-own docstrings).
+sibling tasks. `report_activity`/`log_activity` are the null-safe primitives every
+block-shaped/one-shot activity report funnels through, whether the caller is `ctx`-bound or
+ambient; `start_activity`/`finish_activity` are their manually-paired sibling, for a span
+whose open and close happen at two different callback call sites that can't share a Python
+block (see their own docstrings).
 
 `StepOutcome.needs_approval` pauses the run for a human decision; `auto_fixable` lets a step
 that opts in via `Step.supports_fix_round = True` get bounded automatic re-runs before
@@ -56,7 +60,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
-from code_review.agent import Agent
+from code_review.agent import Agent, Usage
 from code_review.pipeline.schemas import ApprovalResponse, FixRound
 
 if TYPE_CHECKING:
@@ -85,11 +89,12 @@ class ActivityHandle:
 
 
 class ActivityReporter(Protocol):
-    """Structural, two-method contract for reporting nested sub-step activity.
+    """Structural, four-method contract for reporting nested sub-step activity.
 
     Satisfied structurally by `tui.activity.ActivityRelay`; nothing here imports `tui/`.
     A step never calls this directly, only via `StepContext.report_activity`/
-    `StepContext.log`.
+    `StepContext.log` (and the ambient `start_activity`/`finish_activity` module-level
+    wrappers below, for a span whose open/close can't share a Python block).
     """
 
     def activity(self, label: str) -> AbstractAsyncContextManager[ActivityHandle]:
@@ -103,6 +108,20 @@ class ActivityReporter(Protocol):
         moment in time (e.g. one LLM tool call) rather than a block of work. Semantically
         equivalent to `async with self.activity(label): pass`, but without requiring a
         caller that only has a point-in-time callback (not a block) to fabricate one.
+        """
+        ...
+
+    async def start(self, label: str) -> int:
+        """Open a span named `label`, closed later by a separate `finish(activity_id, ...)`
+        call rather than exiting an `async with` block -- for a caller whose open/close
+        happen at two different callback call sites (e.g. `tool_stream_relay`'s
+        `TOOL_USE`/`TOOL_RESULT` pair). Returns the new `activity_id`.
+        """
+        ...
+
+    async def finish(self, activity_id: int, label: str, *, error: str | None = None) -> None:
+        """Close the span opened by the matching `start(...)` call. `error` mirrors
+        `ActivityHandle.fail(detail)`'s effect on the "finished" event.
         """
         ...
 
@@ -142,6 +161,30 @@ async def log_activity(reporter: ActivityReporter | None, label: str) -> None:
         await reporter.log(label)
 
 
+async def start_activity(reporter: ActivityReporter | None, label: str) -> int | None:
+    """`reporter.start(label)` if `reporter` is set, else `None` -- the null-safe half of
+    the manually-paired open/close primitive, for a span whose open and close happen at two
+    different callback call sites (e.g. `tool_stream_relay`'s `TOOL_USE`/`TOOL_RESULT`
+    pair). Pass the returned id to `finish_activity`; `None` means there is nothing to
+    close.
+    """
+
+    if reporter is None:
+        return None
+    return await reporter.start(label)
+
+
+async def finish_activity(
+    reporter: ActivityReporter | None, activity_id: int, label: str, *, error: str | None = None
+) -> None:
+    """`reporter.finish(activity_id, label, error=error)` if `reporter` is set, else a
+    no-op -- the null-safe close half of `start_activity`.
+    """
+
+    if reporter is not None:
+        await reporter.finish(activity_id, label, error=error)
+
+
 @dataclass(frozen=True, slots=True)
 class StepContext:
     """Per-pipeline-run dependencies and state a Step needs (see `docs/GLOSSARY.md`'s "run"
@@ -153,6 +196,16 @@ class StepContext:
     agent: Agent
     diff: str
     intent: Intent
+    # The branch under review, verified to exist before any Step runs (cli.py's
+    # _verify_branch_exists). WorktreeStep checks this out --detached (never by name, to
+    # avoid colliding with ctx.cwd's own checkout of the same branch -- the common case
+    # when a developer reviews the branch they're currently on) into its throwaway
+    # worktree, so ctx.cwd's HEAD is detached from WorktreeStep onward. RebaseStep doesn't
+    # need a name (git rebase works the same on a detached HEAD), but PRStep does -- it
+    # reads this field directly rather than re-deriving "the branch under review" from
+    # ctx.cwd's HEAD (see those steps' own module docstrings). Required, not defaulted,
+    # matching cwd/agent/diff/intent -- see pipeline/AGENTS.md's WorktreeStep section.
+    branch: str
     # Relay for interactive-input prompts, passed through to a step's own RunOpts. Reserved:
     # no step consumes it yet. cli.py wires it to tui.input_relay.InputRelay.request_input.
     on_input_needed: Callable[[str], Awaitable[str]] | None = None
@@ -210,13 +263,25 @@ class StepContext:
 
 @dataclass(frozen=True, slots=True)
 class StepOutcome:
-    """A Step's report back to the executor."""
+    """A Step's report back to the executor. `usage` carries this round's agent-call token
+    usage, for `pipeline.run_report` to sum across every round of a run."""
 
     needs_approval: bool
     auto_fixable: bool
     # The closed set of shapes a step actually reports -- see module docstring. A step
     # narrows this back to whichever member it produced, typically via isinstance.
     payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent | PullRequestOutcome
+    # Redirects ctx.cwd for every step after this one, once this step's slot settles
+    # (executor.run_steps folds it in the same place/way it folds step_outcomes). None
+    # (the default) leaves ctx.cwd untouched -- true for every step but WorktreeStep, whose
+    # whole job is pointing the rest of the pipeline at a freshly created worktree. See
+    # pipeline/AGENTS.md's WorktreeStep section for why this is a narrower, different kind
+    # of cross-step effect than step_outcomes (mandatory shared infrastructure state every
+    # later step's git calls depend on, not optional data a step may choose to read).
+    cwd_override: Path | None = None
+    # This round's agent-call usage (Agent.run's Result.usage), or None for a step that made
+    # no agent call. pipeline.run_report.build_run_report sums this across every round.
+    usage: Usage | None = None
 
 
 class Step(ABC):

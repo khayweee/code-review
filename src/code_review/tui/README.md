@@ -60,7 +60,7 @@ A "park" is one call to `ctx.on_approval_needed(step_name, outcome)` — one per
 `StepOutcome` that needs a human, *not* one per finding inside it. `outcome.payload` can
 carry several findings at once (e.g. `ReviewOutput.findings` with 3 entries), and all of
 them ride through the same single park: 3 blocking findings means 1 park, 1 shared
-`pending_response`, and 3 rows inside `FindingsList` for the human to decide one at a time
+`pending_response`, and 3 rows inside `FindingBox` for the human to decide one at a time
 (see §3) — never 3 separate parks or 3 separate `Future`s.
 
 Exactly one such `Future` is created per approval park, inside `ApprovalRelay.
@@ -90,7 +90,7 @@ into the `ApprovalRequest` alongside `step_name`/`outcome`) from the pipeline si
 TUI side once.
 
 (A second, unrelated `Future` also exists purely inside the TUI flow —
-`FindingsList._pending`, which `await_decision()` awaits internally so `_resolve_park` has
+`FindingBox._pending`, which `await_decision()` awaits internally so `_resolve_park` has
 something to resolve once every row is decided. It is never seen by the pipeline flow;
 `_relay_approval` is the code that bridges its result into the one *shared*
 `pending_response` above. Don't confuse the two — only `ApprovalRelay`'s `pending_response`
@@ -152,13 +152,13 @@ The TUI flow has been running this whole time, in a background worker started wh
 (`app.py:266-288`):
 
 ```python
-findings_box = self.query_one(FindingsList)
+findings_box = self.query_one(FindingBox)
 response = await findings_box.await_decision()
 ...
 request.pending_response.set_result(response)
 ```
 
-`FindingsList.await_decision()` is the actual human-input mechanism:
+`FindingBox.await_decision()` is the actual human-input mechanism:
 
 - It flips `self._parked = True`, resets every row's decision, focuses the list, and
   turns the highlighted row's `FindingsSuggestion` column into a live, keyboard-driven
@@ -184,7 +184,7 @@ and the step
 re-runs with that text folded into its next prompt — the pipeline never receives anything
 more structured than the string the TUI flow produced.
 
-See [`AGENTS.md`](./AGENTS.md)'s `FindingsList`/`Finding`/`FindingsSuggestion` sections for
+See [`AGENTS.md`](./AGENTS.md)'s `FindingBox`/`Finding`/`FindingsSuggestion` sections for
 the non-obvious per-widget decisions behind this (why decisions are recorded per row
 instead of once per park, cursor preservation on revisit, chat prefill), and
 [`pipeline/AGENTS.md`](../pipeline/AGENTS.md) for the executor's side of the

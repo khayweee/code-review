@@ -17,6 +17,7 @@ from rich.console import Console
 from textual.pilot import Pilot
 from textual.widgets import Input, Static
 
+from code_review.agent import Usage
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.schemas import ApprovalResponse, StepEvent
@@ -31,9 +32,9 @@ from code_review.tui.schemas import ActivityEvent
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.widgets import Finding as FindingItem
 from code_review.tui.widgets import (
-    FindingsDescription,
-    FindingsList,
+    FindingBox,
     FindingsSuggestion,
+    FindingTitle,
     PipelineBox,
     StatusBox,
     _FindingsListView,
@@ -52,12 +53,17 @@ def _pipeline_box_content(box: PipelineBox) -> str:
     return buffer.getvalue().rstrip()
 
 
-def _findings_list_content(box: FindingsList) -> str:
-    """Render every mounted `Finding` row's `FindingsDescription`+`FindingsSuggestion`
-    content to plain text, joined -- `FindingsList` is a `Vertical` with a
-    `_FindingsListView` child, not a single renderable `.content` the way `PipelineBox` is
-    (issue #88), so this renders each row's two columns individually rather than reading
-    one shared attribute.
+def _findings_list_content(box: FindingBox) -> str:
+    """Render every mounted `Finding` row's `FindingTitle`+`FindingsSuggestion` content to
+    plain text, joined -- `FindingBox` is a `Vertical` with a `_FindingsListView` child,
+    not a single renderable `.content` the way `PipelineBox` is (issue #88), so this
+    renders each row's two columns individually rather than reading one shared attribute.
+
+    Reads `FindingTitle` (the always-visible one-line summary), not `FindingsDescription`
+    itself -- `FindingsDescription` is now a bare `Vertical` container (issue: title/
+    expanded-description split) with no single `.content` of its own; the full,
+    untruncated `FindingExpandedDescription` text only exists while a row is highlighted,
+    and is asserted separately by the tests that specifically cover that behavior.
 
     `FindingsSuggestion` is itself a small container, not a single `Static` (issue #92) --
     its own `Static` children are printed individually here, same as `test_widgets.py`'s
@@ -68,7 +74,7 @@ def _findings_list_content(box: FindingsList) -> str:
     buffer = StringIO()
     console = Console(file=buffer, force_terminal=True, width=80, color_system=None)
     for item in box.query(FindingItem):
-        console.print(item.query_one(FindingsDescription).content)
+        console.print(item.query_one(FindingTitle).content)
         for static in item.query_one(FindingsSuggestion).query(Static):
             console.print(static.content)
     return buffer.getvalue().rstrip()
@@ -81,7 +87,7 @@ async def _wait_until_done(pilot: Pilot[None], app: ReviewApp) -> None:
 
     A trailing `pilot.pause()` once `StatusBox` is found, not just an immediate return --
     a synthetic generator that completes in a handful of scheduler steps (every one in this
-    file does) can still have widgets Textual mounted moments earlier (e.g. a `FindingsList`
+    file does) can still have widgets Textual mounted moments earlier (e.g. a `FindingBox`
     mounted by the very same final render this loop is watching for) whose own nested
     `Finding` rows haven't finished their own async `compose()` yet -- Textual settles that
     on its own the next time the event loop gets a turn, which this final pause grants,
@@ -372,6 +378,49 @@ def test_review_app_status_box_shows_success_message_after_a_clean_run() -> None
     asyncio.run(scenario())
 
 
+def test_review_app_populates_run_report_from_step_outcomes_usage_once_the_run_is_done() -> None:
+    """`ReviewApp.run_report` reflects every completed step's `StepOutcome.usage` once the
+    run ends -- built from `self._seen` via `build_run_report`. (Not asserted `None`
+    beforehand: a single near-instant step can already be done by the first `pilot.pause()`,
+    same reason `app.py`'s own module docstring gives for this pipeline flashing by fast.)"""
+
+    async def one_step_completes_with_usage() -> AsyncIterator[StepEvent]:
+        started = time.monotonic()
+        yield StepEvent(
+            step_name="IntentStep",
+            status="running",
+            outcome=None,
+            started_at=started,
+            duration=None,
+        )
+        await asyncio.sleep(0)
+        yield StepEvent(
+            step_name="IntentStep",
+            status="completed",
+            outcome=StepOutcome(
+                needs_approval=False,
+                auto_fixable=False,
+                payload=[],
+                usage=Usage(input_tokens=100, output_tokens=50, total_cost_usd=0.01),
+            ),
+            started_at=started,
+            duration=0.01,
+        )
+
+    async def scenario() -> None:
+        app = ReviewApp(REGISTRY, one_step_completes_with_usage())
+        async with app.run_test() as pilot:
+            await _wait_until_done(pilot, app)
+
+        assert app.run_report is not None
+        assert app.run_report.total_input_tokens == 100
+        assert app.run_report.total_output_tokens == 50
+        assert app.run_report.total_cost_usd == 0.01
+        assert [su.step_name for su in app.run_report.per_step] == ["IntentStep"]
+
+    asyncio.run(scenario())
+
+
 def test_review_app_status_box_shows_the_error_message_after_a_failed_run() -> None:
     async def scenario() -> None:
         app = ReviewApp(REGISTRY, _second_step_raises())
@@ -533,7 +582,7 @@ async def _wait_for_park(pilot: Pilot[None], app: ReviewApp, step_name: str) -> 
     having already landed."""
 
     for _ in range(20):
-        if app._parked_step == step_name and list(app.query(FindingsList)):
+        if app._parked_step == step_name and list(app.query(FindingBox)):
             await pilot.pause()
             return
         await pilot.pause()
@@ -558,7 +607,7 @@ def test_review_app_parks_on_a_synthetic_outcome_and_resolving_via_chat_continue
         async with app.run_test() as pilot:
             await _wait_for_park(pilot, app, "RebaseStep")
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             assert "unpushed local commits" in _findings_list_content(box)
 
             # While parked, the Pipeline box shows RebaseStep as "parked" even though its
@@ -592,7 +641,7 @@ def test_review_app_choosing_skip_marks_the_step_skipped_and_the_run_continues()
         async with app.run_test() as pilot:
             await _wait_for_park(pilot, app, "RebaseStep")
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             await pilot.press("s")
             await pilot.pause()
@@ -617,7 +666,7 @@ def test_review_app_choosing_abort_stops_the_run_and_records_the_error() -> None
         async with app.run_test() as pilot:
             await _wait_for_park(pilot, app, "RebaseStep")
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             await pilot.press("x")
             await pilot.pause()
@@ -639,7 +688,7 @@ def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_the
     """Issue #81's TUI-side acceptance criterion, reworked by issue #87, relocated in place
     by issue #92: the "f" shortcut opens a live `Input` inside the highlighted row's own
     `FindingsSuggestion` column (no longer `_InlineApprovalChat`, a sibling widget mounted
-    below the whole `FindingsList` -- see `tui/AGENTS.md`'s "Findings box" section), rather
+    below the whole `FindingBox` -- see `tui/AGENTS.md`'s "Findings box" section), rather
     than pushing a second `InputPromptScreen` modal -- and `ReviewApp._relay_approval` only
     resolves the pending `ApprovalRelay.request_approval` future -- with the full
     `ApprovalResponse(decision="fix", instructions=...)`, not just the bare decision -- once
@@ -685,7 +734,7 @@ def test_review_app_choosing_fix_prompts_for_instructions_then_resolves_with_the
         async with app.run_test(size=(80, 50)) as pilot:
             await _wait_for_park(pilot, app, "RebaseStep")
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             await pilot.press("f")
             await pilot.pause()
@@ -716,7 +765,7 @@ def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_marku
     `Finding.description` is agent-produced, untrusted text that can legitimately contain
     `[...]`-shaped substrings, which an earlier version of the (now-removed)
     `ApprovalPromptScreen`'s `str(...)`-based rendering mis-parsed as Rich markup and
-    raised `MarkupError` on. `FindingsList`'s rows build `FindingsDescription`/
+    raised `MarkupError` on. `FindingBox`'s rows build `FindingsDescription`/
     `FindingsSuggestion` content directly as `Text` (`render_description`/
     `render_suggestions_plain`), never `str`-interpolated through a markup-enabled
     `Static.update`, so this proves the box still mounts and renders this outcome shape
@@ -763,7 +812,7 @@ def test_review_app_parks_with_a_review_output_outcome_without_crashing_on_marku
         async with app.run_test() as pilot:
             await _wait_for_park(pilot, app, "ReviewStep")
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             assert "drops error handling required by the caller's contract" in (
                 _findings_list_content(box)
             )
@@ -883,7 +932,7 @@ def test_review_app_shows_a_findings_box_once_a_step_completes_with_non_empty_fi
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             assert "removes error handling" in _findings_list_content(box)
             assert box.border_title == "Findings -- ReviewStep"
 
@@ -900,14 +949,14 @@ def test_review_app_translates_findings_box_title_via_display_names() -> None:
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             assert box.border_title == "Findings -- Review"
 
     asyncio.run(scenario())
 
 
 def test_review_app_e_still_exits_after_the_findings_list_view_has_focus() -> None:
-    """Regression test for issue #88: `FindingsList`'s child `_FindingsListView` can take
+    """Regression test for issue #88: `FindingBox`'s child `_FindingsListView` can take
     focus and handle its own up/down bindings without shadowing the app-level "e" exit
     binding (registered on `App`, not on `_FindingsListView`)."""
 
@@ -916,7 +965,7 @@ def test_review_app_e_still_exits_after_the_findings_list_view_has_focus() -> No
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             await pilot.pause()
 
@@ -935,7 +984,7 @@ def test_review_app_shows_a_findings_box_for_a_completed_test_sufficiency_output
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             assert "no test covers the retry path" in _findings_list_content(box)
             assert box.border_title == "Findings -- TestSufficiencyStep"
 
@@ -950,7 +999,7 @@ def test_review_app_shows_no_findings_box_when_the_only_completed_outcome_has_no
 
             # `_one_step_completes` reports an outcome with an empty `payload=[]` -- not a
             # `ReviewOutput` -- so no Findings box should ever mount.
-            assert list(app.query(FindingsList)) == []
+            assert list(app.query(FindingBox)) == []
 
     asyncio.run(scenario())
 
@@ -961,7 +1010,7 @@ def test_review_app_shows_no_findings_box_when_the_completed_review_output_is_em
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            assert list(app.query(FindingsList)) == []
+            assert list(app.query(FindingBox)) == []
 
     asyncio.run(scenario())
 
@@ -972,7 +1021,7 @@ def test_review_app_findings_box_shows_the_later_of_two_completed_findings() -> 
         async with app.run_test() as pilot:
             await _wait_until_done(pilot, app)
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             content = _findings_list_content(box)
             assert "second pass finding" in content
             assert "first pass finding" not in content

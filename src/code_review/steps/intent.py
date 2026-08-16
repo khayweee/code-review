@@ -1,4 +1,6 @@
-"""Intent representation and the pipeline's first step.
+"""Intent representation and `IntentStep`, the first step to actually answer "what is this
+change trying to do" -- `worktree.py`'s `WorktreeStep` runs before it in `STEP_REGISTRY`
+(pure environment setup, not part of answering that question).
 
 Requires `--intent` explicitly; no transcript inference yet. Prompt-construction helpers
 (`wrap_intent`, `redact_secrets`, `strip_adversarial`) live in `code_review.prompt.intent`,

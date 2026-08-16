@@ -54,7 +54,7 @@ without a real agent subprocess.
   `ctrl+c` can.
 - `_relay_approval` learns a step parked, sets `self._parked_step`, re-renders (the
   Findings box already shows that step's findings — it mounted on the "completed" event
-  before the park was noticed), then awaits `FindingsList.await_decision()` directly — no
+  before the park was noticed), then awaits `FindingBox.await_decision()` directly — no
   modal. "skip" is recorded into `self._skipped_steps` (kept for the app's lifetime, same as
   `_failed_step`); "abort" unwinds via `pipeline.executor.RunAbortedError` through the
   normal `ReviewApp.error` path.
@@ -79,11 +79,16 @@ without a real agent subprocess.
   only ever used to relabel a rendered string: passed straight through to `state.backfill`'s
   own `display_names` param for Pipeline-box rows, and applied by hand in
   `_render_findings` to the `step_name` `state.latest_findings` returns before it reaches
-  `FindingsList`'s `border_title`. Every internal comparison (`_parked_step`,
+  `FindingBox`'s `border_title`. Every internal comparison (`_parked_step`,
   `_skipped_steps`, `_failed_step`, activity attribution) still keys off the canonical name
   from `StepEvent.step_name` — translating those too would break the very matching
   `display_names` is designed not to touch (see `registry.py`'s own module docstring for why
   the two names are kept separate rather than overriding `Step.get_name()`).
+- `self.run_report: PipelineRunReport | None` (`pipeline.run_report`) -- built from
+  `self._seen` via `build_run_report` in `_consume_events`'s `finally`, alongside `self.
+  error`; `None` until the run ends, then reflects the run's LLM token usage even on a
+  failed run. `_render_status` passes it (plus `self._display_names`) through to `state.
+  final_status_message`.
 
 ## `state.py`
 
@@ -101,14 +106,23 @@ render-ready rows. No Textual import.
   any specific naming scheme (see `app.py`'s own note on why).
 - `backfill_activities` groups tagged `(step_name, ActivityEvent)` pairs into
   `ActivityRow`s nested under `StepRow.activities`, using the same elapsed/final duration
-  rule as `StepRow` itself.
+  rule as `StepRow` itself. Follows each event's own `parent_id` to build a real tree, not
+  a flat list — a tool call an agent made (opened while the agent's own span was still the
+  ambient activity, e.g. `tool_stream_relay`'s per-call spans under `ReviewStep`'s "Agent:
+  ..." span) becomes that row's own `ActivityRow.children` entry, not a sibling row at the
+  same indent. `pipeline_box.py`'s `_iter_activity_lines` walks that tree at render time,
+  indenting one more level per nesting depth.
 - `latest_findings(events)` scans for the most recently completed step whose outcome
   carries a non-empty `ReviewOutput`, `TestSufficiencyOutput`, or bare `list[Finding]`
   (imported from `steps.review`/`steps.test_sufficiency` as data-schema-only imports —
   `steps/` never imports `tui/`, so no cycle). One box, most-recent-completion-wins, not an
   accumulated history.
-- `final_status_message(error)` renders the Status box's one-line outcome plus the "press
-  'e'" reminder.
+- `final_status_message(error, *, report=None, display_names=None)` renders the Status box's
+  one-line outcome plus the "press 'e'" reminder. `report` (a `pipeline.run_report.
+  PipelineRunReport`), when given and non-empty (`run_report.format_run_report`), is
+  appended as its own block between the outcome and the exit hint; `None`/empty leaves
+  output identical to the single-argument form -- see `pipeline/AGENTS.md`'s "Run report"
+  section.
 
 ## `InputRelay` (`input_relay.py`), `ActivityRelay` (`activity.py`), `ApprovalRelay` (`approval_relay.py`)
 
@@ -148,18 +162,23 @@ first and hands one side to `StepContext`, the other to `ReviewApp`.
 
 The one remaining modal: a `ModalScreen[str]` with a prompt `Static` and an `Input`,
 dismissing with the submitted line. Used only by the `InputRelay` seam. (Approval used to
-have its own modal pair here; that was replaced by `FindingsList`'s inline decision selector
+have its own modal pair here; that was replaced by `FindingBox`'s inline decision selector
 — see below.)
 
 ## Widgets (`widgets/`)
 
 One Textual widget class per module. `widgets/__init__.py` is a barrel re-exporting the
 full public (and test-imported private) surface, so `from code_review.tui.widgets import X`
-keeps resolving regardless of which submodule defines `X`. Dependency direction:
-`styles`/`base` have no internal deps → `pipeline_box`/`findings_description`/`status_box`
-depend on those → `findings_suggestion` is standalone → `finding` depends on
-`findings_description` + `findings_suggestion` → `findings_list_view` depends on `finding`
-→ `findings_list` depends on `finding` + `findings_list_view`.
+keeps resolving regardless of which submodule defines `X`. Every Findings-related widget
+lives under `widgets/Findings/`, one subfolder per box, each `.tcss` co-located with its
+widget module (loaded via `Path(__file__).with_suffix(".tcss")`); `tokens.tcss` itself
+stays in `widgets/`, so those modules read it via `Path(__file__).parent.parent /
+"tokens.tcss"` instead of the sibling-relative `with_name` lookup the rest of `widgets/`
+uses. Dependency direction: `styles`/`base` have no internal deps → `pipeline_box`/
+`Findings.findings_description`/`status_box` depend on those → `Findings.
+findings_suggestion` is standalone → `Findings.findings_list` (`Finding` + the internal
+`_FindingsListView`) depends on `findings_description` + `findings_suggestion` →
+`Findings.finding` (`FindingBox`) depends on `findings_list` + `findings_suggestion`.
 
 Every widget takes plain data (`StepRow`, `Finding`, ...) and never reads a `StepEvent`
 stream or a registry/agent output itself — `app.py`/`state.py` own that translation.
@@ -174,7 +193,7 @@ derived from the status set).
 ### `base.py` — `_BorderedBox`
 
 Shared `DEFAULT_CSS` (border/padding, from `base.tcss`) for `PipelineBox`/`StatusBox`, both
-`Static` subclasses. `FindingsList` needs a `Vertical` instead, so it doesn't extend this.
+`Static` subclasses. `FindingBox` needs a `Vertical` instead, so it doesn't extend this.
 
 ### `PipelineBox` (`pipeline_box.py`)
 
@@ -182,11 +201,15 @@ One line per registry step: status icon, name, elapsed/final duration, nested ac
 lines. Always composed (unlike the Findings/Status boxes) — a step with no event yet still
 renders as a pending placeholder.
 
-- `format_row`/`render_rows`/`format_activity_row`/`gradient_text` are pure and
-  unit-tested without Textual; `render_rows_live` renders Rich renderables so the running
-  row's name shimmers (`gradient_text`, phased by `time.monotonic()`) and its icon spins
-  (`Spinner`, cached per step name in `PipelineBox._spinners` so the animation clock
-  doesn't reset every render).
+- `format_row`/`render_rows`/`format_activity_row`/`_iter_activity_lines`/`gradient_text`
+  are pure and unit-tested without Textual; `render_rows_live` renders Rich renderables so
+  the running row's name shimmers (`gradient_text`, phased by `time.monotonic()`) and its
+  icon spins (`Spinner`, cached per step name in `PipelineBox._spinners` so the animation
+  clock doesn't reset every render). `_iter_activity_lines` flattens an `ActivityRow`
+  tree (`state.py`'s `backfill_activities`) into `(activity, depth, is_last)` triples in
+  display order — a row's own children immediately follow it, one `format_activity_row`
+  indent level deeper — shared by `render_rows`/`render_rows_live` so both walk the tree
+  the same way.
 - `PipelineBox` owns no timer of its own: `animate_shimmer` is a plain, cheap
   (`layout=False`) repaint method that `ReviewApp`'s single tick timer (`app.py`'s
   `_on_tick`) calls on most ticks, at `_SHIMMER_TICK_SECONDS`'s 12.5Hz rate (matching
@@ -206,7 +229,7 @@ renders as a pending placeholder.
 One-line run outcome, mounted only once the run is done (`app.py`'s `_render_status`) —
 a still-running pipeline shows no Status box at all, not an empty one.
 
-### `FindingsList` (`findings_list.py`)
+### `FindingBox` (`Findings/finding.py`)
 
 The Findings box: the most recently completed step's findings, one `Finding` row each, plus
 a severity-count summary and a bound-key footer hint. A `Vertical`, not `_BorderedBox` — it
@@ -242,40 +265,50 @@ Status box's "no box, not an empty box" rule.
   common case (row count unchanged) updates every row in place, touching no
   `_FindingsListView`-level DOM structure, so cursor/mode state survives untouched.
 
-### `_FindingsListView` (`findings_list_view.py`)
+### `Finding` + `_FindingsListView` (`Findings/findings_list.py`)
 
-The focusable `ListView` hosting one `Finding` per finding —
+The list of finding rows, in one module since together they constitute "the list of
+findings": `Finding` is one row (composes `FindingsDescription` + `FindingsSuggestion` in
+a horizontal split, shadows `pipeline.findings.Finding` deliberately — imported there as
+`FindingData` — since this widget's identity *is* "one finding, rendered." Owns three
+pieces of per-row state: display mode (`hidden`/`plain`/`decision`), a decision-cycle
+browsing cursor, and the row's own recorded `ApprovalResponse`, `None` until decided.
+`ListItem.can_focus=False` — carries no key bindings of its own); `_FindingsListView` is
+the focusable `ListView` hosting one `Finding` per finding —
 `can_focus=True, can_focus_children=False`, so all keyboard bindings live here (never on
 `Finding`, since `ListView`'s own action methods index against `self._nodes` unfiltered) and
-delegate to the owning `FindingsList` (a no-op while not parked). Bindings: left/right cycle
+delegate to the owning `FindingBox` (a no-op while not parked). Bindings: left/right cycle
 the highlighted row's decision entries, digits 1-9 jump to that entry, "f" opens the chat,
 "s"/"x" skip/abort, "escape" cancels an open chat without resolving the park.
 
-### `Finding` (`finding.py`)
+### `FindingsDescription` (`Findings/findings_description.py`)
 
-One row: composes `FindingsDescription` + `FindingsSuggestion` in a horizontal split.
-Shadows `pipeline.findings.Finding` deliberately (imported there as `FindingData`) — this
-widget's identity *is* "one finding, rendered." Owns three pieces of per-row state: display
-mode (`hidden`/`plain`/`decision`), a decision-cycle browsing cursor, and the row's own
-recorded `ApprovalResponse` (`None` until decided). `ListItem.can_focus=False` — carries no
-key bindings of its own.
+The left column, `width: 1fr` matched to `FindingsSuggestion`'s own `1fr` so every row
+shares an identical 50/50 split regardless of highlight state, plus a `border-right`
+divider present on EVERY row (see `FindingsSuggestion` below for why that divider has to
+live here rather than there). A `Vertical` composing two children: `FindingTitle` --
+severity dot, decided-marker, `<severity>: <one-line-truncated description>{ (location)}`
+(`truncate_to_one_line`, `_TITLE_MAX_CHARS`) -- renders on every row, always; `Finding
+ExpandedDescription` -- the full, untruncated `finding.description` -- only while that
+row is highlighted (`FindingsDescription.set_expanded`, driven from `Finding`'s own mode
+transitions, same call sites that already toggle `FindingsSuggestion`). This split keeps
+an unfocused row to one short line instead of a wall of text. While parked, `FindingTitle`
+also prefixes a decided-marker icon (reusing the "completed"/"skipped" glyphs) so a human
+browsing away from a just-decided row still sees it recorded. `truncate_to_one_line`/
+`format_finding`/`render_description`/`render_title` are pure and unit-tested without
+Textual.
 
-### `FindingsDescription` (`findings_description.py`)
-
-The left column: severity dot + description + location, `width: 1fr` matched to
-`FindingsSuggestion`'s own `1fr` so every row shares an identical 50/50 split regardless of
-highlight state. Renders on every row (unlike `FindingsSuggestion`). While parked, also
-prefixes a decided-marker icon (reusing the "completed"/"skipped" glyphs) so a human
-browsing away from a just-decided row still sees it recorded. `format_finding`/
-`render_description` are pure and unit-tested without Textual.
-
-### `FindingsSuggestion` (`findings_suggestion.py`)
+### `FindingsSuggestion` (`Findings/findings_suggestion.py`)
 
 The right column: that finding's `suggestions`, or — while parked and highlighted — a live
 decision cycle (`suggestions` + a trailing "Chat about it" entry). Standalone module, no
-dependency on any other widget here. `display: none` while hidden so `FindingsDescription`
-takes the full row; the `-visible` class restores `display: block` and draws a full border
-so this column only reads as its own widget once it has content.
+dependency on any other widget here. Always occupies its `1fr` column (no `display: none`
+toggle -- see `.tcss`'s own comment): a `display: none` child reserves zero layout space,
+which used to let `FindingsDescription`'s sibling `1fr` silently expand to fill the whole
+row whenever this column had nothing to show. The `-visible` class now only toggles the
+border + `FindingsDescription`'s own `border-right` is what actually marks the column
+boundary on every row, not just the highlighted one; `clear()`/`show_plain()`/
+`show_decision()` still toggle this column's actual text content.
 
 - Confirming "Chat about it" (or cycling/jumping onto it) swaps that trailing line for a
   live `Input` in place (`ensure_input`), seeded with whatever text is being confirmed —

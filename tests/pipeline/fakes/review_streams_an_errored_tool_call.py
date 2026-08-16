@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Fake Claude CLI proving `ReviewStep`'s tool-call activity relay (the shared
-`tool_stream_relay` in `steps/tool_activity.py`) reports an errored `tool_result` as its own
-one-shot `reporter.log(...)` event -- a second activity beyond the call itself -- while a
-non-error `tool_result` (see the sibling `review_streams_a_tool_call.py` fixture) is not
-logged at all.
+`tool_stream_relay` in `steps/tool_activity.py`) finishes the tool-call span itself with
+`error` set for an errored `tool_result` (mirroring `ActivityHandle.fail(detail)`'s
+convention elsewhere), rather than logging a second, distinct activity.
 
 Only reachable in stream-json mode -- `ReviewStep` only sets `on_stream_event` when a
 `StepContext.activity_reporter` is attached, which is exactly when this fixture's tool

@@ -187,8 +187,8 @@ def describe_auto_fix_findings(
 
 def describe_finding_decisions(decisions: list[FindingDecision]) -> str:
     """Render every `"fix"`-decided finding in `decisions` as combined fix-round
-    instructions text, for `tui.widgets.FindingsList`'s per-finding approval-park
-    aggregation (`FindingsList._resolve_park` combines per-row decisions into the single
+    instructions text, for `tui.widgets.FindingBox`'s per-finding approval-park
+    aggregation (`FindingBox._resolve_park` combines per-row decisions into the single
     `ApprovalResponse` that resolves the park).
 
     `decisions` accepts both `"fix"`- and `"skip"`-decided rows unfiltered; a `"skip"`
