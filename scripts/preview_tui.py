@@ -36,6 +36,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
+from code_review.agent import Usage
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
 from code_review.pipeline.schemas import StepEvent
@@ -102,6 +103,19 @@ _REVIEW_FINDINGS = StepOutcome(
         risk_level="medium",
         risk_rationale="One unhandled-exception path found; nothing else stood out.",
     ),
+    # Standing in for ReviewStep.run's real `result.usage` (see pipeline/AGENTS.md's "Run
+    # report" section) -- gives the Status box's token-usage block real numbers to render.
+    usage=Usage(input_tokens=8400, output_tokens=1250, total_cost_usd=0.0623),
+)
+
+# The fix round's own settle-outcome (see the "fix" branch below) -- a distinct Usage from
+# _REVIEW_FINDINGS's, so the Status box's ReviewStep row visibly sums two rounds together,
+# previewing build_run_report's own multi-round-summing behavior.
+_REVIEW_FIX_ROUND_OUTCOME = StepOutcome(
+    needs_approval=False,
+    auto_fixable=False,
+    payload=[],
+    usage=Usage(input_tokens=2100, output_tokens=340, total_cost_usd=0.0158),
 )
 
 _TEST_SUFFICIENCY_OUTCOME = StepOutcome(
@@ -119,6 +133,7 @@ _TEST_SUFFICIENCY_OUTCOME = StepOutcome(
             )
         ],
     ),
+    usage=Usage(input_tokens=5100, output_tokens=780, total_cost_usd=0.0349),
 )
 
 # `created=True` -- no existing PR for "fix/nil-check" here (mirrors PRStep.run's
@@ -162,20 +177,25 @@ async def _simulate_git_activity(activity_relay: ActivityRelay) -> None:
 
 
 async def _simulate_agent_call(
-    activity_relay: ActivityRelay, label: str, tool_calls: list[str]
+    activity_relay: ActivityRelay, label: str, tool_calls: list[tuple[str, float]]
 ) -> None:
     """`ReviewStep`/`TestSufficiencyStep`'s real shape: one coarse `ctx.report_activity(label)`
-    span for the whole agent call, containing zero or more one-shot `ctx.log(...)` events --
-    `steps/tool_activity.py`'s `tool_stream_relay` reporting each streamed `TOOL_USE` this way
-    for a real `ClaudeCLI` call -- reported here identically via `activity_relay.log(...)` so
-    the activity pane renders exactly as it would live tool-call streaming.
+    span for the whole agent call, containing zero or more nested tool-call spans --
+    `steps/tool_activity.py`'s `tool_stream_relay` opens each one on the streamed `TOOL_USE`
+    and closes it on the matching `TOOL_RESULT`, so its reported duration is the real elapsed
+    time of that call, not an instant one-shot log. Reported here identically via
+    `activity_relay.start(...)`/`.finish(...)`, with each `(label, seconds)` pair in
+    `tool_calls` sleeping a different amount so the activity pane visibly shows distinct,
+    real per-row durations -- exactly what a real long-running `Bash` call next to a fast
+    `Read` call looks like live.
     """
 
     async with activity_relay.activity(label):
         await asyncio.sleep(0.3)
-        for tool_call in tool_calls:
-            await activity_relay.log(tool_call)
-            await asyncio.sleep(0.4)
+        for tool_call, seconds in tool_calls:
+            activity_id = await activity_relay.start(tool_call)
+            await asyncio.sleep(seconds)
+            await activity_relay.finish(activity_id, tool_call)
 
 
 async def _simulate_pr_activity(activity_relay: ActivityRelay) -> None:
@@ -204,26 +224,33 @@ async def _fake_events(
     issues #64/#65 report for real (`WorktreeStep`'s single `git worktree add` span via
     `_simulate_worktree_activity`; `RebaseStep`'s individual `git fetch`/`git rebase` spans
     via `_simulate_git_activity`; `ReviewStep`/`TestSufficiencyStep`'s one coarse agent-call
-    span plus nested one-shot tool-call events via `_simulate_agent_call`; `PRStep`'s `git
-    diff`/`gh pr view`/`gh pr create` spans via `_simulate_pr_activity`) -- reported here
-    the same way, through `activity_relay.activity(label)`/`activity_relay.log(label)`, so
-    `ReviewApp`'s activity worker (`app.py`'s `_consume_activities`) and `state.py`'s
-    `backfill_activities` render them exactly as they would a real run's. `IntentStep`
-    reports none, matching reality (no subprocess). `PRStep`'s outcome also carries a real
+    span plus nested per-tool-call spans via `_simulate_agent_call`; `PRStep`'s `git
+    diff`/`gh pr view`/`gh pr create` spans via `_simulate_pr_activity`) -- reported here the
+    same way, through `activity_relay.activity(label)`/`.start(label)`/`.finish(activity_id,
+    label)`, so `ReviewApp`'s activity worker (`app.py`'s `_consume_activities`) and
+    `state.py`'s `backfill_activities` render them exactly as they would a real run's,
+    including each tool-call row's real (not instant) elapsed duration. `IntentStep` reports
+    none, matching reality (no subprocess). `PRStep`'s outcome also carries a real
     `PullRequestOutcome` payload (`_PR_OUTCOME`), so the Pipeline box's "Pull Request" row
     renders its "→ opened <url>" detail text too (`tui/state.py`'s
     `_detail_for_completed_payload`).
+
+    `_REVIEW_FINDINGS`/`_TEST_SUFFICIENCY_OUTCOME`/`_REVIEW_FIX_ROUND_OUTCOME` each carry a
+    `Usage`, standing in for a real `Result.usage` (`pipeline/AGENTS.md`'s "Run report"
+    section) -- once the run ends, the Status box's token-usage block sums them, including
+    across ReviewStep's own two rounds when a "fix" is requested, previewing
+    `pipeline.run_report.build_run_report`'s multi-round-summing exactly as it behaves live.
 
     ReviewStep's outcome carries `needs_approval=True`, so once its "completed" event is
     yielded this awaits `approval_relay.request_approval(...)` -- exactly the call
     `pipeline.executor.run_steps` makes at a real park -- and blocks until `ReviewApp`'s
     approval-relay worker resolves it from a human answering the parked `FindingsBox`'s
     inline decision selector (issue #87). This mirrors that executor's own approve/skip/
-    fix/abort handling: "fix" re-runs the step for
-    one simulated round (settling on `_NO_FINDINGS`, standing in for a fix that resolved the
-    findings) before moving on; "abort" raises `RunAbortedError`, matching the real failure
-    path this preview's `--fail` flag also exercises; "approve"/"skip" both simply continue
-    to the next step, the same "presentational only" distinction the real executor draws.
+    fix/abort handling: "fix" re-runs the step for one simulated round (settling on
+    `_REVIEW_FIX_ROUND_OUTCOME`, standing in for a fix that resolved the findings) before
+    moving on; "abort" raises `RunAbortedError`, matching the real failure path this
+    preview's `--fail` flag also exercises; "approve"/"skip" both simply continue to the
+    next step, the same "presentational only" distinction the real executor draws.
     """
 
     steps: list[tuple[str, StepOutcome, Callable[[ActivityRelay], Awaitable[None]] | None]] = [
@@ -237,8 +264,8 @@ async def _fake_events(
                 relay,
                 "Agent: reviewing diff via claude",
                 [
-                    "Tool: Read(src/code_review/cli.py)",
-                    "Tool: Bash(git diff --stat)",
+                    ("Tool: Read(src/code_review/cli.py)", 0.3),
+                    ("Tool: Bash(timeout 300 uv run pytest tests/ -q)", 1.4),
                 ],
             ),
         ),
@@ -248,7 +275,7 @@ async def _fake_events(
             lambda relay: _simulate_agent_call(
                 relay,
                 "Agent: assessing test sufficiency via claude",
-                ["Tool: Read(tests/tui/test_app.py)"],
+                [("Tool: Read(tests/tui/test_app.py)", 0.5)],
             ),
         ),
         ("PRStep", _PR_OUTCOME, _simulate_pr_activity),
@@ -293,7 +320,7 @@ async def _fake_events(
                 yield StepEvent(
                     step_name=name,
                     status="completed",
-                    outcome=_NO_FINDINGS,
+                    outcome=_REVIEW_FIX_ROUND_OUTCOME,
                     started_at=fix_started,
                     duration=time.monotonic() - fix_started,
                 )

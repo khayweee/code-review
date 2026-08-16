@@ -1,10 +1,10 @@
-"""Widget-level tests for `PipelineBox`/`FindingsList`, driven with Textual's
+"""Widget-level tests for `PipelineBox`/`FindingBox`, driven with Textual's
 `Pilot`/`run_test()`.
 
 `render_rows`/`format_row`/`format_duration`/`format_finding` are exercised directly for
-the pure formatting rules; `PipelineBox`/`FindingsList` themselves are mounted in a
+the pure formatting rules; `PipelineBox`/`FindingBox` themselves are mounted in a
 minimal `App` and driven through `run_test()` to prove `update_rows`/`update_findings` --
-and, for `FindingsList`, the parked-mode interactive decision flow (issue #87) -- actually
+and, for `FindingBox`, the parked-mode interactive decision flow (issue #87) -- actually
 reach the rendered widget content.
 """
 
@@ -27,9 +27,11 @@ from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.state import ActivityRow, StepRow
 from code_review.tui.widgets import Finding as FindingItem
 from code_review.tui.widgets import (
+    FindingBox,
+    FindingExpandedDescription,
     FindingsDescription,
-    FindingsList,
     FindingsSuggestion,
+    FindingTitle,
     PipelineBox,
     StatusBox,
     _FindingsListView,
@@ -46,6 +48,8 @@ from code_review.tui.widgets import (
     render_rows,
     render_rows_live,
     render_suggestions_plain,
+    render_title,
+    truncate_to_one_line,
 )
 
 
@@ -56,11 +60,17 @@ def _render_content(renderable: object) -> str:
     return buffer.getvalue().rstrip()
 
 
-def _finding_rows_content(findings_list: FindingsList) -> list[str]:
-    """Render every mounted `Finding` row's `FindingsDescription`+`FindingsSuggestion`
-    content to plain text, one entry per row -- the `FindingsList`-equivalent of
-    `_option_list_content`'s old per-`Option` rendering, since a `_FindingsListView` has
-    no single renderable `.content` the way `_BorderedBox`-based widgets do.
+def _finding_rows_content(findings_list: FindingBox) -> list[str]:
+    """Render every mounted `Finding` row's `FindingTitle`+`FindingsSuggestion` content to
+    plain text, one entry per row -- the `FindingBox`-equivalent of `_option_list_content`'s
+    old per-`Option` rendering, since a `_FindingsListView` has no single renderable
+    `.content` the way `_BorderedBox`-based widgets do.
+
+    Reads `FindingTitle` (the always-visible one-line summary), not `FindingsDescription`
+    itself -- `FindingsDescription` is now a bare `Vertical` container (issue: title/
+    expanded-description split) with no single `.content` of its own; tests that
+    specifically cover `FindingExpandedDescription`'s highlight-only full text query it
+    directly instead of going through this helper.
 
     `FindingsSuggestion` is itself a small container (issue #92), not a single `Static`
     the way it was pre-#92 -- its own two `Static` children (every entry before the
@@ -74,12 +84,12 @@ def _finding_rows_content(findings_list: FindingsList) -> list[str]:
 
     rows = []
     for item in findings_list.query(FindingItem):
-        description = _render_content(item.query_one(FindingsDescription).content)
+        title = _render_content(item.query_one(FindingTitle).content)
         suggestion = item.query_one(FindingsSuggestion)
         suggestion_text = "\n".join(
             _render_content(static.content) for static in suggestion.query(Static)
         )
-        rows.append(f"{description}\n{suggestion_text}")
+        rows.append(f"{title}\n{suggestion_text}")
     return rows
 
 
@@ -203,6 +213,36 @@ def test_render_rows_nests_each_rows_activities_beneath_it() -> None:
 
     assert render_rows(rows) == (
         "◔ RebaseStep  1.5s\n  ├  ✔ fetch  0.2s\n  └  ◔ rebase  1.1s\n◌ ReviewStep"
+    )
+
+
+def test_render_rows_nests_a_tool_call_under_its_agent_span_at_a_deeper_indent() -> None:
+    """A tool call an agent made (`ActivityRow.children`) must render one indent level
+    deeper than the agent span that made it, not as a sibling at the same indent -- see
+    `state.py`'s `backfill_activities` docstring."""
+
+    rows = [
+        StepRow(
+            name="ReviewStep",
+            status="running",
+            duration=55.4,
+            activities=(
+                ActivityRow(
+                    label="Agent: reviewing diff via claude",
+                    status="running",
+                    duration=55.4,
+                    children=(
+                        ActivityRow(label="Tool: Read(cli.py)", status="completed", duration=0.1),
+                    ),
+                ),
+            ),
+        ),
+    ]
+
+    assert render_rows(rows) == (
+        "◔ ReviewStep  55.4s\n"
+        "  └  ◔ Agent: reviewing diff via claude  55.4s\n"
+        "    └  ✔ Tool: Read(cli.py)  0.1s"
     )
 
 
@@ -682,6 +722,86 @@ def test_render_description_prefixes_a_skip_decided_marker() -> None:
     assert text.plain == "⏭ ● warning: unclear naming"
 
 
+# --- truncate_to_one_line/render_title: pure formatting ----------------------------------
+
+
+def test_truncate_to_one_line_leaves_short_text_unchanged() -> None:
+    assert truncate_to_one_line("missing null check", max_chars=80) == "missing null check"
+
+
+def test_truncate_to_one_line_leaves_text_exactly_at_the_limit_unchanged() -> None:
+    text = "x" * 80
+
+    assert truncate_to_one_line(text, max_chars=80) == text
+
+
+def test_truncate_to_one_line_truncates_long_text_at_a_word_boundary() -> None:
+    # 90 chars, well past a 40-char cutoff; "authentication" (the word straddling the
+    # cutoff) must not appear cut mid-word in the result.
+    text = (
+        "This finding describes a real problem with the authentication flow that "
+        "spans well past forty characters"
+    )
+
+    truncated = truncate_to_one_line(text, max_chars=40)
+
+    assert truncated == "This finding describes a real problem…"
+    assert len(truncated) <= 41  # 40 chars plus the ellipsis
+    assert "authentication" not in truncated
+
+
+def test_truncate_to_one_line_collapses_a_short_first_line_even_with_more_lines_after_it() -> None:
+    """A description containing an internal newline truncates to its first line alone --
+    matching `tool_activity.py`'s `assistant_text_label` precedent -- even when that first
+    line is well under `max_chars` and would otherwise be left untouched."""
+
+    text = "short summary\nmuch longer continued narration that nobody asked to see in a title"
+
+    assert truncate_to_one_line(text, max_chars=80) == "short summary"
+
+
+def test_truncate_to_one_line_with_no_word_boundary_cuts_at_max_chars() -> None:
+    """One long unbroken token (no spaces before the cutoff) still truncates, instead of
+    silently exceeding `max_chars` because no word boundary was found."""
+
+    text = "x" * 100
+
+    truncated = truncate_to_one_line(text, max_chars=40)
+
+    assert truncated == ("x" * 40) + "…"
+
+
+def test_render_title_truncates_the_description_but_keeps_location_and_severity() -> None:
+    """`render_title` uses `_TITLE_MAX_CHARS` (80) as its default cutoff; only the
+    description is truncated -- `location` still appears in full after it."""
+
+    finding = Finding(
+        severity="warning",
+        description="x" * 100,
+        review_scope="source",
+        location="widgets.py:42",
+    )
+
+    text = render_title(finding)
+
+    assert text.plain == f"● warning: {'x' * 80}… (widgets.py:42)"
+
+
+def test_render_title_matches_render_description_for_a_short_description() -> None:
+    """A description that already fits renders identically through both functions -- the
+    title/expanded-description split changes nothing for the common case."""
+
+    finding = Finding(severity="info", description="fine as-is", review_scope="source")
+
+    assert render_title(finding).plain == render_description(finding).plain
+
+
+def test_render_title_prefixes_a_decided_marker_same_as_render_description() -> None:
+    finding = Finding(severity="warning", description="unclear naming", review_scope="source")
+
+    assert render_title(finding, "fix").plain == render_description(finding, "fix").plain
+
+
 def test_render_suggestions_plain_joins_suggestions_one_per_line() -> None:
     finding = Finding(
         severity="warning",
@@ -829,11 +949,11 @@ def test_render_custom_entry_line_marks_the_cursor_with_no_detail_line() -> None
     assert marked.plain == "> 2. Chat about it"
 
 
-# --- FindingsList, mounted and driven through Pilot ----------------------------------------
+# --- FindingBox, mounted and driven through Pilot ----------------------------------------
 
 
 class _FindingsHostApp(App[None]):
-    """Minimal host app: mounts one `FindingsList` so `Pilot` can drive it directly,
+    """Minimal host app: mounts one `FindingBox` so `Pilot` can drive it directly,
     independent of `ReviewApp`'s event-consuming worker."""
 
     def __init__(
@@ -844,7 +964,7 @@ class _FindingsHostApp(App[None]):
         self._step_name = step_name
 
     def compose(self) -> ComposeResult:
-        yield FindingsList(self._initial_output, self._step_name)
+        yield FindingBox(self._initial_output, self._step_name)
 
 
 def test_findings_list_view_rejects_a_non_finding_child() -> None:
@@ -852,7 +972,7 @@ def test_findings_list_view_rejects_a_non_finding_child() -> None:
     itself assumes this (see that class's docstring) and would otherwise fail silently,
     far from the actual mistake."""
 
-    owner = FindingsList(
+    owner = FindingBox(
         ReviewOutput(findings=[], risk_level="low", risk_rationale="fine"), "ReviewStep"
     )
 
@@ -872,7 +992,7 @@ def test_findings_list_renders_its_initial_findings_on_mount() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             lines = _finding_rows_content(box)
             assert len(lines) == 1
             assert "warning: unclear naming" in lines[0]
@@ -906,7 +1026,7 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             list_view = box.query_one(_FindingsListView)
             assert list_view.index == 0
             lines = _finding_rows_content(box)
@@ -916,14 +1036,207 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
     asyncio.run(scenario())
 
 
+# --- FindingTitle/FindingExpandedDescription: title/expanded-description split -----------
+
+# A realistic long, single-line description (100+ chars, no internal newline) -- the
+# screenshot-reported "wall of text" case this split exists to fix.
+_LONG_DESCRIPTION = (
+    "This endpoint reads the user id straight from the request body without validating "
+    "that the caller is actually authorized to access that specific user's record, which "
+    "lets any authenticated user read or modify another user's data by simply changing "
+    "the id in the payload."
+)
+
+
+def test_finding_title_truncates_a_long_description_to_one_line() -> None:
+    """Acceptance criterion: a 100+ char, no-newline description renders as ONE short
+    line in `FindingTitle`, regardless of highlight state -- `FindingTitle` is always
+    visible and always truncated; only `FindingExpandedDescription` ever shows the full
+    text."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="error", description=_LONG_DESCRIPTION, review_scope="source")
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingBox)
+            title = box.query_one(FindingTitle)
+
+            assert len(_LONG_DESCRIPTION) > 100
+            # `.content.plain` reads the `Text`'s own plain string directly, not console
+            # output at a fixed width -- a console would word-wrap a long enough line into
+            # several rows, which would make a wrapped ellipsis-truncated title look
+            # indistinguishable from a genuinely multi-line one for this assertion's purposes.
+            rendered = title.content.plain
+            assert "\n" not in rendered
+            assert len(rendered) < len(_LONG_DESCRIPTION)
+            assert rendered.endswith("…")
+
+    asyncio.run(scenario())
+
+
+def test_finding_expanded_description_shows_full_text_only_for_the_highlighted_row() -> None:
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="error", description=_LONG_DESCRIPTION, review_scope="source"),
+                Finding(severity="warning", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingBox)
+            rows = list(box.query(FindingItem))
+            detail0 = rows[0].query_one(FindingExpandedDescription)
+            detail1 = rows[1].query_one(FindingExpandedDescription)
+
+            # Row 0 is highlighted by default (index 0) -- its full text is shown.
+            # `.content` is the plain string passed to `Static.update()`/`__init__`
+            # verbatim (no console word-wrap involved), so this compares exactly.
+            assert detail0.has_class("-visible")
+            assert detail0.content == _LONG_DESCRIPTION
+            # Row 1 is not highlighted -- its detail is hidden (never populated in the
+            # first place, since it was never highlighted).
+            assert not detail1.has_class("-visible")
+            assert detail1.content == "second finding"
+
+    asyncio.run(scenario())
+
+
+def test_finding_expanded_description_collapses_immediately_when_highlight_moves_away() -> None:
+    """Moving the highlight off a row must hide `FindingExpandedDescription` on the SAME
+    re-render path that already hides `FindingsSuggestion` (`Finding.set_hidden`,
+    `on_list_view_highlighted`) -- not a second, independently-timed mechanism."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="error", description=_LONG_DESCRIPTION, review_scope="source"),
+                Finding(severity="warning", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingBox)
+            box.query_one(_FindingsListView).focus()
+            rows = list(box.query(FindingItem))
+            detail0 = rows[0].query_one(FindingExpandedDescription)
+            detail1 = rows[1].query_one(FindingExpandedDescription)
+            assert detail0.has_class("-visible")
+
+            await pilot.press("down")
+            await pilot.pause()
+
+            # Hiding only toggles `-visible` (`display: none`) -- it doesn't blank the
+            # text -- so row 0's `.content` is untouched; what matters is that it's no
+            # longer visible.
+            assert not detail0.has_class("-visible")
+            assert detail1.has_class("-visible")
+            assert detail1.content == "second finding"
+
+    asyncio.run(scenario())
+
+
+# --- FindingsDescription: persistent divider + stable column width -----------------------
+
+
+def test_findings_description_column_width_is_identical_regardless_of_suggestion_visibility() -> (
+    None
+):
+    """Regression test for the "wall of text"/floating-suggestion screenshot bug: before
+    the fix, `FindingsSuggestion`'s `display: none` while hidden reserved zero layout
+    space, so `FindingsDescription`'s sibling `1fr` silently expanded to fill the whole
+    row on every non-highlighted row. The left column's region must be identical whether
+    or not the row is highlighted (and therefore whether or not `FindingsSuggestion` has
+    visible content) -- every row keeps the same stable two-column shape."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="first finding",
+                    review_scope="source",
+                    suggestions=["fix it"],
+                ),
+                Finding(severity="error", description="second finding", review_scope="source"),
+                Finding(severity="info", description="third finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingBox)
+            rows = list(box.query(FindingItem))
+            descriptions = [row.query_one(FindingsDescription) for row in rows]
+            suggestions = [row.query_one(FindingsSuggestion) for row in rows]
+
+            # Row 0 is highlighted (visible suggestion + border); rows 1-2 are not.
+            assert suggestions[0].has_class("-visible")
+            assert not suggestions[1].has_class("-visible")
+            assert not suggestions[2].has_class("-visible")
+
+            widths = {description.region.width for description in descriptions}
+            x_positions = {description.region.x for description in descriptions}
+            assert len(widths) == 1, f"description column widths differ: {widths}"
+            assert len(x_positions) == 1, f"description column x positions differ: {x_positions}"
+            # Sanity check: the reserved width is a real ~half-box column, not a collapsed
+            # (near-zero) one and not one that expanded to fill the whole row.
+            assert 0 < descriptions[0].region.width < box.region.width
+
+    asyncio.run(scenario())
+
+
+def test_findings_description_draws_a_border_right_divider_on_every_row() -> None:
+    """A real, always-drawn vertical divider between the two columns -- present on every
+    row, not just the highlighted one (`FindingsSuggestion`'s own border only draws while
+    visible)."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(severity="warning", description="first finding", review_scope="source"),
+                Finding(severity="error", description="second finding", review_scope="source"),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingBox)
+            rows = list(box.query(FindingItem))
+
+            for row in rows:
+                description = row.query_one(FindingsDescription)
+                border_right = description.styles.border_right
+                assert border_right[0], f"no border-right rendered for row: {border_right}"
+
+    asyncio.run(scenario())
+
+
 # def test_findings_list_highlighted_row_recolors_text_with_no_background_fill() -> None:
 #     """The highlighted row must not get a solid background fill -- Textual's own two
 #     built-in `ListView` highlight rules (`_list_view.py`'s blurred `& > ListItem.-highlight`
-#     and focused `&:focus { & > ListItem.-highlight }`) are overridden (`finding.tcss`) so
+#     and focused `&:focus { & > ListItem.-highlight }`) are overridden (`findings_list.tcss`) so
 #     only the text recolors, to this box's own border color (`$primary`), in both focus
 #     states. `FindingsDescription`'s own rendered text is checked too, not just `Finding`'s
 #     own `styles.color` -- overriding `color` on `Finding` alone is not sufficient (see
-#     `finding.tcss`'s own comment on Textual's `auto-color` companion property)."""
+#     `findings_list.tcss`'s own comment on Textual's `auto-color` companion property)."""
 
 #     async def scenario() -> None:
 #         output = ReviewOutput(
@@ -937,7 +1250,7 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
 #         app = _FindingsHostApp(output, "ReviewStep")
 #         async with app.run_test() as pilot:
 #             await pilot.pause()
-#             box = app.query_one(FindingsList)
+#             box = app.query_one(FindingBox)
 #             list_view = box.query_one(_FindingsListView)
 #             rows = list(box.query(FindingItem))
 #             desc0 = rows[0].query_one(FindingsDescription)
@@ -952,7 +1265,7 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
 #             assert Color.from_rich_color(desc1.rich_style.color) != primary
 
 #             # The focused default rule is the one whose `color` this ticket's own
-#             # verification found hardest to beat (see `finding.tcss`) -- prove the blurred
+#             # verification found hardest to beat (see `findings_list.tcss`) -- prove the blurred
 #             # state independently rather than assuming it behaves the same way.
 #             app.set_focus(None)
 #             await pilot.pause()
@@ -965,7 +1278,7 @@ def test_findings_list_highlights_index_0_by_default_and_shows_only_its_suggesti
 
 def test_findings_suggestion_has_a_suggestion_border_title() -> None:
     """`FindingsSuggestion.border_title` is set directly in `__init__`, the same mechanism
-    `PipelineBox`/`FindingsList`/`StatusBox` already use -- it only actually renders once a
+    `PipelineBox`/`FindingBox`/`StatusBox` already use -- it only actually renders once a
     border is drawn (the `-visible` class), but the attribute itself is set unconditionally,
     same as those other widgets' own `border_title`."""
 
@@ -980,7 +1293,7 @@ def test_findings_suggestion_has_a_suggestion_border_title() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             suggestion = box.query_one(FindingsSuggestion)
             assert suggestion.border_title == "Suggestion"
 
@@ -1009,7 +1322,7 @@ def test_findings_suggestion_custom_entry_is_styled_a_muted_gray_distinct_from_e
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
@@ -1052,7 +1365,7 @@ def test_findings_suggestion_custom_entry_divider_only_shows_in_decision_mode() 
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             row = list(box.query(FindingItem))[0]
             suggestion = row.query_one(FindingsSuggestion)
             custom_static = suggestion.query(Static)[1]
@@ -1092,7 +1405,7 @@ def test_findings_list_arrow_key_down_moves_which_finding_shows_its_suggestions(
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             await pilot.pause()
             await pilot.press("down")
@@ -1135,7 +1448,7 @@ def test_findings_list_update_findings_preserves_a_browsed_to_highlight() -> Non
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             await pilot.pause()
             await pilot.press("down")
@@ -1165,7 +1478,7 @@ def test_findings_list_update_findings_replaces_the_rendered_rows() -> None:
         app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
 
             updated = ReviewOutput(
                 findings=[Finding(severity="error", description="second", review_scope="source")],
@@ -1200,7 +1513,7 @@ def test_findings_list_update_findings_growing_the_finding_count_keeps_the_old_h
         app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
 
             grown = ReviewOutput(
                 findings=[
@@ -1257,7 +1570,7 @@ def test_findings_list_update_findings_shrinking_the_finding_count_clamps_the_hi
         app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             await pilot.pause()
             await pilot.press("down")
@@ -1305,7 +1618,7 @@ def test_findings_list_renders_a_test_sufficiency_output_on_mount() -> None:
         app = _FindingsHostApp(output, "TestSufficiencyStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             lines = _finding_rows_content(box)
             assert "warning: no test covers the retry path" in lines[0]
             assert box.query_one("#findings-summary", Static).content == (
@@ -1321,7 +1634,7 @@ def test_findings_list_border_title_names_the_owning_step() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             assert box.border_title == "Findings -- ReviewStep"
 
     asyncio.run(scenario())
@@ -1333,7 +1646,7 @@ def test_findings_list_update_findings_updates_the_border_title_to_the_new_step(
         app = _FindingsHostApp(initial, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
 
             updated = TestSufficiencyOutput(
                 findings=[], tested=[], testing_summary="fine", artifacts=[]
@@ -1356,7 +1669,7 @@ def test_findings_list_accepts_a_bare_list_of_findings() -> None:
         app = _FindingsHostApp(findings, "RebaseStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             lines = _finding_rows_content(box)
             assert "error: rebase left a conflict marker" in lines[0]
             assert box.query_one("#findings-summary", Static).content == (
@@ -1366,7 +1679,7 @@ def test_findings_list_accepts_a_bare_list_of_findings() -> None:
     asyncio.run(scenario())
 
 
-# --- FindingsList, parked-mode interactive decision flow (issue #87, per-finding by #98) -
+# --- FindingBox, parked-mode interactive decision flow (issue #87, per-finding by #98) -
 
 
 def test_findings_list_await_decision_populates_the_footer_hint_when_called_right_after_mount() -> (
@@ -1377,19 +1690,19 @@ def test_findings_list_await_decision_populates_the_footer_hint_when_called_righ
     mount, with no intervening `await` of its own (the ordinary production shape: `app.py`'s
     `_relay_approval` calls `_render_findings()` -- which does the mount -- then
     `await_decision()` right after, in the same synchronous stretch of that one coroutine,
-    the moment a step's very first park mounts a brand-new `FindingsList`), silently no-op'd
+    the moment a step's very first park mounts a brand-new `FindingBox`), silently no-op'd
     via `_set_footer_hint`'s own `NoMatches` guard -- and, unlike `Finding`'s own
     `_apply_mode`-on-compose catch-up or the highlighted row's decision cycle/focus (both of
     which already awaited `_await_list_view()` before this fix), nothing else ever primed
     the footer again for the rest of that park, leaving it blank the whole time.
 
-    Mounting `FindingsList` via `_FindingsHostApp.compose()` (every other test in this file)
+    Mounting `FindingBox` via `_FindingsHostApp.compose()` (every other test in this file)
     doesn't reproduce this: that box is composed as part of the app's own initial-screen
     startup, which `run_test()` already lets settle before a test body ever runs, so its
     `#findings-footer` already exists by the time any test calls `await_decision()` on it.
-    This test instead mounts `FindingsList` dynamically, inside the same coroutine that
+    This test instead mounts `FindingBox` dynamically, inside the same coroutine that
     immediately calls `await_decision()` on it with zero intervening `await` -- mirroring
-    `_relay_approval`'s own shape exactly -- so `FindingsList.compose()` provably has not
+    `_relay_approval`'s own shape exactly -- so `FindingBox.compose()` provably has not
     run by the time `await_decision()`'s first synchronous statements do."""
 
     class _EmptyHostApp(App[None]):
@@ -1408,7 +1721,7 @@ def test_findings_list_await_decision_populates_the_footer_hint_when_called_righ
         app = _EmptyHostApp()
 
         async def _mount_and_park() -> ApprovalResponse:
-            box = FindingsList(output, "ReviewStep")
+            box = FindingBox(output, "ReviewStep")
             # no `await` between this and `await_decision()` below
             app.mount(box)
             return await box.await_decision()
@@ -1418,7 +1731,7 @@ def test_findings_list_await_decision_populates_the_footer_hint_when_called_righ
             task = asyncio.ensure_future(_mount_and_park())
             await pilot.pause()
 
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             footer = box.query_one("#findings-footer", Static)
             assert footer.content != ""
 
@@ -1445,7 +1758,7 @@ def test_findings_list_await_decision_marks_the_highlighted_row_s_decision_curso
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
 
@@ -1488,7 +1801,7 @@ def test_findings_list_plain_up_down_highlighting_never_auto_opens_the_chat_whil
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1532,7 +1845,7 @@ def test_findings_list_arrow_keys_cycle_the_decision_cursor_while_parked() -> No
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1579,7 +1892,7 @@ def test_findings_list_enter_confirms_the_cursor_and_resolves_the_pending_decisi
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1617,7 +1930,7 @@ def test_findings_list_digit_shortcut_jumps_the_decision_cursor_while_parked() -
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1652,7 +1965,7 @@ def test_findings_list_digit_shortcut_past_the_entry_count_is_a_no_op() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1671,7 +1984,7 @@ def test_findings_list_digit_shortcut_past_the_entry_count_is_a_no_op() -> None:
 
 def test_findings_list_cursor_arriving_at_chat_about_it_via_digit_jump_auto_opens_it() -> None:
     """A digit-key jump landing on `_CUSTOM_ENTRY` auto-opens and focuses the inline chat's
-    `Input`, with no further keypress -- `FindingsList._jump_decision`'s counterpart to
+    `Input`, with no further keypress -- `FindingBox._jump_decision`'s counterpart to
     `_cycle_decision`'s left/right behavior (see `test_findings_list_arrow_keys_cycle_the_
     decision_cursor_while_parked` above for the right-arrow case)."""
 
@@ -1691,7 +2004,7 @@ def test_findings_list_cursor_arriving_at_chat_about_it_via_digit_jump_auto_open
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1728,7 +2041,7 @@ def test_findings_list_opening_the_chat_widget_twice_mounts_only_one() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1764,7 +2077,7 @@ def test_findings_list_s_shortcut_resolves_directly_while_parked() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1795,7 +2108,7 @@ def test_findings_list_a_shortcut_is_a_no_op_while_parked() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1825,7 +2138,7 @@ def test_findings_list_f_shortcut_opens_the_inline_chat_widget_empty() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1870,7 +2183,7 @@ def test_findings_list_confirming_a_suggestion_records_it_as_the_fix_immediately
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1890,7 +2203,7 @@ def test_findings_list_confirming_a_suggestion_records_it_as_the_fix_immediately
 def test_findings_list_letter_shortcuts_are_no_ops_while_not_parked() -> None:
     """ "a" has no binding at all anymore (approve was removed for good); "s" is bound again
     (`action_quick_skip`, a restored global escape hatch alongside "x") but its handler,
-    `FindingsList._quick_decision`, itself no-ops outside a park -- so pressing either
+    `FindingBox._quick_decision`, itself no-ops outside a park -- so pressing either
     outside a park does nothing, same as every other interactive binding here, just via two
     different mechanisms."""
 
@@ -1905,7 +2218,7 @@ def test_findings_list_letter_shortcuts_are_no_ops_while_not_parked() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
 
             await pilot.press("a")
@@ -1942,7 +2255,7 @@ def test_findings_list_update_findings_preserves_the_decision_cursor_across_a_re
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -1995,7 +2308,7 @@ def test_findings_list_update_findings_preserves_a_mounted_chat_across_a_redunda
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2043,7 +2356,7 @@ def test_findings_list_escape_cancels_the_chat_without_resolving_the_park() -> N
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2089,7 +2402,7 @@ def test_findings_list_arrow_navigation_away_from_an_open_chat_keeps_the_list_fo
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             list_view = box.query_one(_FindingsListView)
             list_view.focus()
             task = asyncio.ensure_future(box.await_decision())
@@ -2117,7 +2430,7 @@ def test_findings_list_arrow_navigation_away_from_an_open_chat_keeps_the_list_fo
     asyncio.run(scenario())
 
 
-# --- FindingsList, per-finding decisions and aggregation (issue #98) --------------------
+# --- FindingBox, per-finding decisions and aggregation (issue #98) --------------------
 
 
 def test_findings_list_recording_a_decision_does_not_resolve_a_multi_finding_park() -> None:
@@ -2137,7 +2450,7 @@ def test_findings_list_recording_a_decision_does_not_resolve_a_multi_finding_par
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2173,7 +2486,7 @@ def test_findings_list_recording_a_decision_advances_the_cursor_to_the_next_unde
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             list_view = box.query_one(_FindingsListView)
             list_view.focus()
             task = asyncio.ensure_future(box.await_decision())
@@ -2212,7 +2525,7 @@ def test_findings_list_advancing_to_the_next_undecided_row_wraps_around() -> Non
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             list_view = box.query_one(_FindingsListView)
             list_view.focus()
             task = asyncio.ensure_future(box.await_decision())
@@ -2247,7 +2560,7 @@ def test_findings_list_aggregates_fix_decided_findings_once_every_row_is_decided
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2307,7 +2620,7 @@ def test_findings_list_confirming_recommended_suggestions_across_rows_aggregates
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             list_view = box.query_one(_FindingsListView)
             list_view.focus()
             task = asyncio.ensure_future(box.await_decision())
@@ -2350,7 +2663,7 @@ def test_findings_list_resolves_skip_when_every_row_is_skip_decided() -> None:
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2383,7 +2696,7 @@ def test_findings_list_revisiting_a_decided_row_overwrites_its_decision() -> Non
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             list_view = box.query_one(_FindingsListView)
             list_view.focus()
             task = asyncio.ensure_future(box.await_decision())
@@ -2445,7 +2758,7 @@ def test_findings_list_revisiting_a_chat_decided_row_shows_its_typed_instruction
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             list_view = box.query_one(_FindingsListView)
             list_view.focus()
             task = asyncio.ensure_future(box.await_decision())
@@ -2521,7 +2834,7 @@ def test_findings_list_abort_resolves_immediately_regardless_of_per_row_progress
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2560,7 +2873,7 @@ def test_findings_list_single_finding_park_resolves_immediately_on_one_decision(
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2580,7 +2893,7 @@ def test_findings_list_single_finding_park_resolves_immediately_on_one_decision(
 
 
 def test_findings_list_await_decision_resets_stale_decisions_from_a_previous_round() -> None:
-    """A fix-round re-park on the same `FindingsList` (a step's own re-run after a human's
+    """A fix-round re-park on the same `FindingBox` (a step's own re-run after a human's
     "fix" instructions didn't resolve it) must not carry over the previous round's per-row
     decisions onto the fresh one -- `await_decision` clears every row via `Finding.
     clear_decision` at the very start of each call."""
@@ -2597,7 +2910,7 @@ def test_findings_list_await_decision_resets_stale_decisions_from_a_previous_rou
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
 
             first_task = asyncio.ensure_future(box.await_decision())
@@ -2623,9 +2936,10 @@ def test_findings_list_await_decision_resets_stale_decisions_from_a_previous_rou
 
 def test_findings_list_decided_marker_is_visible_on_every_row_regardless_of_highlight() -> None:
     """`FindingsSuggestion` only ever shows for the highlighted row (issue #88, unchanged),
-    so the decided marker on `FindingsDescription` -- visible on every row -- is what lets a
-    human tell a decided row apart from an undecided one while browsing anywhere in the
-    list, not just the row they last acted on."""
+    so the decided marker on `FindingTitle` -- visible on every row, always-on unlike
+    `FindingExpandedDescription` -- is what lets a human tell a decided row apart from an
+    undecided one while browsing anywhere in the list, not just the row they last acted
+    on."""
 
     async def scenario() -> None:
         output = ReviewOutput(
@@ -2639,7 +2953,7 @@ def test_findings_list_decided_marker_is_visible_on_every_row_regardless_of_high
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()
@@ -2671,7 +2985,7 @@ def test_findings_list_footer_hint_shows_a_decided_progress_count_while_parked()
         app = _FindingsHostApp(output, "ReviewStep")
         async with app.run_test() as pilot:
             await pilot.pause()
-            box = app.query_one(FindingsList)
+            box = app.query_one(FindingBox)
             box.query_one(_FindingsListView).focus()
             task = asyncio.ensure_future(box.await_decision())
             await pilot.pause()

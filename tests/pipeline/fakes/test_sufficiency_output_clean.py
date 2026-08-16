@@ -3,6 +3,9 @@
 "info"/"no-op" findings, alongside a full `tested`/`testing_summary`/`artifacts` payload --
 proving `TestSufficiencyStep` reports `needs_approval=False` when nothing resolves to
 "ask-user".
+
+Also reports `usage`/`total_cost_usd` (see `claude_cli.py`'s `_usage_from`), proving
+`TestSufficiencyStep.run` threads `Result.usage` onto its returned `StepOutcome.usage`.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ response = {
                 "location": "tests/test_greeting.py:12",
             }
         ],
-    }
+    },
+    "usage": {"input_tokens": 900, "output_tokens": 210},
+    "total_cost_usd": 0.0198,
 }
 print(json.dumps(response))

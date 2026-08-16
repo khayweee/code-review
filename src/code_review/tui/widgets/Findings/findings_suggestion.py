@@ -109,13 +109,14 @@ class FindingsSuggestion(Vertical):
 
     A `Vertical` composing two `Static`s: `self._entries` for every entry before
     `_CUSTOM_ENTRY`, `self._custom` for that entry's own line, since decision mode needs
-    to replace the trailing line with a live `Input` in place. `display: none` while
-    hidden, so `FindingsDescription` takes the whole row; the `-visible` class restores
-    it and draws a full border.
+    to replace the trailing line with a live `Input` in place. Always occupies its `1fr`
+    column, hidden or not (see `.tcss`'s own comment) -- the `-visible` class only toggles
+    the border; `clear()`/`show_plain()`/`show_decision()` are what actually toggle the
+    text content.
     """
 
     DEFAULT_CSS = (
-        Path(__file__).with_name("tokens.tcss").read_text()
+        (Path(__file__).parent.parent / "tokens.tcss").read_text()
         + "\n"
         + Path(__file__).with_suffix(".tcss").read_text()
     )

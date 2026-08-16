@@ -1,7 +1,10 @@
 """`ActivityRelay`: a queue of `ActivityEvent`s for nested sub-step activity (e.g.
 `RebaseStep`'s individual `git` calls, or `ReviewStep`'s one agent-call span), reported via
-`async with relay.activity("label"): ...` for a block of work, or `await
-relay.log("label")` for a single point-in-time event, and drained via `next_event()`.
+`async with relay.activity("label"): ...` for a block of work, `await relay.log("label")`
+for a single point-in-time event, or the manually-paired `await relay.start(label)` /
+`await relay.finish(activity_id, label)` for a span whose open and close happen at two
+different callback call sites that can't share a Python block (e.g. `tool_stream_relay`'s
+`TOOL_USE`/`TOOL_RESULT` pair) -- drained via `next_event()`.
 
 Textual-import-free, so it's unit-testable without a running `App`/`Pilot`.
 
@@ -45,6 +48,9 @@ class ActivityRelay:
         # Invoked synchronously right where an event would be queued (e.g. RunLogWriter's
         # write_activity_event), in addition to it being queued for next_event().
         self._on_event = on_event
+        # parent_id captured at start()-time, keyed by activity_id, so finish() doesn't
+        # need the caller to pass it back.
+        self._open_parents: dict[int, int | None] = {}
 
     def _emit(self, event: ActivityEvent) -> None:
         if self._on_event is not None:
@@ -84,6 +90,36 @@ class ActivityRelay:
 
         async with self.activity(label):
             pass
+
+    async def start(self, label: str) -> int:
+        """Open a span named `label` whose "finished" event will be reported later by a
+        separate `finish(activity_id, ...)` call, not by exiting an `async with` block --
+        for callers whose open and close happen at two different callback call sites (e.g.
+        `tool_stream_relay`'s `TOOL_USE`/`TOOL_RESULT` pair) that can't share a Python
+        block. Deliberately does NOT touch the ambient `_current_activity_id` `activity()`
+        uses for auto-nesting: a span opened this way has no children of its own in this
+        design, and two calls may be genuinely concurrent (e.g. Claude calling two tools in
+        one turn: `TOOL_USE`, `TOOL_USE`, `TOOL_RESULT`, `TOOL_RESULT`) -- both must nest
+        under whatever's ambient at `start`-time, never under each other. Returns the new
+        `activity_id`, to be passed to the matching `finish` call.
+        """
+
+        activity_id = next(self._next_id)
+        parent_id = _current_activity_id.get()
+        self._open_parents[activity_id] = parent_id
+        self._emit(ActivityEvent(activity_id, parent_id, label, "started", time.monotonic()))
+        return activity_id
+
+    async def finish(self, activity_id: int, label: str, *, error: str | None = None) -> None:
+        """Close the span opened by `start(...)`'s matching `activity_id`. `error` lands on
+        the "finished" event's own `error` field, mirroring `ActivityHandle.fail(detail)`'s
+        existing behavior for the `activity()`/block-shaped path.
+        """
+
+        parent_id = self._open_parents.pop(activity_id, None)
+        self._emit(
+            ActivityEvent(activity_id, parent_id, label, "finished", time.monotonic(), error)
+        )
 
     async def next_event(self) -> ActivityEvent:
         """The next queued `ActivityEvent`; blocks until one is queued."""

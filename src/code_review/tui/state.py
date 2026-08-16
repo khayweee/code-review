@@ -15,7 +15,8 @@ park/skip override what "completed" would otherwise render, rather than being a 
 `latest_findings` scans `events` for the most recently completed step whose outcome carries
 a non-empty `ReviewOutput`/`TestSufficiencyOutput`/bare `list[Finding]`.
 
-`final_status_message` is the Status box's text once a run has finished.
+`final_status_message` is the Status box's text once a run has finished, with an optional
+`pipeline.run_report.PipelineRunReport` block appended.
 
 `StepRow.detail` is a generic, opt-in extra line of text rendered inline on a step's own
 row, next to its duration -- not PR-specific (a future step could reuse it), but today only
@@ -37,6 +38,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from code_review.pipeline.findings import Finding
+from code_review.pipeline.run_report import PipelineRunReport, format_run_report
 from code_review.pipeline.schemas import StepEvent
 from code_review.pipeline.step import StepOutcome
 from code_review.steps.intent import Intent
@@ -56,20 +58,34 @@ class ActivityRow:
     the same icon/duration formatting a `StepRow` uses. `detail` mirrors `StepRow.detail`'s
     precedent: `None` renders nothing extra, a "failed" row sets it to the
     `ActivityHandle.fail(...)` detail text (e.g. `"exit 1"`) that failed it.
+
+    `children` mirrors `ActivityEvent.parent_id`'s own nesting (e.g. `tool_stream_relay`'s
+    per-tool-call spans, opened while `ReviewStep`'s own "Agent: reviewing diff via claude"
+    span is still the ambient activity -- see `activity.py`'s module docstring): a tool call
+    an agent made renders as this row's own child, not a sibling at the same indent as the
+    agent span that made it.
     """
 
     label: str
     status: Status
     duration: float | None  # elapsed-so-far while running, final duration once finished
     detail: str | None = None
+    children: tuple[ActivityRow, ...] = ()
 
 
 def backfill_activities(
     step_name: str, activity_events: Sequence[tuple[str | None, ActivityEvent]], *, now: float
 ) -> list[ActivityRow]:
     """Turn `activity_events` -- `(owning_step_name, ActivityEvent)` pairs -- into one
-    `ActivityRow` per activity reported under `step_name`, in first-seen order. Pairs tagged
-    with a different step (or `None`) are ignored.
+    `ActivityRow` tree per top-level activity reported under `step_name`, in first-seen
+    order at every level. Pairs tagged with a different step (or `None`) are ignored.
+
+    Nesting follows each `ActivityEvent.parent_id`: an activity started while another one
+    reported under the same step was still open (e.g. a tool call an agent made while its
+    own "Agent: ..." span was open) becomes that row's `children` entry instead of a
+    top-level row of its own -- see `ActivityRow.children`'s own docstring. A `parent_id`
+    pointing outside `step_name`'s own events can't happen: nesting only ever opens while
+    the parent's own block is still executing, which is always inside one step's `run`.
 
     An activity with no matching "finished" event yet reports `now - started_at`; a finished
     one reports its own final elapsed time, `"completed"` unless its "finished" event carries
@@ -80,13 +96,15 @@ def backfill_activities(
     finished_duration: dict[int, float] = {}
     finished_error: dict[int, str | None] = {}
     label_by_id: dict[int, str] = {}
-    order: list[int] = []
+    parent_by_id: dict[int, int | None] = {}
+    child_ids_by_parent: dict[int | None, list[int]] = {}
 
     for owner, event in activity_events:
         if owner != step_name:
             continue
         if event.activity_id not in label_by_id:
-            order.append(event.activity_id)
+            parent_by_id[event.activity_id] = event.parent_id
+            child_ids_by_parent.setdefault(event.parent_id, []).append(event.activity_id)
         label_by_id[event.activity_id] = event.label
         if event.status == "started":
             started_at[event.activity_id] = event.timestamp
@@ -94,27 +112,27 @@ def backfill_activities(
             finished_duration[event.activity_id] = event.timestamp - started_at[event.activity_id]
             finished_error[event.activity_id] = event.error
 
-    rows = []
-    for activity_id in order:
+    def build_row(activity_id: int) -> ActivityRow:
+        children = tuple(
+            build_row(child_id) for child_id in child_ids_by_parent.get(activity_id, [])
+        )
         if activity_id in finished_duration:
             error = finished_error[activity_id]
-            rows.append(
-                ActivityRow(
-                    label=label_by_id[activity_id],
-                    status="failed" if error is not None else "completed",
-                    duration=finished_duration[activity_id],
-                    detail=error,
-                )
+            return ActivityRow(
+                label=label_by_id[activity_id],
+                status="failed" if error is not None else "completed",
+                duration=finished_duration[activity_id],
+                detail=error,
+                children=children,
             )
-        else:
-            rows.append(
-                ActivityRow(
-                    label=label_by_id[activity_id],
-                    status="running",
-                    duration=now - started_at[activity_id],
-                )
-            )
-    return rows
+        return ActivityRow(
+            label=label_by_id[activity_id],
+            status="running",
+            duration=now - started_at[activity_id],
+            children=children,
+        )
+
+    return [build_row(activity_id) for activity_id in child_ids_by_parent.get(None, [])]
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,9 +278,23 @@ def latest_findings(
     return result
 
 
-def final_status_message(error: BaseException | None) -> str:
+def final_status_message(
+    error: BaseException | None,
+    *,
+    report: PipelineRunReport | None = None,
+    display_names: Mapping[str, str] | None = None,
+) -> str:
     """The Status box's message once a run has finished. `error` is `None` for a clean run
-    or the raised exception for one that broke mid-step."""
+    or the raised exception for one that broke mid-step.
+
+    `report`, when given, is rendered via `format_run_report` (`display_names` passed
+    through the same way `backfill`'s own param is) and appended as its own block between
+    the outcome line and the exit hint. `None`, or a report with nothing to show
+    (`format_run_report` returns `""`), leaves this identical to calling with `error` alone.
+    """
 
     outcome = "Pipeline ran successfully." if error is None else f"Pipeline failed: {error}"
+    report_text = "" if report is None else format_run_report(report, display_names=display_names)
+    if report_text:
+        return f"{outcome}\n\n{report_text}\n\nPress 'e' to exit."
     return f"{outcome}\n\nPress 'e' to exit."

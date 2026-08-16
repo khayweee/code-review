@@ -1,0 +1,16 @@
+FindingsDescription {
+    width: 1fr;
+    padding: 0 1;
+    height: auto;
+    border-right: solid $border-color-muted;
+}
+
+FindingExpandedDescription {
+    display: none;
+    color: $fg-secondary;
+    height: auto;
+}
+
+FindingExpandedDescription.-visible {
+    display: block;
+}

@@ -1,10 +1,22 @@
-"""Worktree isolation: the pipeline's first step. Creates a throwaway `git worktree` with
-`ctx.branch` checked out for real (never `--detach` -- see `steps/rebase.py`'s/`steps/pr.py`'s
-own "the branch under review is `ctx.cwd`'s HEAD" assumption, which a detached checkout
-would break) and redirects every later step's `ctx.cwd` at it (`StepOutcome.cwd_override`,
-see `pipeline/AGENTS.md`'s WorktreeStep section), so a run never touches the user's real
-checkout. Runs first so `ctx.cwd`'s HEAD is already the real `<branch>` by the time
-`RebaseStep`/`PRStep` run.
+"""Worktree isolation: the pipeline's first step. Creates a throwaway `git worktree`
+checked out **detached** at `ctx.branch`'s tip commit and redirects every later step's
+`ctx.cwd` at it (`StepOutcome.cwd_override`, see `pipeline/AGENTS.md`'s WorktreeStep
+section), so a run never touches the user's real checkout. Runs first so `ctx.cwd`'s HEAD
+is already at the real `<branch>`'s tip by the time `RebaseStep`/`PRStep` run.
+
+Detached, not a real checkout of `<branch>` by name: `git worktree add <branch>` (no
+`--detach`) refuses to check a branch out into a second worktree while it's already HEAD
+somewhere else -- and it almost always is, since reviewing the branch you're currently on
+is the ordinary workflow, not an edge case. Worse than the refusal itself, forcing past it
+(`git worktree add --force`) shares the branch *ref* across both worktrees: `RebaseStep`'s
+in-place `git rebase origin/<default>` inside the throwaway worktree would then silently
+rewrite that shared ref, leaving the user's real checkout's index/working tree stale
+against its own HEAD -- `git status` there would show the rebase as a pending revert. A
+detached checkout touches no branch ref at all, so it can never collide with (or corrupt)
+another worktree's checkout of the same branch, named or not. `RebaseStep` needs no branch
+name to rebase (`git rebase origin/<default>` rebases HEAD in place regardless of whether
+HEAD is detached); `PRStep` does, so it reads `ctx.branch` directly instead of re-deriving
+a name from `ctx.cwd`'s HEAD (see `steps/pr.py`'s module docstring).
 
 `resolve_branch_head_short_sha`/`create_worktree` are async, built on `steps/gitutils.py`'s
 `run_git`, exactly like every other step's git subprocess work -- non-blocking, and reported
@@ -29,13 +41,6 @@ from code_review.pipeline.step import Step, StepContext, StepOutcome
 from code_review.steps.gitutils import run_git
 
 _UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9._-]")
-
-
-class BranchAlreadyCheckedOutError(RuntimeError):
-    """`ctx.branch` is already checked out elsewhere in this repo (most commonly the user's
-    own main working copy) -- `git worktree add` refuses to check out the same branch into
-    two worktrees at once, and this project's answer is to fail clearly rather than force
-    or auto-detach past it (see `WorktreeStep.run`, the sole raiser)."""
 
 
 def worktrees_root() -> Path:
@@ -75,10 +80,11 @@ async def worktree_path_for_branch(branch: str, cwd: Path) -> Path:
 
 
 async def create_worktree(cwd: Path, worktree_path: Path, branch: str) -> None:
-    """`git worktree add <worktree_path> <branch>` -- a real branch checkout, never
-    `--detach` (see module docstring). Raises `BranchAlreadyCheckedOutError` if `branch` is
-    already checked out in another worktree of this same repo; any other failure raises a
-    plain `RuntimeError` carrying git's own stderr.
+    """`git worktree add --detach <worktree_path> <branch>` -- checks out `branch`'s tip
+    commit with HEAD detached, never a real checkout of `branch` by name (see module
+    docstring for why: it must never collide with, or share a mutable ref with, `branch`
+    being checked out anywhere else in this repo). Raises a plain `RuntimeError` carrying
+    git's own stderr on failure.
 
     Passes `worktree_path` to git relative to `cwd` (via `os.path.relpath`, so it still
     resolves correctly even when `worktree_path` sits outside `cwd`'s own tree, e.g. under
@@ -89,14 +95,9 @@ async def create_worktree(cwd: Path, worktree_path: Path, branch: str) -> None:
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     relative_worktree_path = os.path.relpath(worktree_path, cwd)
-    result = await run_git(["worktree", "add", relative_worktree_path, branch], cwd)
+    result = await run_git(["worktree", "add", "--detach", relative_worktree_path, branch], cwd)
     if result.returncode == 0:
         return
-    if "already checked out" in result.stderr:
-        raise BranchAlreadyCheckedOutError(
-            f"'{branch}' is already checked out elsewhere in this repository -- check out a "
-            "different branch there first, then retry."
-        )
     raise RuntimeError(f"git worktree add {worktree_path} {branch} failed: {result.stderr.strip()}")
 
 

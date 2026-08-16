@@ -4,23 +4,26 @@ issue #60; `PRStep` joined as a fifth step in issue #119; worktree isolation, a 
 `_diff_against_default_branch`, and real end-to-end runs of the full `WorktreeStep` ->
 `IntentStep` -> `RebaseStep` -> `ReviewStep` -> `TestSufficiencyStep` -> `PRStep` pipeline
 (`steps/registry.py`'s `IMPLEMENTED_STEPS`), each now running against a throwaway `git
-worktree` (`steps/worktree.py`'s `WorktreeStep`) with `<branch>` checked out for real, never
-the user's own `repo` checkout. `repo_with_branch` (see its own docstring) leaves `repo`
-itself on local "main" so "feature/change" is free for `WorktreeStep` to check out; since
-worktree isolation makes `<branch>` (not whatever `repo` happens to have checked out) the
-real branch under review, `PRStep` no longer takes its old clean-skip path in the full-run
-tests below -- "feature/change" != `PRStep`'s own default `default_branch` ("main") -- so
-those tests now need a fake `gh` on `PATH` (`_env_with_fake_claude_and_gh`) and a real,
-reachable `origin` whose URL nonetheless parses as a GitHub slug for `resolve_repo_slug`
-(`_github_shaped_origin`, via a fake `ssh` transport so `RebaseStep`'s real `git fetch origin
-main` never touches the network).
+worktree` (`steps/worktree.py`'s `WorktreeStep`) checked out **detached** at `<branch>`'s
+tip commit -- never by name, so it never collides with (or corrupts) `<branch>` already
+being checked out in `repo` itself, the ordinary case when reviewing the branch you're
+currently on (`test_review_succeeds_when_branch_is_already_checked_out_elsewhere` below is
+the regression pin for that). `repo_with_branch` (see its own docstring) leaves `repo`
+itself on local "main" so both branches are exercised across this file's tests: "main"
+(already `repo`'s own HEAD) and "feature/change" (not). Since worktree isolation makes
+`<branch>` (not whatever `repo` happens to have checked out) the real branch under review,
+`PRStep` no longer takes its old clean-skip path when reviewing "feature/change" -- it
+isn't `PRStep`'s own default `default_branch` ("main") -- so those tests need a fake `gh` on
+`PATH` (`_env_with_fake_claude_and_gh`) and a real, reachable `origin` whose URL nonetheless
+parses as a GitHub slug for `resolve_repo_slug` (`_github_shaped_origin`, via a fake `ssh`
+transport so `RebaseStep`'s real `git fetch origin main` never touches the network).
+Reviewing "main" still takes the clean-skip path, since it's still `default_branch` itself.
 
 `WorktreeStep` creation now happens inside the pipeline itself (`StepOutcome.cwd_override`,
-see `pipeline/AGENTS.md`'s WorktreeStep section), not as pre-TUI `cli.py` plumbing -- so the
-"already checked out elsewhere" collision (`test_review_fails_clearly_when_branch_is_already_
-checked_out_elsewhere` below) now surfaces as an ordinary failed pipeline step inside a real
-TUI run (`ReviewApp`'s Status box, "e" to exit), not a pre-TUI `typer.Exit` with no TUI
-flash.
+see `pipeline/AGENTS.md`'s WorktreeStep section), not as pre-TUI `cli.py` plumbing -- so any
+of its own git failures (e.g. an unknown branch) surface as an ordinary failed pipeline step
+inside a real TUI run (`ReviewApp`'s Status box, "e" to exit), not a pre-TUI `typer.Exit`
+with no TUI flash.
 
 `CliRunner`'s captured stdio is never a TTY, so it is this file's natural test of the
 "needs a real terminal" error path -- no mocking `isatty` (see `cli.py`'s `review`
@@ -119,8 +122,9 @@ def repo_with_branch(tmp_path: Path) -> tuple[Path, str]:
     "main", wired to a real `origin` remote whose own "main" is the exact same commit --
     plus a `feature/change` branch one commit ahead of `repo`'s "main" with a real diff
     (`git diff origin/main...feature/change` sees it). `repo` itself is left checked out on
-    "main", not "feature/change" -- so "feature/change" is free for `WorktreeStep`
-    (`steps/worktree.py`) to check out for real when `review` runs against it.
+    "main", not "feature/change" -- exercising both `WorktreeStep` (`steps/worktree.py`)
+    reviewing a branch that's already `repo`'s own HEAD ("main") and one that isn't
+    ("feature/change"); its detached checkout works identically either way.
 
     Two real local repos, mirroring `tests/steps/conftest.py`'s `origin_and_checkout`
     pattern: `origin` stands in for the remote, `repo` is the checkout under test.
@@ -612,8 +616,8 @@ class _LiveOutput:
 
 
 _DONE_MARKER = "Press 'e' to exit."  # `state.final_status_message`'s own closing line
-_PARK_MARKER = "Findings --"  # `FindingsList.border_title`'s own fixed prefix
-# `FindingsList._set_footer_hint`'s own live progress readout, e.g. "1/2 decided".
+_PARK_MARKER = "Findings --"  # `FindingBox.border_title`'s own fixed prefix
+# `FindingBox._set_footer_hint`'s own live progress readout, e.g. "1/2 decided".
 _DECIDED_RE = re.compile(r"(\d+)/(\d+) decided")
 
 
@@ -634,10 +638,10 @@ def _send_key_confirmed(
     """Write `key` to the parked app's stdin and confirm it actually landed, retrying
     once (by resending the identical `key`) if not.
 
-    Confirmation reads `FindingsList`'s own live "N/M decided" progress counter
+    Confirmation reads `FindingBox`'s own live "N/M decided" progress counter
     (`_latest_decided_progress`) -- the only signal that distinguishes "this specific
     decision was recorded" from "a park is still showing". `_PARK_MARKER` alone can't:
-    `FindingsList`'s border title re-renders identically on every ~250ms repaint tick
+    `FindingBox`'s border title re-renders identically on every ~250ms repaint tick
     regardless of whether anything changed, so waiting for it to merely reappear after a
     keypress (this file's first version of this helper) returns almost immediately whether
     or not that keypress actually arrived. "Progress" here is either the decided count
@@ -796,7 +800,7 @@ def _run_review_with_keypresses(
     happened -- confirmed empirically against this Textual version, not just reasoned about.
     "f" and the typed text must be two separate tuples, e.g. `(3.0, "f")` then `(0.5, "looks
     good\r")` -- `_send_key_confirmed` has no content signal for "f" specifically (opening
-    the chat doesn't change `FindingsList`'s "N/M decided" counter), so it degrades to
+    the chat doesn't change `FindingBox`'s "N/M decided" counter), so it degrades to
     sending it, sleeping the full `max_wait_seconds`, then resending once more and sleeping
     again, before the second tuple's own wait covers the mount. `final_wait` is the same
     kind of upper bound, now against `_DONE_MARKER`, before the closing "e".
@@ -930,20 +934,24 @@ _REAL_PTY_FULL_RUN_GROUP = "real_pty_full_run"
 
 
 @pytest.mark.xdist_group(name=_REAL_PTY_FULL_RUN_GROUP)
-def test_review_fails_clearly_when_branch_is_already_checked_out_elsewhere(
+def test_review_succeeds_when_branch_is_already_checked_out_elsewhere(
     repo_with_branch: tuple[Path, str], tmp_path: Path
 ) -> None:
-    """`repo_with_branch` leaves `repo` itself checked out on "main" -- requesting a review
-    of "main" collides with that, exactly the case `git worktree add` refuses ("already
-    checked out"). `WorktreeStep` (the pipeline's first step) raises `worktree.py`'s own
-    `BranchAlreadyCheckedOutError` straight through, so this now surfaces as an ordinary
-    failed pipeline step inside a real `ReviewApp` run (Status box, "e" to exit), not a
-    pre-TUI exit with no TUI flash -- a real terminal is still needed all the way through,
-    and no fake `claude` is needed since `IntentStep` (let alone `ReviewStep`) never runs."""
+    """Regression pin: `repo_with_branch` leaves `repo` itself checked out on "main" --
+    requesting a review of "main" is exactly the ordinary workflow of reviewing the branch
+    you're currently on, the case a real by-name `git worktree add` would refuse ("already
+    checked out"). `WorktreeStep` (the pipeline's first step) now checks its throwaway
+    worktree out detached instead (`steps/worktree.py`'s module docstring), so this must
+    succeed rather than fail -- `repo`'s own checkout of "main" is left untouched throughout.
 
-    repo, _branch = repo_with_branch
-    env = dict(os.environ)
-    env["CODE_REVIEW_STATE_DIR"] = str(tmp_path / "state")
+    "main" also happens to be `PRStep`'s own default base branch, so it takes its clean-skip
+    path (branch == default_branch) with no `gh` call at all -- `_env_with_fake_claude`
+    alone (no fake `gh`/`ssh`) is enough here, unlike the "feature/change" full-run test
+    below."""
+
+    repo, _feature_branch = repo_with_branch
+    env = _env_with_fake_claude(CLEAN_FAKE_CLAUDE, tmp_path)
+    expected_worktree = asyncio.run(worktree_path_for_branch("main", repo))
 
     run = _run_review_and_press_e_to_exit(
         [_code_review_executable(), "review", "main", "--intent", "add world greeting"],
@@ -953,11 +961,15 @@ def test_review_fails_clearly_when_branch_is_already_checked_out_elsewhere(
     result = run.result
     output = _plain(result.stdout)
 
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert "Traceback" not in output
-    assert "already checked out" in output
-    assert "fatal:" not in output  # git's own raw stderr never leaks through
-    assert "◌ Intent" in output  # no further step ran -- WorktreeStep failed first
+    for step_name in ("Worktree", "Intent", "Rebase", "Review", "Test Sufficiency", "Pull Request"):
+        assert step_name in output
+    assert "Pipeline ran successfully." in output
+
+    # `repo`'s own checkout of "main" was never touched by the isolated (detached) worktree.
+    assert _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo).stdout.strip() == "main"
+    assert not expected_worktree.exists()  # removed once the run finished, no --keep-worktree
 
     _assert_no_leftover_code_review_process(run.pgid)
 
@@ -1035,7 +1047,7 @@ def test_review_skipping_both_findings_of_a_two_finding_park_completes_the_run(
 ) -> None:
     """Repro/regression test for issue #98 (per-finding parking): unlike the single-finding
     park above, `BLOCKING_TWO_FINDINGS_FAKE_CLAUDE` returns two "ask-user" findings per
-    step, so `ReviewStep`'s park has a real multi-row `FindingsList` -- the case #98's
+    step, so `ReviewStep`'s park has a real multi-row `FindingBox` -- the case #98's
     per-finding decision model exists for. Both rows must be answered with "s" before
     `ReviewStep`'s park actually resolves (issue #98's own new behavior), and the same
     again for `TestSufficiencyStep`'s park right after.
@@ -1142,7 +1154,7 @@ def test_review_keep_worktree_leaves_it_on_disk_and_reports_its_path(
     mirrors `test_review_parks_at_rebase_step_on_unpushed_local_default_commits` above)
     proves both halves of the flag's contract: the worktree survives the run instead of
     being removed, and its path is echoed so the user can find it -- and it really is a
-    working checkout of `branch`, not an empty directory."""
+    working (detached) checkout of `branch`'s tip commit, not an empty directory."""
 
     repo, branch, _unpushed_sha = repo_with_unpushed_local_default_commits
 
@@ -1172,7 +1184,9 @@ def test_review_keep_worktree_leaves_it_on_disk_and_reports_its_path(
     assert str(expected_worktree) in output
     assert expected_worktree.is_dir()
     checked_out = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], expected_worktree).stdout.strip()
-    assert checked_out == branch
+    assert checked_out == "HEAD"  # detached, never a real checkout of `branch` by name
+    tip = _run_git(["rev-parse", branch], repo).stdout.strip()
+    assert _run_git(["rev-parse", "HEAD"], expected_worktree).stdout.strip() == tip
 
     _assert_no_leftover_code_review_process(run.pgid)
 

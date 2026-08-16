@@ -8,9 +8,13 @@ static conventional-commit-style placeholder; "What Changed" comes straight from
 deterministic fallback; #122 adds a body length guard and screenshot/video artifacts.
 Neither exists yet.
 
-**"The branch under review" is HEAD**, exactly like `steps/rebase.py`: `StepContext` has no
-field naming it, so this step resolves it via `gitutils.current_branch(ctx.cwd)` rather than
-a `StepContext` field.
+**"The branch under review" is `ctx.branch`**, not `ctx.cwd`'s HEAD: `WorktreeStep` checks
+its throwaway worktree out detached (see `steps/worktree.py`'s module docstring), so unlike
+`steps/rebase.py` (which needs no branch name -- `git rebase` works the same on a detached
+HEAD), this step can't re-derive a name from `gitutils.current_branch(ctx.cwd)`; it would
+just get `None`. `gh pr create --head <branch>`/`gh pr view <branch>` only ever needed
+`branch` as a string naming the *remote* branch, never an actual local checkout of it, so
+reading `ctx.branch` directly is correct regardless of what's checked out in `ctx.cwd`.
 
 **"What Changed" diffs against `origin/<default_branch>`, never the literal local
 `<default_branch>` ref** -- the same reasoning as `steps/rebase.py`'s own `git rebase
@@ -34,7 +38,7 @@ from code_review.scm.github import (
     resolve_repo_slug,
     update_pull_request,
 )
-from code_review.steps.gitutils import current_branch, run_git
+from code_review.steps.gitutils import run_git
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 
@@ -108,8 +112,8 @@ class PullRequestOutcome:
 
 @dataclass(frozen=True, slots=True)
 class PRStep(Step):
-    """Finds or creates/updates the PR for the branch under review (`ctx.cwd`'s current
-    HEAD), with a deterministic title/body -- see module docstring. No agent call.
+    """Finds or creates/updates the PR for the branch under review (`ctx.branch`), with a
+    deterministic title/body -- see module docstring. No agent call.
     """
 
     # Remote's default branch, for both the skip check and the PR base. Not
@@ -120,11 +124,7 @@ class PRStep(Step):
     gh_executable: str | Path = "gh"
 
     async def run(self, ctx: StepContext) -> StepOutcome:
-        branch = await current_branch(ctx.cwd)
-        if branch is None:
-            raise RuntimeError(
-                f"could not resolve the current branch in {ctx.cwd} (detached HEAD?)"
-            )
+        branch = ctx.branch
         if branch == self.default_branch:
             # Already on the default branch -- nothing to open a PR for.
             return StepOutcome(needs_approval=False, auto_fixable=False, payload=[])

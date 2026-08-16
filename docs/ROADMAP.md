@@ -55,10 +55,14 @@ on the milestones before it.
    SHA" guard once more than one process/worktree can touch the same checkout. The
    "single-worktree" half of that assumption no longer holds -- every `review` run now gets
    its own throwaway `git worktree`, created by `WorktreeStep`
-   (`src/code_review/steps/worktree.py`), the pipeline's own first step -- but each run still
-   owns its worktree exclusively for its own lifetime (a second concurrent run on the same
-   branch fails fast on git's own "already checked out" collision, surfaced as an ordinary
-   step failure, rather than racing), so this guard still isn't needed yet.
+   (`src/code_review/steps/worktree.py`), the pipeline's own first step, checked out
+   detached at the branch's tip commit (never by name -- reviewing the branch you're
+   currently on, so it's already checked out in your real repo, is the ordinary workflow,
+   not an edge case a by-name checkout could refuse or collide on) -- but each run still
+   owns its worktree exclusively for its own lifetime (a second concurrent run against the
+   same branch state fails fast on git's own "already exists" collision on the worktree
+   directory, surfaced as an ordinary step failure, rather than racing), so this guard
+   still isn't needed yet.
 10. **Trust boundary** (`src/code_review/config.py`). Partition config into
     code-executing/trusted-only fields vs. descriptive/pushed-branch-is-fine fields, pinned
     to a fetched-fresh exact commit. Add this the moment the tool points at a repo where

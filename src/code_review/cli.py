@@ -6,12 +6,14 @@ with no TUI flash), it runs `tui.app.ReviewApp` driven by `_run_pipeline` -- an 
 generator that builds `StepContext` (`cwd=Path.cwd()`, the user's real repo; `branch=branch`)
 from `_diff_against_default_branch` (fetched in a worker thread so a slow diff doesn't delay
 the TUI's first paint) and runs the implemented steps through `run_steps`, `steps/worktree.
-py`'s `WorktreeStep` first among them. `WorktreeStep` creates a throwaway `git worktree` with
-`<branch>` checked out for real (never `--detach`, so `steps/rebase.py`'s/`steps/pr.py`'s own
-"the branch under review is HEAD" assumption actually holds) and redirects every later
-step's `ctx.cwd` at it (`StepOutcome.cwd_override`, see `pipeline/AGENTS.md`'s WorktreeStep
-section) -- so a run never touches the user's real checkout, and this holds for any caller of
-`run_steps`, not only this command. `_capture_worktree_path` tees the event stream to record
+py`'s `WorktreeStep` first among them. `WorktreeStep` creates a throwaway `git worktree`
+checked out **detached** at `<branch>`'s tip commit -- never by name, so it can never
+collide with (or corrupt) `<branch>` already being checked out in the user's real repo,
+the ordinary case when reviewing the branch you're currently on (see `steps/worktree.py`'s
+module docstring) -- and redirects every later step's `ctx.cwd` at it (`StepOutcome.
+cwd_override`, see `pipeline/AGENTS.md`'s WorktreeStep section) -- so a run never touches
+the user's real checkout, and this holds for any caller of `run_steps`, not only this
+command. `_capture_worktree_path` tees the event stream to record
 `WorktreeStep`'s real worktree path (from its "completed" `StepEvent`) into a small mutable
 holder `review` reads once `tui_app.run()` returns: the worktree is removed then -- success,
 pipeline failure, or any uncaught exception -- unless `--keep-worktree` was passed, in which
@@ -366,16 +368,19 @@ def review(
         tui_app.run()
         asyncio.run(agent.close())
 
-        writer.write_line(final_status_message(tui_app.error))
+        writer.write_line(
+            final_status_message(
+                tui_app.error, report=tui_app.run_report, display_names=STEP_DISPLAY_NAMES
+            )
+        )
         writer.close()
         typer.echo(f"Run log written to {writer.path}")
 
         if tui_app.error is not None:
             # One generic path for any pipeline failure, including RunAbortedError (a human
-            # chose "abort" on a parked step's approval request) and WorktreeStep's own
-            # BranchAlreadyCheckedOutError (e.g. BRANCH already checked out in this repo) --
-            # each message already names the step/problem, so no dedicated branch per
-            # exception type is needed.
+            # chose "abort" on a parked step's approval request) and any plain RuntimeError
+            # from a step's own git/gh subprocess work -- each message already names the
+            # step/problem, so no dedicated branch per exception type is needed.
             typer.echo(f"code-review review failed: {tui_app.error}", err=True)
             raise typer.Exit(code=1)
     finally:

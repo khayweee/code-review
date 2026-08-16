@@ -1,4 +1,4 @@
-FindingsList {
+FindingBox {
     background: $bg-surface;
     color: $fg;
     border: round $border-color;
@@ -8,11 +8,11 @@ FindingsList {
 
 /* Overrides Textual's own `ListView { background: $surface; }` default, which would
 otherwise leak its builtin gray through in the row area behind each `Finding`. */
-FindingsList > _FindingsListView {
+FindingBox > _FindingsListView {
     height: auto;
     background: $bg-surface;
 }
 
-FindingsList .footer-hint {
+FindingBox .footer-hint {
     color: $fg-secondary;
 }

@@ -97,12 +97,12 @@ def _repo_on_feature_branch(origin_and_checkout: tuple[Path, Path]) -> Path:
     return checkout
 
 
-def _ctx(repo: Path, agent: _SpyAgent, **overrides: object) -> StepContext:
-    # branch is unread by PRStep (it re-derives "the branch under review" from ctx.cwd's
-    # HEAD via gitutils.current_branch, see pr.py's own module docstring) -- a fixed
-    # placeholder is fine here, only WorktreeStep reads ctx.branch.
+def _ctx(repo: Path, branch: str, agent: _SpyAgent, **overrides: object) -> StepContext:
+    # branch must be "the branch under review" PRStep would actually be reviewing -- it
+    # reads ctx.branch directly now (WorktreeStep's worktree is checked out detached, so
+    # there's no ctx.cwd HEAD to re-derive it from; see pr.py's own module docstring).
     defaults: dict[str, object] = dict(
-        cwd=repo, branch="unused-placeholder", agent=agent, diff="", intent=_STAND_IN_INTENT
+        cwd=repo, branch=branch, agent=agent, diff="", intent=_STAND_IN_INTENT
     )
     defaults.update(overrides)
     return StepContext(**defaults)  # type: ignore[arg-type]
@@ -129,7 +129,7 @@ def test_pr_step_skips_cleanly_with_no_gh_call_when_already_on_the_default_branc
     monkeypatch.setenv("FAKE_GH_LOG_FILE", str(log_file))
     agent = _SpyAgent()
 
-    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
+    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, "main", agent))
 
     assert agent.run_called is False
     assert outcome == StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
@@ -144,7 +144,9 @@ def test_pr_step_default_branch_is_overridable(
     monkeypatch.setenv("FAKE_GH_LOG_FILE", str(log_file))
     agent = _SpyAgent()
 
-    outcome = _run(PRStep(default_branch="trunk", gh_executable=FAKE_GH), _ctx(repo, agent))
+    outcome = _run(
+        PRStep(default_branch="trunk", gh_executable=FAKE_GH), _ctx(repo, "trunk", agent)
+    )
 
     assert outcome.needs_approval is False
     assert outcome.payload == []
@@ -163,7 +165,7 @@ def test_pr_step_creates_a_new_pr_when_none_exists_for_the_branch(
     monkeypatch.setenv("FAKE_GH_LOG_FILE", str(log_file))
     agent = _SpyAgent()
 
-    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
+    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, "feature", agent))
 
     assert agent.run_called is False
     assert outcome.needs_approval is False
@@ -209,7 +211,7 @@ def test_pr_step_updates_the_existing_pr_when_one_already_exists_for_the_branch(
     monkeypatch.setenv("FAKE_GH_LOG_FILE", str(log_file))
     agent = _SpyAgent()
 
-    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
+    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, "feature", agent))
 
     assert agent.run_called is False
     assert outcome.needs_approval is False
@@ -266,7 +268,7 @@ def test_pr_step_diffs_against_the_fetched_origin_default_branch_not_a_stale_loc
     monkeypatch.setenv("FAKE_GH_LOG_FILE", str(log_file))
     agent = _SpyAgent()
 
-    _run(PRStep(gh_executable=FAKE_GH), _ctx(checkout, agent))
+    _run(PRStep(gh_executable=FAKE_GH), _ctx(checkout, "feature", agent))
 
     create_call = next(
         c for c in _read_gh_log(log_file) if tuple(c["args"][:2]) == ("pr", "create")
@@ -311,6 +313,7 @@ def test_pr_step_body_includes_risk_and_testing_sections_from_prior_step_outcome
     )
     ctx = _ctx(
         repo,
+        "feature",
         agent,
         step_outcomes={
             "ReviewStep": review_outcome,
@@ -344,7 +347,7 @@ def test_pr_step_omits_risk_and_testing_sections_when_step_outcomes_is_empty(
     monkeypatch.setenv("FAKE_GH_LOG_FILE", str(log_file))
     agent = _SpyAgent()
 
-    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
+    outcome = _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, "feature", agent))
 
     assert outcome.needs_approval is False
     assert outcome.auto_fixable is False
@@ -371,7 +374,7 @@ def test_pr_step_omits_risk_section_when_the_step_outcomes_entry_has_the_wrong_p
     agent = _SpyAgent()
 
     mismatched = StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
-    ctx = _ctx(repo, agent, step_outcomes={"ReviewStep": mismatched})
+    ctx = _ctx(repo, "feature", agent, step_outcomes={"ReviewStep": mismatched})
 
     _run(PRStep(gh_executable=FAKE_GH), ctx)
 
@@ -391,4 +394,4 @@ def test_pr_step_raises_when_the_origin_remote_is_missing(tmp_path: Path) -> Non
     agent = _SpyAgent()
 
     with pytest.raises(RuntimeError, match="origin remote"):
-        _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, agent))
+        _run(PRStep(gh_executable=FAKE_GH), _ctx(repo, "feature", agent))

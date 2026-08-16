@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from code_review.agent import Agent, ClaudeCLI
+from code_review.agent import Agent, ClaudeCLI, Usage
 from code_review.pipeline import (
     ApprovalResponse,
     Step,
@@ -182,6 +182,24 @@ def test_test_sufficiency_step_outcome_is_clean_on_info_and_no_op_findings_only(
     assert len(findings.findings) == 1
 
     assert outcome.needs_approval is False
+
+
+def test_test_sufficiency_step_outcome_carries_the_agent_calls_usage(tmp_path: Path) -> None:
+    """`TestSufficiencyStep.run` threads `Result.usage` straight onto its returned
+    `StepOutcome.usage` -- `CLEAN_FAKE_CLI` reports `usage`/`total_cost_usd` (see
+    `claude_cli.py`'s `_usage_from`)."""
+
+    repo, diff = _real_repo_with_diff(tmp_path)
+    agent: Agent = ClaudeCLI()
+    ctx = StepContext(
+        cwd=repo, branch="unused-placeholder", agent=agent, diff=diff, intent=_EXPLICIT_INTENT
+    )
+    step: Step = TestSufficiencyStep(executable=CLEAN_FAKE_CLI)
+
+    outcome = _only_outcome(asyncio.run(_collect([step], ctx)))
+    asyncio.run(agent.close())
+
+    assert outcome.usage == Usage(input_tokens=900, output_tokens=210, total_cost_usd=0.0198)
 
 
 def test_test_sufficiency_step_needs_approval_on_an_ask_user_finding(tmp_path: Path) -> None:

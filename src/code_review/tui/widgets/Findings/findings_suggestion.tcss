@@ -1,12 +1,16 @@
+/* No `display: none` here (deliberately, see this file's own module docstring): a
+`display: none` child reserves zero layout space, which used to let `FindingsDescription`'s
+sibling `width: 1fr` silently expand to fill the whole row whenever this column had
+nothing to show. `FindingsSuggestion` now always occupies its `1fr` column -- only the
+border (drawn below, `.-visible` only) and this widget's own text content are what
+actually toggle with highlight state. */
 FindingsSuggestion {
     width: 1fr;
     padding: 0 1;
-    display: none;
     height: auto;
 }
 
 FindingsSuggestion.-visible {
-    display: block;
     border: round $border-color-muted;
 }
 
@@ -23,8 +27,8 @@ FindingsSuggestion .-chat-hint {
 }
 
 /* "Chat about it" (`self._custom`, `_CUSTOM_ENTRY`) should read as "type your own", not as
-another agent-generated suggestion -- `$fg-secondary` (also used by `FindingsList`'s own
-`.footer-hint`, `findings_list.tcss`) is the lighter, more-visible-than-`$fg-muted` gray of
+another agent-generated suggestion -- `$fg-secondary` (also used by `FindingBox`'s own
+`.footer-hint`, `finding.tcss`) is the lighter, more-visible-than-`$fg-muted` gray of
 this theme's two dim text tokens, and staying off `$fg-muted` keeps this entry visually
 distinct from `.-chat-hint`'s own dimmer reminder line above. */
 FindingsSuggestion .-custom-entry {

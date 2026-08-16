@@ -32,7 +32,6 @@ from code_review.pipeline.executor import run_steps
 from code_review.pipeline.step import StepContext, StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.worktree import (
-    BranchAlreadyCheckedOutError,
     WorktreeStep,
     create_worktree,
     remove_worktree,
@@ -171,7 +170,7 @@ def test_worktree_path_for_branch_names_it_with_the_sanitized_branch_and_short_s
 # --- create_worktree (async plumbing) -----------------------------------------------------
 
 
-def test_create_worktree_checks_out_the_branch_for_real_not_detached(
+def test_create_worktree_checks_out_the_branch_tip_detached(
     repo_with_feature_branch: tuple[Path, str],
 ) -> None:
     repo, branch = repo_with_feature_branch
@@ -186,22 +185,31 @@ def test_create_worktree_checks_out_the_branch_for_real_not_detached(
     assert worktree_path.is_dir()
     assert (worktree_path / "a.txt").read_text() == "line-a\nline-b\n"
     checked_out = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], worktree_path).stdout.strip()
-    assert checked_out == branch
+    assert checked_out == "HEAD"  # detached, never a real checkout of `branch` by name
+    tip = _run_git(["rev-parse", branch], repo).stdout.strip()
+    assert _run_git(["rev-parse", "HEAD"], worktree_path).stdout.strip() == tip
 
 
-def test_create_worktree_raises_a_clear_error_when_the_branch_is_already_checked_out(
+def test_create_worktree_succeeds_even_when_the_branch_is_already_checked_out_elsewhere(
     repo_with_feature_branch: tuple[Path, str],
 ) -> None:
+    """Regression pin: `repo`'s own HEAD is "main" (the fixture's own main working copy) --
+    this is exactly the case a real `review BRANCH` run hits whenever `BRANCH` is already
+    checked out in the user's real repo, the ordinary workflow of reviewing the branch
+    you're currently on. A detached checkout never collides, unlike a by-name one."""
+
     repo, _branch = repo_with_feature_branch
-    # "main" is already checked out in `repo` itself (the fixture's own main working copy).
 
     async def scenario() -> Path:
         worktree_path = await worktree_path_for_branch("main", repo)
         await create_worktree(repo, worktree_path, "main")
         return worktree_path
 
-    with pytest.raises(BranchAlreadyCheckedOutError, match="already checked out"):
-        asyncio.run(scenario())
+    worktree_path = asyncio.run(scenario())
+
+    assert worktree_path.is_dir()
+    # `repo`'s own checkout of "main" is untouched -- still a real, non-detached checkout.
+    assert _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo).stdout.strip() == "main"
 
 
 def test_create_worktree_raises_a_plain_runtime_error_for_an_unknown_branch(
@@ -210,9 +218,8 @@ def test_create_worktree_raises_a_plain_runtime_error_for_an_unknown_branch(
     repo, _branch = repo_with_feature_branch
     worktree_path = worktrees_root() / "code_review_does-not-exist_0000000"
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(RuntimeError, match="does-not-exist"):
         asyncio.run(create_worktree(repo, worktree_path, "does-not-exist"))
-    assert not isinstance(exc_info.value, BranchAlreadyCheckedOutError)
 
 
 # --- remove_worktree (sync, cli.py's post-pipeline cleanup) -------------------------------
@@ -228,8 +235,9 @@ def test_remove_worktree_removes_a_clean_worktree(
     remove_worktree("git", repo, worktree_path)
 
     assert not worktree_path.exists()
-    # The branch is free again once its worktree is gone.
-    _run_git(["worktree", "add", str(worktree_path), branch], repo)
+    # git's own worktree metadata (.git/worktrees/<name>) is fully unregistered too, not
+    # just the directory deleted -- otherwise re-adding the exact same path would fail.
+    _run_git(["worktree", "add", "--detach", str(worktree_path), branch], repo)
 
 
 def test_remove_worktree_force_removes_uncommitted_edits(
@@ -282,24 +290,30 @@ def test_worktree_step_creates_the_worktree_and_reports_it_via_cwd_override(
     checked_out = _run_git(
         ["rev-parse", "--abbrev-ref", "HEAD"], outcome.cwd_override
     ).stdout.strip()
-    assert checked_out == branch
+    assert checked_out == "HEAD"  # detached, never a real checkout of `branch` by name
+    tip = _run_git(["rev-parse", branch], repo).stdout.strip()
+    assert _run_git(["rev-parse", "HEAD"], outcome.cwd_override).stdout.strip() == tip
 
 
-def test_worktree_step_raises_when_branch_is_already_checked_out_elsewhere(
+def test_worktree_step_succeeds_when_branch_is_already_checked_out_elsewhere(
     repo_with_feature_branch: tuple[Path, str],
 ) -> None:
-    """`repo`'s own HEAD is "main" (see the fixture) -- requesting a worktree for "main"
-    collides with that, exactly the case a real `review BRANCH` run hits when `BRANCH` is
-    already checked out in the user's main working copy. Raised straight out of
-    `WorktreeStep.run`, uncaught -- `executor.run_steps` does nothing special with it, so it
-    propagates out of the async generator like any other step failure."""
+    """Regression pin: `repo`'s own HEAD is "main" (see the fixture) -- this is exactly the
+    case a real `review BRANCH` run hits whenever `BRANCH` is already checked out in the
+    user's real repo, the ordinary workflow of reviewing the branch you're currently on.
+    `WorktreeStep` must succeed here, not raise -- see `steps/worktree.py`'s module
+    docstring for why a detached checkout is what makes that safe."""
 
     repo, _feature_branch = repo_with_feature_branch
     agent = _SpyAgent()
     ctx = _ctx(repo, "main", agent)
 
-    with pytest.raises(BranchAlreadyCheckedOutError):
-        asyncio.run(_collect(ctx))
+    outcomes = asyncio.run(_collect(ctx))
+
+    assert len(outcomes) == 1
+    assert outcomes[0].cwd_override is not None
+    # `repo`'s own checkout of "main" is untouched -- still a real, non-detached checkout.
+    assert _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo).stdout.strip() == "main"
 
 
 # --- Activity reporting --------------------------------------------------------------------

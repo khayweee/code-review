@@ -6,20 +6,23 @@ submodule defines `X`.
 from __future__ import annotations
 
 from code_review.tui.widgets.base import _BorderedBox
-from code_review.tui.widgets.finding import Finding
-from code_review.tui.widgets.findings_description import (
-    FindingsDescription,
-    format_finding,
-    render_description,
-)
-from code_review.tui.widgets.findings_list import (
+from code_review.tui.widgets.Findings.finding import (
     _FOOTER_HINT,
-    FindingsList,
+    FindingBox,
     _findings_of,
     _findings_summary,
 )
-from code_review.tui.widgets.findings_list_view import _FindingsListView
-from code_review.tui.widgets.findings_suggestion import (
+from code_review.tui.widgets.Findings.findings_description import (
+    FindingExpandedDescription,
+    FindingsDescription,
+    FindingTitle,
+    format_finding,
+    render_description,
+    render_title,
+    truncate_to_one_line,
+)
+from code_review.tui.widgets.Findings.findings_list import Finding, _FindingsListView
+from code_review.tui.widgets.Findings.findings_suggestion import (
     _CUSTOM_ENTRY,
     FindingsSuggestion,
     _decision_entries,
@@ -55,9 +58,11 @@ from code_review.tui.widgets.styles import (
 
 __all__ = [
     "Finding",
+    "FindingBox",
+    "FindingExpandedDescription",
     "FindingsDescription",
-    "FindingsList",
     "FindingsSuggestion",
+    "FindingTitle",
     "PipelineBox",
     "StatusBox",
     "_ACTIVITY_STYLE",
@@ -91,4 +96,6 @@ __all__ = [
     "render_rows",
     "render_rows_live",
     "render_suggestions_plain",
+    "render_title",
+    "truncate_to_one_line",
 ]

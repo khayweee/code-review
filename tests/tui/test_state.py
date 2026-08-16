@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import pytest
 
+from code_review.agent import Usage
 from code_review.pipeline.findings import Finding
+from code_review.pipeline.run_report import PipelineRunReport, StepUsage
 from code_review.pipeline.schemas import StepEvent
 from code_review.pipeline.step import StepOutcome
 from code_review.steps.intent import Intent
@@ -619,6 +621,64 @@ def test_final_status_message_reports_the_error_when_present() -> None:
     assert "Press 'e' to exit." in message
 
 
+def test_final_status_message_with_no_report_is_unchanged_from_the_single_argument_form() -> None:
+    """`report=None` (the default) must leave output byte-for-byte identical to calling with
+    `error` alone -- no existing call site (or test) passing only `error` should ever see a
+    different message once `report`/`display_names` exist."""
+
+    assert final_status_message(None, report=None) == final_status_message(None)
+
+
+def test_final_status_message_with_an_empty_report_is_also_unchanged() -> None:
+    """A report with nothing to show (`format_run_report` returns `""`) must not append an
+    empty block either -- matches this codebase's "no box, not an empty box" discipline."""
+
+    empty_report = PipelineRunReport(
+        total_input_tokens=None, total_output_tokens=None, total_cost_usd=None, per_step=()
+    )
+
+    assert final_status_message(None, report=empty_report) == final_status_message(None)
+
+
+def test_final_status_message_appends_a_non_empty_report_between_the_outcome_and_exit_hint() -> (
+    None
+):
+    report = PipelineRunReport(
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_usd=0.01,
+        per_step=(
+            StepUsage(
+                step_name="ReviewStep",
+                usage=Usage(input_tokens=100, output_tokens=50, total_cost_usd=0.01),
+            ),
+        ),
+    )
+
+    message = final_status_message(None, report=report)
+
+    assert message.startswith("Pipeline ran successfully.")
+    assert "Tokens used: 100 in / 50 out ($0.0100)" in message
+    assert "  ReviewStep: 100 in / 50 out ($0.0100)" in message
+    assert message.endswith("Press 'e' to exit.")
+
+
+def test_final_status_message_translates_report_step_names_via_display_names() -> None:
+    report = PipelineRunReport(
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_usd=None,
+        per_step=(
+            StepUsage(step_name="ReviewStep", usage=Usage(input_tokens=100, output_tokens=50)),
+        ),
+    )
+
+    message = final_status_message(None, report=report, display_names={"ReviewStep": "Review"})
+
+    assert "  Review: 100 in / 50 out" in message
+    assert "ReviewStep" not in message
+
+
 # --- backfill_activities / StepRow.activities (issue #66) ---------------------------------
 
 
@@ -694,6 +754,31 @@ def test_backfill_activities_preserves_first_seen_order_across_multiple_activiti
     assert rows[1].label == "rebase"
     assert rows[1].status == "running"
     assert rows[1].duration == pytest.approx(0.3)
+
+
+def test_backfill_activities_nests_a_tool_call_under_the_agent_span_that_made_it() -> None:
+    """Issue regression: a tool call an agent makes (e.g. `tool_stream_relay`'s per-call
+    span, opened while `ReviewStep`'s own "Agent: ..." span is still the ambient activity)
+    must render as that agent span's own child, not as a sibling at the same indent."""
+
+    events: list[tuple[str | None, ActivityEvent]] = [
+        ("ReviewStep", ActivityEvent(1, None, "Agent: reviewing diff via claude", "started", 1.0)),
+        ("ReviewStep", ActivityEvent(2, 1, "Tool: Read(cli.py)", "started", 1.1)),
+        ("ReviewStep", ActivityEvent(2, 1, "Tool: Read(cli.py)", "finished", 1.3)),
+        ("ReviewStep", ActivityEvent(1, None, "Agent: reviewing diff via claude", "finished", 2.0)),
+    ]
+
+    rows = backfill_activities("ReviewStep", events, now=5.0)
+
+    assert len(rows) == 1
+    agent_row = rows[0]
+    assert agent_row.label == "Agent: reviewing diff via claude"
+    assert agent_row.status == "completed"
+    assert len(agent_row.children) == 1
+    tool_row = agent_row.children[0]
+    assert tool_row.label == "Tool: Read(cli.py)"
+    assert tool_row.status == "completed"
+    assert tool_row.duration == pytest.approx(0.2)
 
 
 def test_backfill_attaches_each_steps_own_activities_to_its_row() -> None:

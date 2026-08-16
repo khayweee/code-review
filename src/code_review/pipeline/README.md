@@ -143,8 +143,9 @@ purely structurally, wired in by `cli.py`.
 There are two independent choices, never more: **shape** (does this have a duration worth
 timing, or is it one already-finished moment?) and **access** (do you have a `StepContext`
 in hand, or only a reporter read implicitly from a shared slot -- see "No `ctx`" below).
-That gives four named entry points, all funnelling through the same two null-safe
-primitives in `step.py`:
+That gives the four named entry points below, plus a manually-paired third shape
+(`start_activity`/`finish_activity`, no `ctx`-bound variant) described after the table --
+all funnelling through null-safe primitives in `step.py`:
 
 |                | Block (has a start and an end)                     | One-shot (a point in time)            |
 | -------------- | -------------------------------------------------- | ------------------------------------- |
@@ -157,13 +158,24 @@ instead of taking the reporter as an argument. Both free functions are null-safe
 `None` reporter and they're a no-op, so a caller never has to branch on whether one is
 attached.
 
+A third shape exists for a block whose start and end can't share a Python `async with` body
+-- a span opened and closed from two different callback call sites, correlated by some id
+the caller already tracks. `start_activity(reporter, label) -> int | None` opens it and
+returns an `activity_id` (`None` when no reporter is attached); a later
+`finish_activity(reporter, activity_id, label, error=...)` closes it. `steps/
+tool_activity.py`'s `tool_stream_relay` is the one user today: it opens a span on a
+streamed `TOOL_USE` callback and closes it on the matching `TOOL_RESULT` callback
+(correlated by `payload["tool_id"]`), so the reported duration is the tool call's real
+elapsed time, not an instant one-shot log.
+
 How to choose:
 
 1. **Shape, first.** A block naturally pairs a "started" and a "finished" event and reports
    a duration -- use it for anything with real elapsed time (a subprocess call, an
-   agent-call span). A one-shot has no duration to track -- use it for something that has
-   already happened by the time you find out about it (e.g. one `TOOL_USE` callback from a
-   streamed agent run).
+   agent-call span, a streamed tool call). Reach for `start_activity`/`finish_activity`
+   only when that pairing can't live in one `async with` body (two separate callbacks). A
+   one-shot has no duration to track at all -- use it for something with no natural start
+   (e.g. one streamed `ASSISTANT_TEXT` narration block).
 2. **Access, second -- default to `ctx`.** Inside `Step.run(ctx)`, or any function that
    already receives `ctx`, always use `ctx.report_activity`/`ctx.log`. Only reach for the
    free functions (`report_activity(current_activity_reporter.get(), label)` /
@@ -179,7 +191,7 @@ How to choose:
    `StepContext` itself should grow instead (see `pipeline/AGENTS.md`'s Milestone 14 entry).
 
 Never construct `ActivityEvent` or reach for an `ActivityRelay` instance directly outside
-`tui/activity.py` -- always go through one of the four entry points above.
+`tui/activity.py` -- always go through one of the entry points above.
 
 ```python
 # Block, ctx-bound -- the common case inside a step.
@@ -187,13 +199,18 @@ async with ctx.report_activity("Agent: reviewing diff via claude"):
     result = await ctx.agent.run(opts)
 
 # One-shot, ctx-bound -- a single already-finished event.
-await ctx.log("Tool: Read(/path/to/file)")
+await ctx.log("Agent: Checking the auth module for a missing nil check")
 
 # Block, no ctx -- shared helper code with no StepContext to read from.
 async with report_activity(current_activity_reporter.get(), label) as activity:
     process = await asyncio.create_subprocess_exec("git", *args, ...)
     if process.returncode != 0:
         activity.fail(f"exit {process.returncode}")
+
+# Manually-paired span, no ctx -- open/close from two different callbacks (tool_stream_relay).
+activity_id = await start_activity(reporter, "Tool: Read(/path/to/file)")
+open_calls[tool_id] = (activity_id, label)  # ... later, on the matching TOOL_RESULT ...
+await finish_activity(reporter, activity_id, label, error=error)
 ```
 
 **Pass/fail signal**: `activity()`/`report_activity(...)` yield an `ActivityHandle`

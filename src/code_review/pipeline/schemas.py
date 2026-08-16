@@ -74,7 +74,7 @@ class StepEvent:
 @dataclass(frozen=True, slots=True)
 class FindingDecision:
     """One finding paired with the human's `ApprovalResponse` decided against it: the
-    building block `tui.widgets.FindingsList._resolve_park` accumulates one per row, in
+    building block `tui.widgets.FindingBox._resolve_park` accumulates one per row, in
     `self._rows` order, before folding all of them into `describe_finding_decisions`.
 
     A plain frozen dataclass, not a pydantic `BaseModel`, matching every other

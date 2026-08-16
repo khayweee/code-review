@@ -25,9 +25,8 @@ from code_review.pipeline.findings import describe_finding_decisions
 from code_review.pipeline.schemas import ApprovalDecision, ApprovalResponse, FindingDecision
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
-from code_review.tui.widgets.finding import Finding
-from code_review.tui.widgets.findings_list_view import _FindingsListView
-from code_review.tui.widgets.findings_suggestion import _CUSTOM_ENTRY
+from code_review.tui.widgets.Findings.findings_list import Finding, _FindingsListView
+from code_review.tui.widgets.Findings.findings_suggestion import _CUSTOM_ENTRY
 
 
 def _findings_of(
@@ -55,7 +54,7 @@ _FOOTER_HINT = (
 )
 
 
-class FindingsList(Vertical):
+class FindingBox(Vertical):
     """A bordered box showing the most recently completed step's findings.
 
     Hosts a child `_FindingsListView` (one `Finding` per finding), a severity-count
@@ -65,7 +64,7 @@ class FindingsList(Vertical):
     """
 
     DEFAULT_CSS = (
-        Path(__file__).with_name("tokens.tcss").read_text()
+        (Path(__file__).parent.parent / "tokens.tcss").read_text()
         + "\n"
         + Path(__file__).with_suffix(".tcss").read_text()
     )
@@ -423,9 +422,9 @@ class FindingsList(Vertical):
         Confirming a suggestion or "Chat about it" records "fix"; "s" records "skip"; "x"
         (abort) resolves the whole run immediately regardless of per-row progress. Resets
         every row's decision to undecided at the start, since a fix-round can re-park the
-        same `FindingsList`. Awaits `_await_list_view()` rather than the plain
+        same `FindingBox`. Awaits `_await_list_view()` rather than the plain
         `_list_view()` so the initial `.focus()` lands even if this coroutine starts
-        before `FindingsList` finishes composing; restores plain display in a `finally`
+        before `FindingBox` finishes composing; restores plain display in a `finally`
         regardless of how the park resolved.
         """
 

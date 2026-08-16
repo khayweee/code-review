@@ -120,7 +120,7 @@ class TestSufficiencyStep(Step):
             # runs TestSufficiencyStep against a fake CLI without a
             # StepContext.activity_reporter. Mirrors ReviewStep.run's identical gating.
             on_stream_event = (
-                tool_stream_relay(ctx.activity_reporter)
+                tool_stream_relay(ctx.activity_reporter, ctx.cwd)
                 if ctx.activity_reporter is not None
                 else None
             )
@@ -145,4 +145,5 @@ class TestSufficiencyStep(Step):
             needs_approval=blocking,
             auto_fixable=auto_fixable,
             payload=output,
+            usage=result.usage,
         )
