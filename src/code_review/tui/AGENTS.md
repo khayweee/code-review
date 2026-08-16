@@ -120,25 +120,29 @@ construction-order cycle — `cli.py` needs the callback bound into `StepContext
 generator, so neither side can hold a live reference to the other. `cli.py` builds the relay
 first and hands one side to `StepContext`, the other to `ReviewApp`.
 
-- `InputRelay.request_input(prompt) -> str` / `next_request()`: one line of free-text input
-  for a blocked backend subprocess (`StepContext.on_input_needed`), collected via
-  `InputPromptScreen`.
+- `InputRelay.request_input(prompt) -> str` / `next_request() -> InputRequest`: one line of
+  free-text input for a blocked backend subprocess (`StepContext.on_input_needed`),
+  collected via `InputPromptScreen`. `InputRequest` (`tui/schemas.py`) is a frozen dataclass
+  pairing `prompt` with `pending_answer`, the `asyncio.Future[str]` `next_request`'s caller
+  resolves.
 - `ActivityRelay.activity(label)` (async context manager) / `next_event()`: nested sub-step
   progress (`StepContext.report_activity`, e.g. `gitutils.run_git`, `ReviewStep`'s agent
   call). Nesting/`parent_id` is automatic via a `contextvars.ContextVar`. `ActivityRelay`
   itself never knows which step an activity belongs to — see `_tag_activity_events` in
   `app.py` for that correlation. `activity()` yields an `ActivityHandle` (`pipeline.step`)
   the block's own body can call `.fail(detail)` on; the matching "finished" `ActivityEvent`
-  carries that as `error`, and `state.py`'s `backfill_activities` renders it `"failed"`
-  (`ActivityRow.detail` set to the error text) instead of `"completed"`. `ActivityRelay`
-  also takes an optional `on_event` callback, invoked synchronously alongside every queued
-  event — `run_log.py`'s `RunLogWriter` is the one consumer today, persisting the same
-  stream to a per-run log file (`cli.py` wires it in).
-- `ApprovalRelay.request_approval(step_name, outcome) -> ApprovalResponse` / `next_request()`:
-  a parked step's approve/skip/fix/abort decision, called from
-  `pipeline.executor.run_steps` itself (not from a step — see `pipeline/AGENTS.md`'s "The
-  approval park"). `ApprovalDecision`/`ApprovalResponse` are imported from `pipeline.step`,
-  not redefined here.
+  (`tui/schemas.py`) carries that as `error`, and `state.py`'s `backfill_activities` renders
+  it `"failed"` (`ActivityRow.detail` set to the error text) instead of `"completed"`.
+  `ActivityRelay` also takes an optional `on_event` callback, invoked synchronously alongside
+  every queued event — `run_log.py`'s `RunLogWriter` is the one consumer today, persisting
+  the same stream to a per-run log file (`cli.py` wires it in).
+- `ApprovalRelay.request_approval(step_name, outcome) -> ApprovalResponse` /
+  `next_request() -> ApprovalRequest`: a parked step's approve/skip/fix/abort decision,
+  called from `pipeline.executor.run_steps` itself (not from a step — see
+  `pipeline/AGENTS.md`'s "The approval park"). `ApprovalRequest` (`tui/schemas.py`) is a
+  frozen dataclass pairing `step_name`/`outcome` with `pending_response`, the
+  `asyncio.Future[ApprovalResponse]` `next_request`'s caller resolves. `ApprovalDecision`/
+  `ApprovalResponse` are imported from `pipeline.schemas`, not redefined here.
 
 ## `screens.py` — `InputPromptScreen`
 

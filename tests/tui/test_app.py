@@ -19,13 +19,15 @@ from textual.widgets import Input, Static
 
 from code_review.pipeline.executor import RunAbortedError
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import ApprovalResponse, StepEvent, StepOutcome
+from code_review.pipeline.schemas import ApprovalResponse, StepEvent
+from code_review.pipeline.step import StepOutcome
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
-from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.activity import ActivityRelay
 from code_review.tui.app import ReviewApp, _tag_activity_events
 from code_review.tui.approval_relay import ApprovalRelay
 from code_review.tui.input_relay import InputRelay
+from code_review.tui.schemas import ActivityEvent
 from code_review.tui.screens import InputPromptScreen
 from code_review.tui.widgets import Finding as FindingItem
 from code_review.tui.widgets import (

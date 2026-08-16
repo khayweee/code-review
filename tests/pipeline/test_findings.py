@@ -22,7 +22,7 @@ from code_review.pipeline.findings import (
     filter_pipeline_owned_delivery_findings,
     has_blocking_finding,
 )
-from code_review.pipeline.step import ApprovalResponse
+from code_review.pipeline.schemas import ApprovalResponse, FindingDecision
 from code_review.steps.review import ReviewOutput
 
 
@@ -296,13 +296,13 @@ def test_scope_filter_leaves_an_already_low_risk_level_untouched() -> None:
 
 def test_describe_finding_decisions_renders_one_line_per_fix_decided_finding() -> None:
     decisions = [
-        (
-            _finding(severity="warning", description="unclear naming", location="a.py:1"),
-            ApprovalResponse(decision="fix", instructions="rename it"),
+        FindingDecision(
+            finding=_finding(severity="warning", description="unclear naming", location="a.py:1"),
+            response=ApprovalResponse(decision="fix", instructions="rename it"),
         ),
-        (
-            _finding(severity="error", description="missing null check"),
-            ApprovalResponse(decision="fix", instructions="add a guard clause"),
+        FindingDecision(
+            finding=_finding(severity="error", description="missing null check"),
+            response=ApprovalResponse(decision="fix", instructions="add a guard clause"),
         ),
     ]
 
@@ -314,13 +314,13 @@ def test_describe_finding_decisions_renders_one_line_per_fix_decided_finding() -
 
 def test_describe_finding_decisions_omits_skip_decided_findings() -> None:
     decisions = [
-        (
-            _finding(severity="warning", description="unclear naming"),
-            ApprovalResponse(decision="fix", instructions="rename it"),
+        FindingDecision(
+            finding=_finding(severity="warning", description="unclear naming"),
+            response=ApprovalResponse(decision="fix", instructions="rename it"),
         ),
-        (
-            _finding(severity="info", description="minor style nit"),
-            ApprovalResponse(decision="skip", instructions=None),
+        FindingDecision(
+            finding=_finding(severity="info", description="minor style nit"),
+            response=ApprovalResponse(decision="skip", instructions=None),
         ),
     ]
 
@@ -329,8 +329,12 @@ def test_describe_finding_decisions_omits_skip_decided_findings() -> None:
 
 def test_describe_finding_decisions_is_empty_when_every_finding_was_skipped() -> None:
     decisions = [
-        (_finding(), ApprovalResponse(decision="skip", instructions=None)),
-        (_finding(), ApprovalResponse(decision="skip", instructions=None)),
+        FindingDecision(
+            finding=_finding(), response=ApprovalResponse(decision="skip", instructions=None)
+        ),
+        FindingDecision(
+            finding=_finding(), response=ApprovalResponse(decision="skip", instructions=None)
+        ),
     ]
 
     assert describe_finding_decisions(decisions) == ""

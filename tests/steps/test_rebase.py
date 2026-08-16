@@ -39,10 +39,12 @@ from code_review.agent import RunOpts
 from code_review.agent.base import OutputT, Result
 from code_review.pipeline.executor import run_steps
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import ApprovalResponse, StepContext, StepOutcome
+from code_review.pipeline.schemas import ApprovalResponse
+from code_review.pipeline.step import StepContext, StepOutcome
 from code_review.steps.intent import Intent
 from code_review.steps.rebase import RebaseStep
-from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.activity import ActivityRelay
+from code_review.tui.schemas import ActivityEvent
 from tests.steps.conftest import commit_file
 
 _STAND_IN_INTENT = Intent(summary="add retry logic", source="explicit", score=1.0)

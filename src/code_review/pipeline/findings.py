@@ -30,9 +30,10 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-# Top-level import (not TYPE_CHECKING-gated): findings.py and step.py both live in
-# pipeline/, and step.py never imports findings.py, so no cycle here.
-from code_review.pipeline.step import ApprovalResponse
+# Top-level import (not TYPE_CHECKING-gated): findings.py and schemas.py both live in
+# pipeline/, and schemas.py never imports findings.py at runtime (only TYPE_CHECKING, for
+# FindingDecision's own `finding: Finding` field), so no cycle here.
+from code_review.pipeline.schemas import FindingDecision
 
 if TYPE_CHECKING:
     # steps/ depends on pipeline/, never the reverse; ReviewOutput/TestSufficiencyOutput/
@@ -153,7 +154,7 @@ def describe_auto_fix_findings(
     payload: list[Finding] | ReviewOutput | TestSufficiencyOutput | Intent | PullRequestOutcome,
 ) -> str:
     """Render every finding in `payload` whose resolved action is "auto-fix" as fix-round
-    instructions text (`pipeline.step.FixRound.instructions`).
+    instructions text (`pipeline.schemas.FixRound.instructions`).
 
     `payload` is `StepOutcome.payload`: a bare `list[Finding]`, a
     `ReviewOutput`/`TestSufficiencyOutput` with a `.findings` list, or an `Intent`/
@@ -184,7 +185,7 @@ def describe_auto_fix_findings(
     return "\n".join(lines)
 
 
-def describe_finding_decisions(decisions: list[tuple[Finding, ApprovalResponse]]) -> str:
+def describe_finding_decisions(decisions: list[FindingDecision]) -> str:
     """Render every `"fix"`-decided finding in `decisions` as combined fix-round
     instructions text, for `tui.widgets.FindingsList`'s per-finding approval-park
     aggregation (`FindingsList._resolve_park` combines per-row decisions into the single
@@ -199,7 +200,8 @@ def describe_finding_decisions(decisions: list[tuple[Finding, ApprovalResponse]]
     """
 
     lines = []
-    for finding, response in decisions:
+    for decision in decisions:
+        finding, response = decision.finding, decision.response
         if response.decision != "fix":
             continue
         location = f" ({finding.location})" if finding.location else ""

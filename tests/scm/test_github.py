@@ -29,7 +29,8 @@ from code_review.scm.github import (
     resolve_repo_slug,
     update_pull_request,
 )
-from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.activity import ActivityRelay
+from code_review.tui.schemas import ActivityEvent
 
 FAKE_GH = Path(__file__).parent / "fakes" / "gh_fake.py"
 

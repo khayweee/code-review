@@ -10,6 +10,10 @@ currently open in the running coroutine, so a nested block records the enclosing
 its own `parent_id` with no call site passing a parent id explicitly.
 
 One `ActivityRelay` instance is built per pipeline run, not per agent call.
+
+`ActivityEvent`/`ActivityStatus` are passive plumbing types, not defined in this file --
+they live in `tui/schemas.py` (imported here at top level) alongside `ApprovalRequest`/
+`InputRequest`, this package's other queued-request shapes.
 """
 
 from __future__ import annotations
@@ -19,34 +23,16 @@ import contextvars
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from itertools import count
-from typing import Literal
 
 from code_review.pipeline.step import ActivityHandle
-
-ActivityStatus = Literal["started", "finished"]
+from code_review.tui.schemas import ActivityEvent
 
 # Currently open activity in the running coroutine, or None. Set/reset only by
 # `ActivityRelay.activity`; scoped correctly per asyncio task by `contextvars` itself.
 _current_activity_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "_current_activity_id", default=None
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ActivityEvent:
-    """One reported activity transition: an `activity()` block starting or finishing."""
-
-    activity_id: int
-    # Derived from whichever activity was open when this one started; None if top-level.
-    parent_id: int | None
-    label: str
-    status: ActivityStatus
-    timestamp: float  # time.monotonic()
-    # Set only on a "finished" event whose block called ActivityHandle.fail(detail); None
-    # on every "started" event and every successful "finished" one.
-    error: str | None = None
 
 
 class ActivityRelay:

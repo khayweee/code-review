@@ -45,7 +45,8 @@ from code_review.steps.gitutils import (
     ref_sha,
     run_git,
 )
-from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.activity import ActivityRelay
+from code_review.tui.schemas import ActivityEvent
 from tests.steps.conftest import commit_file
 
 # --- run_git -----------------------------------------------------------------------------

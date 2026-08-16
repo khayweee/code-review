@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from code_review.pipeline.step import FixRound, StepContext
+from code_review.pipeline.schemas import FixRound
+from code_review.pipeline.step import StepContext
 from code_review.prompt.test_sufficiency import (
     build_test_sufficiency_fix_prompt,
     build_test_sufficiency_prompt,

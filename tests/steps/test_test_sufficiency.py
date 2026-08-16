@@ -36,7 +36,8 @@ from code_review.pipeline import (
 )
 from code_review.steps.intent import Intent
 from code_review.steps.test_sufficiency import TestSufficiencyOutput, TestSufficiencyStep
-from code_review.tui.activity import ActivityEvent, ActivityRelay
+from code_review.tui.activity import ActivityRelay
+from code_review.tui.schemas import ActivityEvent
 
 # --- TestSufficiencyOutput schema shape ---------------------------------------------------
 

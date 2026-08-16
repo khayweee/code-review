@@ -18,7 +18,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Input, ListItem
 
 from code_review.pipeline.findings import Finding as FindingData
-from code_review.pipeline.step import ApprovalResponse
+from code_review.pipeline.schemas import ApprovalResponse
 from code_review.tui.widgets.findings_description import FindingsDescription
 from code_review.tui.widgets.findings_suggestion import FindingsSuggestion, _decision_entries
 

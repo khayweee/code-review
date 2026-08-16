@@ -21,7 +21,7 @@ from textual.color import Color
 from textual.widgets import Input, ListItem, Static
 
 from code_review.pipeline.findings import Finding
-from code_review.pipeline.step import ApprovalResponse
+from code_review.pipeline.schemas import ApprovalResponse
 from code_review.steps.review import ReviewOutput
 from code_review.steps.test_sufficiency import TestSufficiencyOutput
 from code_review.tui.state import ActivityRow, StepRow

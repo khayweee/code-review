@@ -5,8 +5,8 @@ out of scope, see `docs/ROADMAP.md`/`pipeline/README.md`'s milestone 2 rationale
 schema, no resume logic, and never read back by this tool itself. `cli.py`'s `review`
 command is the sole writer; anyone else wants this file, they open it in a text editor.
 
-Depends on both `pipeline.step.StepEvent` and `tui.activity.ActivityEvent`, so it lives here
-rather than under `pipeline/`/`steps/` (which must never import `tui/`).
+Depends on both `pipeline.schemas.StepEvent` and `tui.schemas.ActivityEvent`, so it lives
+here rather than under `pipeline/`/`steps/` (which must never import `tui/`).
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import TextIO
 
 from code_review.install_state import state_dir
-from code_review.pipeline.step import StepEvent
-from code_review.tui.activity import ActivityEvent
+from code_review.pipeline.schemas import StepEvent
+from code_review.tui.schemas import ActivityEvent
 
 
 def _sanitize_branch_for_log_filename(branch: str) -> str:

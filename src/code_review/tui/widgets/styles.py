@@ -5,7 +5,7 @@ variables at runtime, so these stay separate literal constants)."""
 
 from __future__ import annotations
 
-from code_review.pipeline.step import ApprovalDecision
+from code_review.pipeline.schemas import ApprovalDecision
 from code_review.tui.state import Status
 
 # Text fallback glyph per status; the live pipeline view uses a Rich Spinner for "running".

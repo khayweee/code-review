@@ -14,14 +14,15 @@ from pathlib import Path
 import pytest
 
 from code_review.install_state import STATE_DIR_ENV_VAR
-from code_review.pipeline.step import StepEvent, StepOutcome
+from code_review.pipeline.schemas import StepEvent
+from code_review.pipeline.step import StepOutcome
 from code_review.run_log import (
     RunLogWriter,
     format_activity_event_line,
     format_step_event_line,
     run_log_path,
 )
-from code_review.tui.activity import ActivityEvent
+from code_review.tui.schemas import ActivityEvent
 
 _OUTCOME = StepOutcome(needs_approval=False, auto_fixable=False, payload=[])
 

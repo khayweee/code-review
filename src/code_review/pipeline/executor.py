@@ -63,12 +63,8 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 
 from code_review.pipeline.findings import describe_auto_fix_findings
-from code_review.pipeline.step import (
-    Step,
-    StepContext,
-    StepEvent,
-    current_activity_reporter,
-)
+from code_review.pipeline.schemas import StepEvent
+from code_review.pipeline.step import Step, StepContext, current_activity_reporter
 
 # Cap on automatic fix-round re-runs before a still-auto_fixable outcome falls through to a
 # park instead of looping forever. Not a config field or CLI flag. 2 lets a step recover
@@ -171,6 +167,8 @@ async def run_steps(steps: list[Step], ctx: StepContext) -> AsyncIterator[StepEv
 
             if round_ctx.on_approval_needed is None:
                 raise ApprovalNotAttachedError(step_name)
+
+            # Blocks until the human answers the park. "approve"/"skip" both just continue to the
             response = await round_ctx.on_approval_needed(step_name, outcome)
             if response.decision == "abort":
                 raise RunAbortedError(step_name)
