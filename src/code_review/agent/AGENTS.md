@@ -66,6 +66,17 @@ conventions.
   (`tests/agent/fakes/blocks_on_stdin.py`); its prompt-detection framing (an idle-timeout
   heuristic on stdout) has not been validated against the real `claude` CLI's actual
   stdin-blocking behavior.
+- Never read the streaming path's NDJSON with `StreamReader.readline()`. Past the reader's
+  64 KiB limit it drops the buffered line and raises `ValueError("Separator is found, but
+  chunk is longer than limit")` — which a stream-json line carrying a large tool result (a
+  whole-file `Read`, a wide `Edit`) hits routinely, aborting a review mid-run. Raising the
+  limit only moves the ceiling; `_read_stream_line` reassembles a line of any length from
+  bounded reads instead. Same caution for any future line-oriented reader here.
+- `_run_streaming` cancels its stderr pump when unwinding on an exception rather than
+  awaiting it. Once the stdout loop stops draining, the child can sit blocked on a full
+  stdout pipe and never close stderr, so awaiting the pump on that path deadlocks and
+  buries the original exception — `terminate_process_group` in `run()`'s `finally` reaps
+  the group regardless. Only the success path awaits the pump for its bytes.
 - Test fakes that read the whole prompt from stdin (`_shared.py`'s `read_prompt`) must
   branch on whether `--dangerously-skip-permissions` is in `sys.argv`: present means the
   parent used `communicate()` and sent EOF, so a blocking `sys.stdin.read()` is correct;
