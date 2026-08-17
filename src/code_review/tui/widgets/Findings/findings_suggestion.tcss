@@ -1,13 +1,14 @@
 /* No `display: none` here (deliberately, see this file's own module docstring): a
 `display: none` child reserves zero layout space, which used to let `FindingsDescription`'s
-sibling `width: 1fr` silently expand to fill the whole row whenever this column had
-nothing to show. `FindingsSuggestion` now always occupies its `1fr` column -- only the
-border (drawn below, `.-visible` only) and this widget's own text content are what
-actually toggle with highlight state. */
+sibling column silently expand to fill the whole row whenever this column had nothing to
+show. `FindingsSuggestion` now always occupies its grid column (width from `Finding`'s own
+`grid-columns: 1fr 1fr` in `findings_list.tcss`, height from this widget's own
+`height: 100%` stretching to that row's `grid-rows: auto`) -- only the border (drawn
+below, `.-visible` only) and this widget's own text content are what actually toggle with
+highlight state. */
 FindingsSuggestion {
-    width: 1fr;
     padding: 0 1;
-    height: auto;
+    height: 100%;
 }
 
 FindingsSuggestion.-visible {

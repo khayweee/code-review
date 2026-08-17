@@ -1,5 +1,8 @@
 Finding {
-    layout: horizontal;
+    layout: grid;
+    grid-size: 2 1;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
     height: auto;
 }
 

@@ -269,7 +269,13 @@ Status box's "no box, not an empty box" rule.
 
 The list of finding rows, in one module since together they constitute "the list of
 findings": `Finding` is one row (composes `FindingsDescription` + `FindingsSuggestion` in
-a horizontal split, shadows `pipeline.findings.Finding` deliberately — imported there as
+a 2x1 `grid` -- `grid-columns: 1fr 1fr` for the 50/50 split, `grid-rows: auto` so the row's
+height is the taller column's own content height, with both columns stretched to that
+height via `height: 100%` -- not a plain `layout: horizontal`, which leaves each column's
+`height: auto` independent of its sibling: whichever column had less content (a short
+description next to a multi-entry suggestion list, or vice versa) then rendered a
+`border-right`/box border that stopped short of the row's actual height instead of running
+the full way down. `Finding` shadows `pipeline.findings.Finding` deliberately — imported there as
 `FindingData` — since this widget's identity *is* "one finding, rendered." Owns three
 pieces of per-row state: display mode (`hidden`/`plain`/`decision`), a decision-cycle
 browsing cursor, and the row's own recorded `ApprovalResponse`, `None` until decided.
@@ -283,10 +289,12 @@ the highlighted row's decision entries, digits 1-9 jump to that entry, "f" opens
 
 ### `FindingsDescription` (`Findings/findings_description.py`)
 
-The left column, `width: 1fr` matched to `FindingsSuggestion`'s own `1fr` so every row
-shares an identical 50/50 split regardless of highlight state, plus a `border-right`
-divider present on EVERY row (see `FindingsSuggestion` below for why that divider has to
-live here rather than there). A `Vertical` composing two children: `FindingTitle` --
+The left column -- column width is now the parent `Finding` grid's own `grid-columns: 1fr
+1fr` (not this widget's own `width`), so every row shares an identical 50/50 split
+regardless of highlight state -- plus a `height: 100%` (stretching to the grid row's
+already-resolved `auto` height, see `Finding` above) and a `border-right` divider present
+on EVERY row (see `FindingsSuggestion` below for why that divider has to live here rather
+than there). A `Vertical` composing two children: `FindingTitle` --
 severity dot, decided-marker, `<severity>: <one-line-truncated description>{ (location)}`
 (`truncate_to_one_line`, `_TITLE_MAX_CHARS`) -- renders on every row, always; `Finding
 ExpandedDescription` -- the full, untruncated `finding.description` -- only while that
@@ -302,12 +310,15 @@ Textual.
 
 The right column: that finding's `suggestions`, or — while parked and highlighted — a live
 decision cycle (`suggestions` + a trailing "Chat about it" entry). Standalone module, no
-dependency on any other widget here. Always occupies its `1fr` column (no `display: none`
+dependency on any other widget here. Always occupies its grid column (no `display: none`
 toggle -- see `.tcss`'s own comment): a `display: none` child reserves zero layout space,
-which used to let `FindingsDescription`'s sibling `1fr` silently expand to fill the whole
-row whenever this column had nothing to show. The `-visible` class now only toggles the
-border + `FindingsDescription`'s own `border-right` is what actually marks the column
-boundary on every row, not just the highlighted one; `clear()`/`show_plain()`/
+which used to let `FindingsDescription`'s sibling column silently expand to fill the whole
+row whenever this column had nothing to show. Column width comes from `Finding`'s own
+`grid-columns: 1fr 1fr` and height from this widget's own `height: 100%` (stretching to
+the grid row's `grid-rows: auto` height, same mechanism as `FindingsDescription` above --
+see `Finding`'s entry for why a plain `height: auto` sibling isn't enough). The `-visible`
+class now only toggles the border + `FindingsDescription`'s own `border-right` is what
+actually marks the column boundary on every row, not just the highlighted one; `clear()`/`show_plain()`/
 `show_decision()` still toggle this column's actual text content.
 
 - Confirming "Chat about it" (or cycling/jumping onto it) swaps that trailing line for a
