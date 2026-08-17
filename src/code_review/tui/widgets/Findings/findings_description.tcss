@@ -1,7 +1,6 @@
 FindingsDescription {
-    width: 1fr;
     padding: 0 1;
-    height: auto;
+    height: 100%;
     border-right: solid $border-color-muted;
 }
 

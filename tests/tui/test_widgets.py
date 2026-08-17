@@ -1229,6 +1229,49 @@ def test_findings_description_draws_a_border_right_divider_on_every_row() -> Non
     asyncio.run(scenario())
 
 
+def test_findings_description_border_right_spans_the_full_row_height() -> None:
+    """Regression test for the broken/misaligned divider bug: `FindingsDescription` and
+    `FindingsSuggestion` are independent `height: auto` siblings, so whichever column has
+    more content (a long wrapped description vs. several suggestion/decision-cycle lines)
+    used to determine its own height alone -- the shorter column's `border-right` (or
+    `FindingsSuggestion`'s own `-visible` box border) then stopped short of the row's
+    actual height instead of running the full way down. Both columns must stretch to the
+    same, full row height regardless of which one's content is naturally taller."""
+
+    async def scenario() -> None:
+        output = ReviewOutput(
+            findings=[
+                Finding(
+                    severity="warning",
+                    description="short",
+                    review_scope="source",
+                    suggestions=["one", "two", "three", "four"],
+                ),
+            ],
+            risk_level="high",
+            risk_rationale="bad",
+        )
+        app = _FindingsHostApp(output, "ReviewStep")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            box = app.query_one(FindingBox)
+            row = box.query_one(FindingItem)
+            description = row.query_one(FindingsDescription)
+            suggestion = row.query_one(FindingsSuggestion)
+
+            assert suggestion.has_class("-visible")
+            # The suggestion column (4 entries) is taller than the description column
+            # (one short title line) -- both must still report the same rendered height.
+            assert description.region.height == suggestion.region.height == row.region.height
+            # Bounded to the suggestion column's own natural content height (title/border
+            # lines + 4 entries) -- guards against a fix that satisfies the equality above
+            # by stretching every row to fill the whole available height instead of
+            # matching the taller sibling's actual content.
+            assert row.region.height < 10, f"row grew past its natural content: {row.region}"
+
+    asyncio.run(scenario())
+
+
 # def test_findings_list_highlighted_row_recolors_text_with_no_background_fill() -> None:
 #     """The highlighted row must not get a solid background fill -- Textual's own two
 #     built-in `ListView` highlight rules (`_list_view.py`'s blurred `& > ListItem.-highlight`
