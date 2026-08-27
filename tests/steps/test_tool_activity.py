@@ -44,29 +44,29 @@ def test_tool_activity_label_leaves_paths_unchanged_when_no_cwd_given() -> None:
     )
 
 
-def test_assistant_text_label_prefixes_with_agent_and_the_first_line() -> None:
+def test_assistant_text_label_prefixes_with_says_and_the_first_line() -> None:
     assert assistant_text_label("Let me check the auth module for a missing nil check") == (
-        "Agent: Let me check the auth module for a missing nil check"
+        "Says: Let me check the auth module for a missing nil check"
     )
 
 
 def test_assistant_text_label_collapses_to_only_the_first_line() -> None:
     content = "Checking the diff first.\nThen I'll look at the tests."
-    assert assistant_text_label(content) == "Agent: Checking the diff first."
+    assert assistant_text_label(content) == "Says: Checking the diff first."
 
 
 def test_assistant_text_label_strips_leading_and_trailing_whitespace() -> None:
     assert (
-        assistant_text_label("  \n  Reviewing the changes  \n  ") == "Agent: Reviewing the changes"
+        assistant_text_label("  \n  Reviewing the changes  \n  ") == "Says: Reviewing the changes"
     )
 
 
 def test_assistant_text_label_does_not_truncate_a_long_first_line() -> None:
     first_line = "x" * 200
 
-    assert assistant_text_label(first_line) == f"Agent: {first_line}"
+    assert assistant_text_label(first_line) == f"Says: {first_line}"
 
 
 def test_assistant_text_label_renders_a_placeholder_for_empty_content() -> None:
-    assert assistant_text_label("") == "Agent: (no text)"
-    assert assistant_text_label("   \n  ") == "Agent: (no text)"
+    assert assistant_text_label("") == "Says: (no text)"
+    assert assistant_text_label("   \n  ") == "Says: (no text)"
