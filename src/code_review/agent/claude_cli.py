@@ -394,11 +394,15 @@ def _usage_from(response: JsonValue) -> Usage | None:
     parsed = Usage(
         input_tokens=_optional_int(usage.get("input_tokens")),
         output_tokens=_optional_int(usage.get("output_tokens")),
+        cache_creation_input_tokens=_optional_int(usage.get("cache_creation_input_tokens")),
+        cache_read_input_tokens=_optional_int(usage.get("cache_read_input_tokens")),
         total_cost_usd=_optional_float(response.get("total_cost_usd")),
     )
     if (
         parsed.input_tokens is None
         and parsed.output_tokens is None
+        and parsed.cache_creation_input_tokens is None
+        and parsed.cache_read_input_tokens is None
         and parsed.total_cost_usd is None
     ):
         return None

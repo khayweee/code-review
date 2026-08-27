@@ -69,15 +69,17 @@ def tool_activity_label(tool_name: str, tool_input: dict[str, Any], cwd: Path | 
 
 def assistant_text_label(content: str) -> str:
     """Render one streamed assistant-text block as an activity label, e.g.
-    `Agent: Let me check the auth module for a missing nil check` -- collapsed to its
+    `Says: Let me check the auth module for a missing nil check` -- collapsed to its
     first line (any further lines are the model's own continued narration, reported as
     later, separate `ASSISTANT_TEXT` events instead). Not truncated: the Pipeline box
     renders this through Rich's default word-wrap, so a long line wraps onto a
-    continuation line in the box rather than being cut off with an ellipsis.
+    continuation line in the box rather than being cut off with an ellipsis. Prefixed
+    `Says:` rather than `Agent:` so these per-line narration events don't read as nesting
+    "Agent" under the step's own `Agent: ... via claude` span in the activity tree.
     """
 
     first_line = content.strip().splitlines()[0] if content.strip() else ""
-    return f"Agent: {first_line}" if first_line else "Agent: (no text)"
+    return f"Says: {first_line}" if first_line else "Says: (no text)"
 
 
 def tool_stream_relay(

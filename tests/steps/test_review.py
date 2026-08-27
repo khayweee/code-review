@@ -602,7 +602,7 @@ def test_review_step_logs_an_errored_tool_result_as_its_own_activity(tmp_path: P
 
 def test_review_step_logs_streamed_assistant_text_as_its_own_activity(tmp_path: Path) -> None:
     """`tool_stream_relay` (`steps/tool_activity.py`) also logs `ASSISTANT_TEXT` events --
-    the model's own streamed narration, not just its tool calls -- as a one-shot `Agent:
+    the model's own streamed narration, not just its tool calls -- as a one-shot `Says:
     ...` activity, via `assistant_text_label`. Proven against
     `STREAMS_ASSISTANT_TEXT_FAKE_CLI`'s real stream-json transcript (one text block, one
     tool call, non-error result). `run_steps` yields exactly one round here, so this
@@ -641,7 +641,7 @@ def test_review_step_logs_streamed_assistant_text_as_its_own_activity(tmp_path: 
     assert agent_started.label == "Agent: reviewing diff via claude"
 
     assert text_started.status == "started"
-    assert text_started.label == "Agent: Checking the auth module for a missing nil check"
+    assert text_started.label == "Says: Checking the auth module for a missing nil check"
     assert text_started.parent_id == agent_started.activity_id
     assert text_finished.activity_id == text_started.activity_id
 

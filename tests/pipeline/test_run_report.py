@@ -42,18 +42,35 @@ def _running(step_name: str, *, started_at: float = 0.0) -> StepEvent:
 def test_build_run_report_with_a_single_step_reports_its_usage_as_the_totals() -> None:
     events = [
         _running("ReviewStep"),
-        _completed("ReviewStep", Usage(input_tokens=100, output_tokens=50, total_cost_usd=0.01)),
+        _completed(
+            "ReviewStep",
+            Usage(
+                input_tokens=100,
+                output_tokens=50,
+                cache_creation_input_tokens=30,
+                cache_read_input_tokens=900,
+                total_cost_usd=0.01,
+            ),
+        ),
     ]
 
     report = build_run_report(events)
 
     assert report.total_input_tokens == 100
     assert report.total_output_tokens == 50
+    assert report.total_cache_creation_input_tokens == 30
+    assert report.total_cache_read_input_tokens == 900
     assert report.total_cost_usd == 0.01
     assert report.per_step == (
         StepUsage(
             step_name="ReviewStep",
-            usage=Usage(input_tokens=100, output_tokens=50, total_cost_usd=0.01),
+            usage=Usage(
+                input_tokens=100,
+                output_tokens=50,
+                cache_creation_input_tokens=30,
+                cache_read_input_tokens=900,
+                total_cost_usd=0.01,
+            ),
         ),
     )
 
@@ -151,7 +168,12 @@ def test_build_run_report_with_no_usage_anywhere_reports_none_totals_and_no_per_
     report = build_run_report(events)
 
     assert report == PipelineRunReport(
-        total_input_tokens=None, total_output_tokens=None, total_cost_usd=None, per_step=()
+        total_input_tokens=None,
+        total_output_tokens=None,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
+        total_cost_usd=None,
+        per_step=(),
     )
 
 
@@ -168,7 +190,12 @@ def test_build_run_report_ignores_a_still_running_event_with_no_outcome_yet() ->
 
 def test_format_run_report_is_empty_string_when_per_step_is_empty() -> None:
     report = PipelineRunReport(
-        total_input_tokens=None, total_output_tokens=None, total_cost_usd=None, per_step=()
+        total_input_tokens=None,
+        total_output_tokens=None,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
+        total_cost_usd=None,
+        per_step=(),
     )
 
     assert format_run_report(report) == ""
@@ -178,6 +205,8 @@ def test_format_run_report_renders_totals_and_a_line_per_step() -> None:
     report = PipelineRunReport(
         total_input_tokens=1234,
         total_output_tokens=567,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
         total_cost_usd=0.0891,
         per_step=(
             StepUsage(
@@ -200,10 +229,62 @@ def test_format_run_report_renders_totals_and_a_line_per_step() -> None:
     )
 
 
+def test_format_run_report_shows_cache_figures_as_distinct_segments_when_present() -> None:
+    """Cache reads/writes are billed at different rates than fresh input tokens, so they're
+    surfaced as their own labeled segments, never folded into the "in" count (issue #131)."""
+
+    report = PipelineRunReport(
+        total_input_tokens=2,
+        total_output_tokens=13889,
+        total_cache_creation_input_tokens=1500,
+        total_cache_read_input_tokens=482000,
+        total_cost_usd=1.2345,
+        per_step=(
+            StepUsage(
+                step_name="ReviewStep",
+                usage=Usage(
+                    input_tokens=2,
+                    output_tokens=13889,
+                    cache_creation_input_tokens=1500,
+                    cache_read_input_tokens=482000,
+                    total_cost_usd=1.2345,
+                ),
+            ),
+        ),
+    )
+
+    text = format_run_report(report)
+
+    assert text == (
+        "Tokens used: 2 in / 482,000 cache read / 1,500 cache write / 13,889 out ($1.2345)\n"
+        "  ReviewStep: 2 in / 482,000 cache read / 1,500 cache write / 13,889 out ($1.2345)"
+    )
+
+
+def test_format_run_report_omits_cache_segments_when_no_step_reported_them() -> None:
+    report = PipelineRunReport(
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
+        total_cost_usd=None,
+        per_step=(
+            StepUsage(step_name="ReviewStep", usage=Usage(input_tokens=100, output_tokens=50)),
+        ),
+    )
+
+    text = format_run_report(report)
+
+    assert "cache" not in text
+    assert text.splitlines()[0] == "Tokens used: 100 in / 50 out"
+
+
 def test_format_run_report_translates_step_names_via_display_names() -> None:
     report = PipelineRunReport(
         total_input_tokens=100,
         total_output_tokens=50,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
         total_cost_usd=None,
         per_step=(
             StepUsage(step_name="ReviewStep", usage=Usage(input_tokens=100, output_tokens=50)),
@@ -220,6 +301,8 @@ def test_format_run_report_omits_cost_when_total_cost_usd_is_none() -> None:
     report = PipelineRunReport(
         total_input_tokens=100,
         total_output_tokens=50,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
         total_cost_usd=None,
         per_step=(
             StepUsage(step_name="ReviewStep", usage=Usage(input_tokens=100, output_tokens=50)),
@@ -236,6 +319,8 @@ def test_format_run_report_shows_cost_only_when_token_counts_are_none() -> None:
     report = PipelineRunReport(
         total_input_tokens=None,
         total_output_tokens=None,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
         total_cost_usd=0.05,
         per_step=(StepUsage(step_name="ReviewStep", usage=Usage(total_cost_usd=0.05)),),
     )
