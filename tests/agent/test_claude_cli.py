@@ -100,6 +100,45 @@ def test_zero_usage_is_distinguished_from_missing_usage(tmp_path: Path) -> None:
     assert usage == Usage(input_tokens=0, output_tokens=0, total_cost_usd=0.0)
 
 
+def test_usage_from_extracts_cache_fields() -> None:
+    response = {
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 7,
+            "cache_creation_input_tokens": 120,
+            "cache_read_input_tokens": 9000,
+        },
+        "total_cost_usd": 0.5,
+    }
+
+    usage = claude_cli_module._usage_from(response)
+
+    assert usage == Usage(
+        input_tokens=5,
+        output_tokens=7,
+        cache_creation_input_tokens=120,
+        cache_read_input_tokens=9000,
+        total_cost_usd=0.5,
+    )
+
+
+def test_usage_from_with_only_cache_fields_is_not_treated_as_missing() -> None:
+    """A cache-heavy agentic run where every "input" token is a cache hit reports
+    `input_tokens: None`, not 0 -- this must not fall into the "no usage at all"
+    early-return (issue #131's actual root cause)."""
+
+    response = {
+        "usage": {
+            "cache_creation_input_tokens": 50,
+            "cache_read_input_tokens": 4000,
+        }
+    }
+
+    usage = claude_cli_module._usage_from(response)
+
+    assert usage == Usage(cache_creation_input_tokens=50, cache_read_input_tokens=4000)
+
+
 def test_large_prompt_is_sent_over_stdin(tmp_path: Path) -> None:
     prompt = "x" * 200_000
 

@@ -634,7 +634,12 @@ def test_final_status_message_with_an_empty_report_is_also_unchanged() -> None:
     empty block either -- matches this codebase's "no box, not an empty box" discipline."""
 
     empty_report = PipelineRunReport(
-        total_input_tokens=None, total_output_tokens=None, total_cost_usd=None, per_step=()
+        total_input_tokens=None,
+        total_output_tokens=None,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
+        total_cost_usd=None,
+        per_step=(),
     )
 
     assert final_status_message(None, report=empty_report) == final_status_message(None)
@@ -646,6 +651,8 @@ def test_final_status_message_appends_a_non_empty_report_between_the_outcome_and
     report = PipelineRunReport(
         total_input_tokens=100,
         total_output_tokens=50,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
         total_cost_usd=0.01,
         per_step=(
             StepUsage(
@@ -667,6 +674,8 @@ def test_final_status_message_translates_report_step_names_via_display_names() -
     report = PipelineRunReport(
         total_input_tokens=100,
         total_output_tokens=50,
+        total_cache_creation_input_tokens=None,
+        total_cache_read_input_tokens=None,
         total_cost_usd=None,
         per_step=(
             StepUsage(step_name="ReviewStep", usage=Usage(input_tokens=100, output_tokens=50)),

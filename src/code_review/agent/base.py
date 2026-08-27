@@ -56,6 +56,8 @@ class Usage:
 
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
     total_cost_usd: float | None = None
 
 
