@@ -158,9 +158,9 @@ async def _run_streaming(
             if obj.get("type") == "result":
                 result_response = cast(JsonValue, obj)
 
-            # Parse and emit observable events
-            event = _parse_stream_line(obj, session_id)
-            if event:
+            # Parse and emit observable events, one per interesting content block --
+            # a single line can carry several (e.g. parallel tool_use/tool_result blocks).
+            for event in _parse_stream_line(obj, session_id):
                 await opts.on_stream_event(event)
 
     except BaseException:
@@ -200,9 +200,19 @@ async def _read_stream_line(stream: asyncio.StreamReader) -> bytes:
         return b"".join(chunks)
 
 
-def _parse_stream_line(obj: dict[str, object], session_id: str | None) -> StreamEvent | None:
-    """Convert a stream-json line into an observable StreamEvent, or None if not interesting."""
+def _parse_stream_line(obj: dict[str, object], session_id: str | None) -> list[StreamEvent]:
+    """Convert a stream-json line into its observable StreamEvents, one per interesting
+    content block (empty list if none).
 
+    A single line's `message.content` array can carry several blocks in one turn -- most
+    notably parallel `tool_use` calls, whose results likewise all arrive bundled into one
+    later `"user"`-type line's `content` array (one `tool_result` per `tool_use` id, same
+    order). Looping over every block here (rather than returning on the first match) is
+    what lets `tool_stream_relay` (`steps/tool_activity.py`) see -- and later close -- every
+    one of them; returning early would silently drop every block after the first.
+    """
+
+    events: list[StreamEvent] = []
     msg_type = obj.get("type")
 
     if msg_type == "assistant":
@@ -214,57 +224,68 @@ def _parse_stream_line(obj: dict[str, object], session_id: str | None) -> Stream
                     continue
 
                 if block.get("type") == "tool_use":
-                    return StreamEvent(
-                        type=StreamEventType.TOOL_USE,
-                        payload={
-                            "tool_name": block.get("name"),
-                            "tool_id": block.get("id"),
-                            "input": block.get("input", {}),
-                        },
-                        timestamp=time.time(),
-                        session_id=session_id,
+                    events.append(
+                        StreamEvent(
+                            type=StreamEventType.TOOL_USE,
+                            payload={
+                                "tool_name": block.get("name"),
+                                "tool_id": block.get("id"),
+                                "input": block.get("input", {}),
+                            },
+                            timestamp=time.time(),
+                            session_id=session_id,
+                        )
                     )
                 elif block.get("type") == "text":
                     text_content = block.get("text", "")
                     if text_content:  # Only emit non-empty text
-                        return StreamEvent(
-                            type=StreamEventType.ASSISTANT_TEXT,
-                            payload={"content": text_content},
-                            timestamp=time.time(),
-                            session_id=session_id,
+                        events.append(
+                            StreamEvent(
+                                type=StreamEventType.ASSISTANT_TEXT,
+                                payload={"content": text_content},
+                                timestamp=time.time(),
+                                session_id=session_id,
+                            )
                         )
                 elif block.get("type") == "thinking":
                     thinking_content = block.get("thinking", "")
                     if thinking_content:
-                        return StreamEvent(
-                            type=StreamEventType.THINKING,
-                            payload={"content": thinking_content[:500]},  # Truncate for display
-                            timestamp=time.time(),
-                            session_id=session_id,
+                        events.append(
+                            StreamEvent(
+                                type=StreamEventType.THINKING,
+                                payload={"content": thinking_content[:500]},  # Truncate for display
+                                timestamp=time.time(),
+                                session_id=session_id,
+                            )
                         )
 
     elif msg_type == "user":
-        # Tool result being fed back to agent. Correlates via the block's own
+        # Tool results being fed back to agent. Correlates via each block's own
         # "tool_use_id" -- the top-level "parent_tool_use_id" is unrelated (it names the
         # tool call, if any, that a *subagent* is nested under, not the tool this result
-        # answers).
+        # answers). Parallel tool_use calls in the prior assistant turn all land here
+        # bundled into this one message's content array, one tool_result block each.
         message = obj.get("message")
         if isinstance(message, dict):
-            content = message.get("content", [])
-            if content and isinstance(content[0], dict):
-                if content[0].get("type") == "tool_result":
-                    return StreamEvent(
-                        type=StreamEventType.TOOL_RESULT,
-                        payload={
-                            "tool_id": content[0].get("tool_use_id"),
-                            "output": content[0].get("content", ""),
-                            "is_error": content[0].get("is_error", False),
-                        },
-                        timestamp=time.time(),
-                        session_id=session_id,
+            for block in message.get("content", []):
+                if not isinstance(block, dict):
+                    continue
+
+                if block.get("type") == "tool_result":
+                    events.append(
+                        StreamEvent(
+                            type=StreamEventType.TOOL_RESULT,
+                            payload={
+                                "tool_id": block.get("tool_use_id"),
+                                "output": block.get("content", ""),
+                                "is_error": block.get("is_error", False),
+                            },
+                            timestamp=time.time(),
+                            session_id=session_id,
+                        )
                     )
 
-    return None
+    return events
 
 
 async def _run_with_stdin_relay(
