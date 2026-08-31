@@ -114,16 +114,87 @@ schema/orchestration split and its fix-mode support.
 ## pr.py
 
 Assembles PR evidence and opens the pull request via `gh` - the pipeline's last step
-(Milestone 8, issue #119).
+(Milestone 8, issues #119/#121/#152/#122).
 
-- Fully deterministic for this ticket - no agent/LLM call anywhere in `PRStep.run`. Title
-  is a static conventional-commit-style placeholder (`"chore: update pull request"`);
-  "What Changed" comes straight from `gitutils.run_git(["diff", "--name-status",
-  f"origin/{default_branch}...{branch}"], ...)`, called directly here per `gitutils.py`'s
-  own anticipated-consumer note rather than needing a second gitutils primitive. #121
-  (blocked by this ticket) replaces the title/"What Changed" section with an agent draft
-  plus this same deterministic fallback; #122 adds a PR-body byte-budget/truncation rule
-  and screenshot/video artifacts. Neither exists yet.
+- Pushes the branch to `origin` (`_push_branch_to_origin`, via `gitutils.run_git`, so it
+  reports as ambient TUI activity) before find-or-create: `gh pr create --head <branch>`
+  needs a remote head and nothing earlier in the pipeline pushes, so a branch that exists
+  only locally - the most ordinary case - used to fail here. Placed after the
+  default-branch skip and `resolve_repo_slug` but *before* the drafting call, so an
+  unpushable branch costs no LLM call (pinned by a `_SpyAgent` assertion in the rejection
+  tests).
+  - **Pushes `refs/heads/<branch>:refs/heads/<branch>`, never `HEAD`.** `WorktreeStep`
+    checks out detached and `RebaseStep` rebases that detached HEAD, so inside `ctx.cwd`
+    `HEAD` is rewritten history that does not belong to the branch ref; pushing it would
+    publish those commits as the branch. Worktrees share the repository's common ref store
+    (only `HEAD` is per-worktree), so the explicit refspec resolves fine from the worktree.
+  - **Never `--force`/`--force-with-lease`** (nor `-u`, which would write to the user's git
+    config for nothing). A rejected push raises `RuntimeError` naming the branch and quoting
+    git's stderr - `RuntimeError` for consistency with `run`'s existing unresolvable-slug
+    raise, rather than `scm/github.py`'s `GhCommandError`, which specifically means "a `gh`
+    subprocess failed" and would misname a `git` failure. `_PUSH_REJECTED_MARKER`
+    (`"[rejected]"`) distinguishes a divergence, whose message says outright that this step
+    will not force, from any other nonzero exit. Already-published and up to date is `git
+    push`'s own exit-0 no-op and is deliberately not special-cased.
+- Exactly one agent call (`PRStep.run` → `PRStep._draft`), against the `PRDraft` schema
+  (`title`, `what_changed`), prompt built by `code_review.prompt.pr.build_pr_draft_prompt`.
+  Same shape as `ReviewStep.run`'s call: `executable` test seam, one static
+  `ctx.report_activity("Agent: drafting pull request via claude")` span, `tool_stream_relay`
+  for `on_stream_event` only when `ctx.activity_reporter` is set, `result.usage` threaded
+  onto the returned `StepOutcome.usage`.
+- Deterministic fallback: `_draft` catches `AgentError` (`agent/errors.py`'s base class)
+  around the `ctx.agent.run` call *only*, reports it via `ActivityHandle.fail` rather than
+  swallowing it silently, and returns `None`. `run` answers that with `_FALLBACK_TITLE`
+  (`"chore: update pull request"`) plus `_deterministic_what_changed_section`, which renders
+  `gitutils.run_git(["diff", "--name-status", f"origin/{default_branch}...{branch}"], ...)`
+  as one markdown bullet per changed path ("added", "renamed old -> new", each path in a
+  code span) rather than as raw tab-separated text, which GitHub renders as one run-on
+  line - `run_git` called directly here per `gitutils.py`'s own anticipated-consumer
+  note rather than needing a second gitutils primitive. Never a bare `except Exception`: the
+  surrounding `resolve_repo_slug`/`gh` work has no fallback and must still raise.
+- Drafted output is sanitized in code before use, not merely asked for in the prompt:
+  `_sanitized_title` (whitespace-flattened, leading `#` markers stripped, capped at
+  GitHub's 256-char limit, `_FALLBACK_TITLE` when nothing survives) and
+  `_cleaned_what_changed_bullets` (drops blanks, strips a `-`/`*`/`+` marker the agent added
+  itself, drops an echoed `## What Changed`/`## Intent`/`## Risk Assessment`/`## Evidence`/
+  `## Testing` heading in either prefixed or unprefixed form). No surviving bullet falls back to the
+  deterministic section. Keep these as separately-testable pure functions, not inlined in
+  `run`.
+- `## Evidence` (#122) renders `PRDraft.demonstrations` (`Demonstration`: `kind`, `label`,
+  `given`/`was`/`now`) deterministically in code - the agent returns plain text only. Every
+  shape below was checked against GitHub's real renderer via `POST /markdown`, `mode=gfm`;
+  re-verify there before changing one.
+  - `api` -> bolded label over a fenced `http` exchange (that info string is what GitHub
+    highlights as an HTTP transcript). `Was:`/`Now:` labels appear only when both responses
+    are present; a lone response goes in bare, since there is nothing to disambiguate.
+  - `behavior` -> ONE table for all of them (`Behavior | Given | Was | Now`), never a table
+    per demonstration, which is visually heavy and defeats a glanceable section. The `Was`
+    column is dropped when no row has a prior value.
+  - Validity is enforced in code, not asked for in the prompt: `_escaped_table_cell`
+    flattens newlines and escapes `|`; `_fence_long_enough_for` grows the fence past any
+    backtick run in the payload (CommonMark's own mechanism - it contains a nested ``` while
+    leaving what the reviewer reads byte-identical, unlike mutating the payload).
+    `_is_renderable` drops anything with no label, or with neither `given` nor `now`, and
+    an all-unrenderable list omits the heading entirely rather than emitting an empty one.
+  - Section order is What Changed, Intent, Risk Assessment, Evidence, Testing: Evidence sits
+    next to Testing because it is the same claim made concrete.
+  - Media (screenshot/video) evidence is deliberately absent and must not be added back: a
+    run's own files have no durable home to link to, and GitHub's sanitizer strips `<video>`
+    and leaves a relative `![](path)` relative (404 under `/pull/N/`). No `location` field,
+    no media `kind`.
+- `_fit_body_to_github_limit` keeps the body under GitHub's 65536-char cap, measuring each
+  form in turn and returning the first that fits: full body -> demonstrations degraded to
+  label-only bullets -> Evidence dropped -> Testing's `tested` list dropped (summary stays)
+  -> `_truncated_at_a_line_boundary` (cuts on a newline so no markdown construct is left
+  half-rendered, with the visible marker counted inside the budget). `what_changed`/`intent`/
+  `risk` are never shed and are ordered first, so even the truncation eats the sheddable
+  tail first. Pure - no `StepContext`, no subprocess - so the shedding order is tested
+  directly rather than by generating a 65KB body through a fake CLI.
+- Grounding: `_observed_testing_material` formats `TestSufficiencyOutput`'s `tested`/
+  `artifacts` (same absent-case contract as the Testing section) and hands the string to
+  `build_pr_draft_prompt(ctx, observed_testing=...)`. `prompt/` never imports `steps/`, so
+  the narrowing lives here, not there. Still one `ctx.agent.run` call - demonstrations come
+  back from the same draft as the title and bullets.
 - Diffs against `origin/<default_branch>`, never the literal local `<default_branch>` ref -
   mirrors `RebaseStep`'s own `git rebase origin/<default_branch>` for the identical reason:
   `RebaseStep` runs earlier in this same pipeline and already does `git fetch origin
@@ -137,8 +208,8 @@ Assembles PR evidence and opens the pull request via `gh` - the pipeline's last 
   module docstring), so `gitutils.current_branch(ctx.cwd)` would just return `None` here;
   `gh pr create --head`/`gh pr view` only ever needed the branch as a name, never an actual
   local checkout of it. Equal to `default_branch` (a constructor field, same "not
-  auto-detected" reasoning as `RebaseStep`'s own) means skip immediately - no `git diff`/
-  `gh` call at all.
+  auto-detected" reasoning as `RebaseStep`'s own) means skip immediately - no agent call,
+  no `git diff`, no `gh` call at all.
 - Intent/Risk/Testing sections are assembled from the pipeline's own already-computed
   state: `ctx.intent.summary` for Intent, and `ctx.step_outcomes.get("ReviewStep")` /
   `ctx.step_outcomes.get("TestSufficiencyStep")` (see `pipeline/AGENTS.md`'s
@@ -152,12 +223,11 @@ Assembles PR evidence and opens the pull request via `gh` - the pipeline's last 
   through the full executor.
 - Find-or-create/update goes through `scm/github.py`: `find_pull_request_for_branch` first,
   then `create_pull_request` or `update_pull_request` depending on whether one already
-  exists for the branch. `gh_executable: str | Path = "gh"` is the subprocess test seam,
-  mirroring `ReviewStep.executable`.
-- Returns the same empty-findings-shape `StepOutcome(needs_approval=False,
-  auto_fixable=False, payload=[])` on every path (skip, create, update) - a PR isn't a
-  review target with findings to fix, so `supports_fix_round` stays at `Step`'s default
-  `False`.
+  exists for the branch. `gh_executable: str | Path = "gh"` is the subprocess test seam for
+  those, `executable` the one for the agent call, both mirroring `ReviewStep.executable`.
+- Never blocks: `needs_approval=False, auto_fixable=False` on every path (skip, create,
+  update) - a PR isn't a review target with findings to fix, so `supports_fix_round` stays
+  at `Step`'s default `False`.
 
 ## rebase.py
 
