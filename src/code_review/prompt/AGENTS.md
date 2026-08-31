@@ -90,5 +90,63 @@ agent could use to claim untested code is covered.
     local constants, not imports from `review.py` — this package's own "no cross-step
     sharing" rule (issue #58).
 
-Once PR's own prompt builder lands (Milestone 8), record here whether it gets its own
-module in this package or shares one of the above.
+## `pr.py`
+
+**Purpose:** builds the single prompt `PRStep` sends the agent to draft a pull-request
+title and its "What Changed" bullets (into `steps/pr.py`'s `PRDraft`). Its own module, not
+a share of `review.py`/`test_sufficiency.py` -- none of its clauses overlap theirs, and this
+package's no-cross-step-sharing rule (issue #58) applies.
+
+- `build_pr_draft_prompt(ctx)`
+  - Technique: diff -> wrapped intent (`wrap_intent`, called here rather than threaded in
+    from a prior `StepOutcome`) -> four always-present guardrail clauses in fixed order (no
+    conditional clause, same as `test_sufficiency.py`):
+    - `_TITLE_FORMAT_RULE` -- Conventional Commits `<type>(<scope>): <summary>`, imperative,
+      lowercase summary, no trailing period, matching this repo's own commit history.
+    - `_WHAT_CHANGED_RULE` -- a countable budget (at most 5 bullets, at most 20 words
+      each), headline first, about what behaves differently rather than a file inventory --
+      and explicitly not a bullet for the tests/fixtures/support modules a change needed,
+      unless the change itself IS the tests. Closes with one worked bad-vs-good example
+      bullet, deliberately about an unrelated made-up change so it can't bias the draft
+      toward the diff being read.
+    - `_DEMONSTRATION_RULE` -- at most 4 demonstrations, and a countable budget per cell:
+      `label` at most 6 words (a short *name* for the behavior, never a sentence and never
+      the claim), `given`/`was`/`now` at most 10 each and shaped as values (literal,
+      identifier, status code, short phrase; backticked when literal). Explicitly forbids a
+      trailing justification/citation in a cell, a `now` restating its own label, and
+      describing what a test asserts instead of what the system does. A demonstration that
+      will not fit the budget is omitted, not squeezed in -- an empty list is a correct
+      answer, and the Evidence section is then correctly absent. Keeps the concrete-values
+      demand (status codes, timings, exact error text) and carries its own worked
+      bad-vs-good example, whose bad row fails specifically on length and prose-shape so the
+      contrast isolates that defect. `tests/prompt/test_pr.py` measures both example rows
+      against the budgets the rule states.
+    - `_GENERATED_SECTIONS_PROHIBITION` -- write no Intent/Risk Assessment/Testing content;
+      `steps/pr.py` assembles those deterministically from the pipeline's own state, so an
+      agent's copy is a paraphrase rendered twice. Its closing "restrict yourself to" list
+      names demonstrations, or it would read as forbidding them.
+    - `_NO_MARKDOWN_HEADINGS_RULE` -- plain text in every field; the body adds its own
+      headings, bullet markers, tables, and fences.
+  - `_DEMONSTRATION_GROUNDING_RULE` also says the observations are material, not text to
+    quote: no copying one into a cell, no citing a test name or file location there. Added
+    after a real run emitted a cell ending `-- pinned by tests/steps/test_pr.py:239`, which
+    is the artifact locations in that material leaking straight through. It is appended,
+    followed by the caller's `observed_testing` string, only when that argument is supplied -- never as an empty pointer at material
+    that isn't there. `prompt/` never imports `steps/`, so `steps/pr.py`'s
+    `_observed_testing_material` is what reads `TestSufficiencyOutput` off
+    `ctx.step_outcomes` and formats it; this module only takes the finished string. It
+    reduces invented demonstrations, it does not prevent them -- PRStep-side drafting was
+    chosen knowing that.
+  - Why this shape: `_WHAT_CHANGED_RULE` earlier said "aim for 3 to 6 bullets" and "one
+    sentence per bullet"; a real `claude` run against this repo's own diff satisfied both
+    with five ~33-word bullets, one of them a per-module inventory bullet. A model can hold
+    to a count, not to a vague "short" -- and a prohibition it can pattern-match an example
+    against beats one stated in the abstract.
+  - Enforcement asymmetry, on purpose, and it is one policy covering both budgets: the
+    title-length and heading/marker rules are re-enforced in code by `steps/pr.py`'s
+    `_sanitized_title`/`_cleaned_what_changed_bullets`, because truncating a title or
+    stripping a marker is always safe. Neither the what_changed bullet budget nor
+    `_DEMONSTRATION_RULE`'s cell budgets are, and neither must be: chopping a bullet or an
+    evidence cell mid-word corrupts what the reviewer reads -- the same reasoning that made
+    `steps/pr.py` grow a code fence past a nested ``` rather than mutate the payload. Both
+    are asked for, and pinned by `tests/prompt/test_pr.py`, nothing more.
